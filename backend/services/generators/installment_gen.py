@@ -103,7 +103,7 @@ def generate_installment_plan(
     elements.append(Spacer(1, 20))
 
     patient_info = [
-        ["Patient :"Synthetic Patient"{patient.nom} {patient.prenom}"],
+        ["Patient :", f"{patient.nom} {patient.prenom}"],
         ["Traitement :", plan.title],
         ["Montant Total :", f"{plan.total_amount:.2f} MAD"],
         ["Date :", datetime.now().strftime("%d/%m/%Y")]
