@@ -1,0 +1,313 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { BrainCircuit, Check, ArrowRight, Zap } from 'lucide-react';
+import { api, API_BASE } from '../services/api';
+import { useAuthStore } from '../stores/useAuthStore';
+import { Link, useNavigate } from 'react-router-dom';
+
+const buildGhostBrainWsUrl = (employerId: number | string) => {
+  const baseUrl = `${API_BASE.replace(/^http/, 'ws')}/api/ai/ws/ghost-insights/${employerId}`;
+  const token = localStorage.getItem('token') || sessionStorage.getItem('token');
+  return token ? `${baseUrl}?token=${encodeURIComponent(token)}` : baseUrl;
+};
+
+// Typewriter Effect Component
+const TypewriterText = ({ text, delay = 5 }: { text: string, delay?: number }) => {
+  const [currentText, setCurrentText] = useState('');
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  useEffect(() => {
+    if (currentIndex < text.length) {
+      const timeout = setTimeout(() => {
+        setCurrentText(prevText => prevText + text[currentIndex]);
+        setCurrentIndex(prevIndex => prevIndex + 1);
+      }, delay);
+      return () => clearTimeout(timeout);
+    }
+  }, [currentIndex, delay, text]);
+
+  return <span>{currentText}</span>;
+};
+
+export const GhostBrainWidget = () => {
+  // Keep the server snapshot and local acknowledged removals atomic. A delayed
+  // HTTP ACK must not decrement a newer WebSocket snapshot's unread count.
+  const { user } = useAuthStore();
+  const employerId = user?.employer_id || user?.id;
+  const scopeKey = `${employerId ?? ''}:${user?.id ?? ''}`;
+  // A -> B -> A can restore the same scopeKey while an A-era HTTP read ACK
+  // is still pending. A monotonically increasing epoch prevents that old
+  // response from acknowledging A's new session with colliding insight IDs.
+  const scopeEpochRef = useRef(0);
+  const [alertState, setAlertState] = useState<{ scopeKey: string; insights: any[]; unreadCount: number }>({
+    scopeKey: '', insights: [], unreadCount: 0,
+  });
+  // Never render a previous cabinet's alerts during principal changes.
+  const { insights, unreadCount } = alertState.scopeKey === scopeKey
+    ? alertState : { insights: [], unreadCount: 0 };
+  const [isOpen, setIsOpen] = useState(false);
+  const widgetRef = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (widgetRef.current && !widgetRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    // New principal session: do not resurrect an earlier A snapshot when
+    // returning to A before the new socket provides authoritative data.
+    setAlertState({ scopeKey, insights: [], unreadCount: 0 });
+    return () => { scopeEpochRef.current += 1; };
+  }, [scopeKey]);
+
+  useEffect(() => {
+    if (!employerId) return;
+
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let isCleaned = false;
+    let retryCount = 0;
+    const MAX_RETRIES = 8;
+
+    const connectWS = () => {
+      if (isCleaned) return;
+      if (retryCount >= MAX_RETRIES) return;
+
+      const wsUrl = buildGhostBrainWsUrl(employerId);
+      const currentSocket = new WebSocket(wsUrl);
+      ws = currentSocket;
+
+      ws.onopen = () => { if (!isCleaned && ws === currentSocket) retryCount = 0; };
+
+      ws.onmessage = (event) => {
+        // Stale events from a disposed principal or reconnected socket must
+        // never overwrite a fresh cabinet's snapshot.
+        if (isCleaned || ws !== currentSocket) return;
+        try {
+          const data = JSON.parse(event.data);
+          if (data.insights) {
+            setAlertState({ scopeKey, insights: data.insights, unreadCount: data.unread_count });
+          }
+        } catch (err) {
+          console.error("GhostBrain WS Parse Error:", err);
+        }
+      };
+
+      ws.onclose = () => {
+        if (isCleaned || ws !== currentSocket) return;
+        retryCount++;
+        const delay = Math.min(5000 * retryCount, 60000);
+        reconnectTimer = setTimeout(connectWS, delay);
+      };
+    };
+
+    connectWS();
+
+    return () => {
+      isCleaned = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+        ws = null;
+      }
+    };
+  }, [employerId, scopeKey]);
+
+  const markAsRead = async (logId: number) => {
+    const requestEpoch = scopeEpochRef.current;
+    try {
+      const ack = await api.post(`/ai/ghost-insights/${logId}/read`);
+      // The backend contract is {"status":"read"}. A 2xx response with a
+      // missing/wrong receipt must never silently hide an unread clinical alert.
+      if (ack?.data?.status !== 'read') {
+        throw new Error('GhostBrain read acknowledgement missing');
+      }
+      setAlertState(prev => {
+        // Ignore an ACK for an alert no longer in the latest WS snapshot.
+        // This also makes duplicate acknowledgements idempotent locally.
+        // An earlier principal's ACK must not touch a newer cabinet snapshot,
+        // even when local numeric insight IDs happen to collide.
+        if (scopeEpochRef.current !== requestEpoch
+          || prev.scopeKey !== scopeKey
+          || !prev.insights.some(i => i.id === logId)) return prev;
+        return {
+          scopeKey: prev.scopeKey,
+          insights: prev.insights.filter(i => i.id !== logId),
+          unreadCount: Math.max(0, prev.unreadCount - 1),
+        };
+      });
+    } catch (err) {
+      console.error("Failed to mark as read:", err);
+    }
+  };
+
+  const getQuickAction = (insight: any) => {
+    const text = insight.content.toLowerCase();
+    // Alertes stock agenda → Voir Agenda
+    if (insight.insight_type === 'STOCK' || text.includes("stock") || text.includes("matériau") || text.includes("carpule") || text.includes("composite") || text.includes("implant") || text.includes("empreinte")) {
+      return {
+        label: "Voir Agenda",
+        icon: <Zap size={10} />,
+        onClick: () => {
+          navigate('/agenda');
+          setIsOpen(false);
+          markAsRead(insight.id);
+        }
+      };
+    }
+    if (text.includes("échéance") || text.includes("impayé") || text.includes("encaissement")) {
+      return {
+        label: "Voir Trésorerie",
+        icon: <Zap size={10} />,
+        onClick: () => {
+          navigate(`/accounting?tab=treasury`);
+          setIsOpen(false);
+          markAsRead(insight.id);
+        }
+      };
+    }
+    if (text.includes("rendez-vous") || text.includes("absent")) {
+      return {
+        label: "Voir Agenda",
+        icon: <Zap size={10} />,
+        onClick: () => {
+          navigate(`/agenda`);
+          setIsOpen(false);
+          markAsRead(insight.id);
+        }
+      };
+    }
+    if (insight.patient_id) {
+      return {
+        label: "Dossier Patient",
+        icon: <ArrowRight size={10} />,
+        onClick: () => {
+          navigate(`/patients/${insight.patient_id}`);
+          setIsOpen(false);
+          markAsRead(insight.id);
+        }
+      };
+    }
+    return null;
+  };
+
+  return (
+    <div className="relative" ref={widgetRef}>
+      {/* Widget Trigger */}
+      <button 
+        onClick={() => setIsOpen(!isOpen)}
+        className="p-2.5 text-text-muted hover:text-primary hover:bg-primary/5 rounded-elite-sm transition-elite relative group"
+        title="Synthèse contextuelle"
+      >
+        <BrainCircuit size={20} className={`transition-elite ${unreadCount > 0 ? 'text-primary' : ''} group-hover:scale-110`} />
+        {unreadCount > 0 && (
+          <span className="absolute top-2.5 right-2.5 w-3 h-3 bg-primary text-white text-[7px] font-black rounded-full border-2 border-card-bg flex items-center justify-center animate-pulse shadow-[0_0_8px_rgba(212,175,55,0.8)]">
+            {unreadCount}
+          </span>
+        )}
+      </button>
+
+      {/* Dropdown Panel */}
+      {isOpen && (
+        <div className="absolute top-full right-0 mt-2 w-[340px] bg-card-bg/95 border border-primary/20 rounded-3xl shadow-[0_0_40px_rgba(212,175,55,0.15)] p-5 animate-in slide-in-from-top-2 duration-300 z-50 backdrop-blur-xl">
+          <div className="flex items-center justify-between mb-4 border-b border-border-main pb-3">
+             <div className="flex items-center gap-3">
+                 <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary relative">
+                     <div className="absolute inset-0 bg-primary/20 rounded-full animate-ping opacity-50" />
+                     <BrainCircuit size={16} />
+                 </div>
+                 <div>
+                    <h4 className="text-[11px] font-black text-primary uppercase tracking-widest leading-none">Ghost Brain V2</h4>
+                    <p className="text-[9px] text-text-muted font-bold mt-1">Conscience Proactive</p>
+                 </div>
+             </div>
+             {unreadCount > 0 && (
+               <button 
+                 onClick={() => {
+                   insights.forEach(i => markAsRead(i.id));
+                 }}
+                 className="text-[9px] font-bold text-primary hover:underline"
+               >
+                 Tout marquer comme lu
+               </button>
+             )}
+          </div>
+
+          <div className="max-h-72 overflow-y-auto pr-1 space-y-3 custom-scrollbar">
+            {insights.length > 0 ? (
+              insights.map(insight => {
+                const quickAction = getQuickAction(insight);
+                
+                return (
+                  <div key={insight.id} className="p-3 bg-background border border-border-main rounded-2xl relative group hover:border-primary/30 transition-all shadow-sm hover:shadow-md">
+                      <div className="flex justify-between items-start mb-1">
+                          {insight.patient_id ? (
+                            <Link
+                              to={`/patients/${insight.patient_id}`}
+                              onClick={() => setIsOpen(false)}
+                              className="text-[9px] font-black px-2 py-0.5 rounded-full bg-primary/10 text-primary uppercase hover:bg-primary hover:text-white transition-colors cursor-pointer"
+                              title="Accéder au dossier patient"
+                            >
+                              {insight.insight_type}
+                            </Link>
+                          ) : (
+                            <span className="text-[9px] font-black px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 uppercase">
+                              {insight.insight_type}
+                            </span>
+                          )}
+                          <span className="text-[8px] text-text-muted font-bold">
+                             {new Date(insight.created_at).toLocaleDateString()}
+                          </span>
+                      </div>
+                      
+                      <div className={insight.patient_id ? "cursor-pointer" : ""} onClick={() => {
+                         if (insight.patient_id) {
+                            navigate(`/patients/${insight.patient_id}`);
+                            setIsOpen(false);
+                         }
+                      }}>
+                          <p className="text-[11px] font-medium text-main mt-2 leading-relaxed" style={{ color: 'var(--text-main)' }}>
+                              <TypewriterText text={insight.content} delay={8} />
+                          </p>
+                      </div>
+                      
+                      <div className="mt-3 flex items-center justify-between border-t border-border-main/50 pt-2">
+                          <button 
+                              onClick={() => markAsRead(insight.id)}
+                              className="flex items-center gap-1 text-[9px] font-black text-text-muted hover:text-green-500 transition-colors uppercase"
+                          >
+                              <Check size={12} /> Marquer comme lu
+                          </button>
+
+                          {quickAction && (
+                              <button
+                                  onClick={quickAction.onClick}
+                                  className="flex items-center gap-1.5 text-[9px] font-black bg-primary/10 text-primary px-2 py-1 rounded-lg hover:bg-primary hover:text-white transition-colors uppercase"
+                              >
+                                  {quickAction.icon}
+                                  {quickAction.label}
+                              </button>
+                          )}
+                      </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="text-center py-6 flex flex-col items-center gap-2">
+                 <Check size={24} className="text-primary/30" />
+                 <p className="text-[10px] font-bold text-text-muted italic">Aucune nouvelle déduction.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+

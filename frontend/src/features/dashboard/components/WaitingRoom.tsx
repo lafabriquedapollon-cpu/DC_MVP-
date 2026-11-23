@@ -1,0 +1,276 @@
+import { useState } from 'react';
+import { AlertTriangle, BellRing, Calendar, Clock, Loader2, Ticket } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { motion } from 'framer-motion';
+import { cn } from '../../../utils/cn';
+import { dashboardItemVariants } from '../animations';
+import type { DashboardAppointment } from '../types';
+import { PatientAvatar } from '../../patients/components/PatientAvatar';
+
+export const WaitingRoom = ({
+  visible,
+  appointments,
+  loading,
+  onRefresh,
+  onStatusChange,
+  onCallPatient,
+}: {
+  visible: boolean;
+  appointments: DashboardAppointment[] | null;
+  loading: boolean;
+  onRefresh: () => void;
+  onStatusChange: (appointmentId: number, status: string) => void;
+  onCallPatient?: (appointmentId: number, ticketNumber?: number) => Promise<void>;
+}) => {
+  const [ticketDrafts, setTicketDrafts] = useState<Record<number, string>>({});
+  const [callingId, setCallingId] = useState<number | null>(null);
+
+  if (!visible) return null;
+
+  const isUnavailable = appointments === null;
+  const safeAppointments = appointments ?? [];
+  const waitingTicketCounts = safeAppointments.reduce<Record<number, number>>((counts, item) => {
+    const ticket = item.ticket_number;
+    if (item.status === 'EN_S_ATTENTE' && Number.isInteger(ticket) && ticket != null) {
+      counts[ticket] = (counts[ticket] ?? 0) + 1;
+    }
+    return counts;
+  }, {});
+
+  return (
+    <motion.section variants={dashboardItemVariants} className="space-y-5 min-w-0">
+      <h2 className="text-[10px] font-black text-text-muted uppercase tracking-widest mb-2 px-2 sm:px-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+        <span className="flex items-center gap-2 min-w-0"><Clock size={16} className="shrink-0" aria-hidden="true" /> File d'attente & Arrivées du Jour</span>
+        <button
+          type="button"
+          onClick={onRefresh}
+          aria-label="Actualiser la file d'attente"
+          className="min-h-11 self-start sm:self-auto text-primary hover:text-primary-hover text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 bg-primary/5 px-3 rounded-full border border-primary/10 transition-all"
+        >
+          {loading ? <Loader2 className="animate-spin" size={12} aria-hidden="true" /> : 'Actualiser'}
+        </button>
+      </h2>
+
+      <div className="bg-card-bg/85 backdrop-blur-xl rounded-elite-lg border border-border-main p-4 sm:p-6 min-h-[410px] sm:h-[410px] shadow-elite flex flex-col justify-between relative overflow-hidden group">
+        <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent pointer-events-none" />
+
+        <div className="relative z-10 flex-1 overflow-y-auto custom-scrollbar space-y-3 pr-1 min-w-0">
+          {loading && isUnavailable ? (
+            <div role="status" className="h-full flex flex-col items-center justify-center gap-3 py-16 text-sm font-semibold text-text-muted">
+              <Loader2 size={24} className="animate-spin" aria-hidden="true" />
+              Vérification de l'agenda en cours…
+            </div>
+          ) : isUnavailable ? (
+            <div role="status" className="h-full flex flex-col items-center justify-center text-center py-16 space-y-4">
+              <div className="w-16 h-16 bg-warning-surface rounded-full flex items-center justify-center border border-warning-border">
+                <AlertTriangle size={28} className="text-warning" aria-hidden="true" />
+              </div>
+              <div>
+                <h4 className="text-lg font-black text-primary font-outfit mb-2">Rendez-vous indisponibles</h4>
+                <p className="text-text-muted text-xs font-medium mt-1 max-w-[280px] mx-auto leading-relaxed">
+                  La file d'attente n'a pas pu être vérifiée. Aucun état vide n'est supposé.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onRefresh}
+                className="min-h-11 mt-4 px-5 py-2.5 bg-warning-surface text-warning rounded-lg text-xs font-black uppercase tracking-widest hover:brightness-95 transition-all"
+              >
+                Réessayer
+              </button>
+            </div>
+          ) : safeAppointments.length > 0 ? (
+            [...safeAppointments]
+              .sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime())
+              .map(appointment => {
+                const appointmentTime = new Date(appointment.start_time).toLocaleTimeString('fr-FR', {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                });
+
+                let statusLabel = 'Prévu';
+                let statusColor = 'bg-background text-text-muted border-border-main';
+                let actionButton = null;
+
+                if (appointment.status === 'EN_S_ATTENTE') {
+                  statusLabel = "Salle d'attente";
+                  statusColor = 'bg-success-surface text-success border-success-border animate-pulse';
+                  const persistedTicket = appointment.ticket_number ?? null;
+                  const persistedTicketValid = Number.isInteger(persistedTicket)
+                    && persistedTicket != null
+                    && persistedTicket >= 1
+                    && persistedTicket <= 999;
+                  const persistedTicketDuplicate = persistedTicketValid
+                    && (waitingTicketCounts[persistedTicket!] ?? 0) > 1;
+                  const ticketNeedsInput = persistedTicket == null || !persistedTicketValid || persistedTicketDuplicate;
+                  const draftTicket = Number.parseInt(ticketDrafts[appointment.id] || '', 10);
+                  const draftTicketInUse = Number.isInteger(draftTicket) && safeAppointments.some(
+                    item => item.id !== appointment.id
+                      && item.status === 'EN_S_ATTENTE'
+                      && item.ticket_number === draftTicket,
+                  );
+                  const validDraftTicket = Number.isInteger(draftTicket)
+                    && draftTicket >= 1
+                    && draftTicket <= 999
+                    && !draftTicketInUse
+                    ? draftTicket
+                    : null;
+                  const callableTicket = ticketNeedsInput ? validDraftTicket : persistedTicket;
+                  actionButton = (
+                    <div className="flex w-full flex-col gap-2 sm:w-auto">
+                      <div className="flex min-h-11 items-center gap-2">
+                        {!ticketNeedsInput ? (
+                          <span className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-primary/15 bg-primary/5 px-3 text-[10px] font-black uppercase tracking-wider text-primary">
+                            <Ticket size={13} aria-hidden="true" /> N° {persistedTicket}
+                          </span>
+                        ) : (
+                          <label className="flex min-h-11 items-center gap-2 rounded-lg border border-border-main bg-card-bg px-2">
+                            <span className="sr-only">{persistedTicket == null ? 'Numéro de file' : 'Corriger le numéro de file'}</span>
+                            <Ticket size={13} className="text-text-muted" aria-hidden="true" />
+                            <input
+                              inputMode="numeric"
+                              pattern="[0-9]*"
+                              aria-label={persistedTicket == null ? 'Numéro de file' : 'Corriger le numéro de file'}
+                              value={ticketDrafts[appointment.id] || ''}
+                              onChange={(event) => setTicketDrafts(current => ({ ...current, [appointment.id]: event.target.value.replace(/\D/g, '').slice(0, 3) }))}
+                              className="w-14 bg-transparent text-center text-xs font-black text-main outline-none"
+                              placeholder="N°"
+                            />
+                          </label>
+                        )}
+                        {onCallPatient && (
+                          <button
+                            type="button"
+                            disabled={callableTicket == null || callingId === appointment.id}
+                            onClick={() => {
+                              setCallingId(appointment.id);
+                              void onCallPatient(appointment.id, ticketNeedsInput ? callableTicket ?? undefined : undefined)
+                                .finally(() => setCallingId(null));
+                            }}
+                            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-primary/20 bg-primary/10 px-3 text-[10px] font-black uppercase tracking-wider text-primary transition-all hover:bg-primary/15 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {callingId === appointment.id ? <Loader2 size={13} className="animate-spin" aria-hidden="true" /> : <BellRing size={13} aria-hidden="true" />}
+                            Appeler
+                          </button>
+                        )}
+                      </div>
+                      {persistedTicket != null && ticketNeedsInput && (
+                        <p className="text-[9px] font-bold uppercase tracking-wide text-warning">
+                          Numéro de file à corriger
+                        </p>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => onStatusChange(appointment.id, 'EN_FAUTEUIL')}
+                        className="w-full sm:w-auto min-h-11 px-3 py-2 bg-primary text-on-primary text-[10px] font-black uppercase tracking-wider rounded-lg shadow-md hover:brightness-110 transition-all"
+                      >
+                        Installer au Fauteuil
+                      </button>
+                    </div>
+                  );
+                } else if (appointment.status === 'EN_FAUTEUIL') {
+                  statusLabel = 'Au Fauteuil';
+                  statusColor = 'bg-info-surface text-info border-info-border';
+                  actionButton = (
+                    <button
+                      type="button"
+                      onClick={() => onStatusChange(appointment.id, 'TERMINÉ')}
+                      className="w-full sm:w-auto min-h-11 px-3 py-2 bg-text-main text-card text-[10px] font-black uppercase tracking-wider rounded-lg hover:brightness-110 transition-all"
+                    >
+                      Terminer la Séance
+                    </button>
+                  );
+                } else if (appointment.status === 'TERMINÉ') {
+                  statusLabel = 'Terminé';
+                  statusColor = 'bg-background text-text-muted border-border-main';
+                } else if (appointment.status === 'ANNULÉ') {
+                  statusLabel = 'Annulé';
+                  statusColor = 'bg-danger-surface text-danger border-danger-border';
+                } else {
+                  actionButton = (
+                    <button
+                      type="button"
+                      onClick={() => onStatusChange(appointment.id, 'EN_S_ATTENTE')}
+                      className="w-full sm:w-auto min-h-11 px-3 py-2 bg-success text-card text-[10px] font-black uppercase tracking-wider rounded-lg shadow-md hover:brightness-110 transition-all"
+                    >
+                      Marquer Arrivé
+                    </button>
+                  );
+                }
+
+                return (
+                  <div
+                    key={appointment.id}
+                    className="flex flex-col sm:flex-row sm:items-center sm:justify-between p-3 sm:p-4 bg-card/40 border border-border-main rounded-elite-sm hover:bg-card/60 transition-all gap-3 sm:gap-4 min-w-0"
+                  >
+                    <div className="flex items-start sm:items-center gap-3 sm:gap-4 min-w-0 w-full sm:w-auto">
+                      <div className="shrink-0 text-sm font-black text-primary bg-primary/5 border border-primary/10 px-2.5 py-1.5 rounded-lg whitespace-nowrap">
+                        {appointmentTime}
+                      </div>
+                      {(appointment.patient?.id || appointment.patient_id) ? (
+                        <PatientAvatar
+                          patientId={appointment.patient?.id || appointment.patient_id!}
+                          firstName={appointment.patient?.prenom}
+                          lastName={appointment.patient?.nom}
+                          photoUrl={appointment.patient?.photo_url}
+                          resolveFromDirectory={appointment.patient?.photo_url === undefined}
+                          className="w-10 h-10 rounded-xl text-xs border border-primary/10"
+                        />
+                      ) : null}
+                      <div className="min-w-0">
+                        <h4 className="text-sm font-black text-primary font-outfit break-words">
+                          {appointment.patient ? `${appointment.patient.nom.toUpperCase()} ${appointment.patient.prenom}`.trim() : appointment.patient_name || 'Rendez-vous'}
+                        </h4>
+                        <p className="text-[10px] font-bold text-text-muted mt-0.5 uppercase tracking-wide break-words">
+                          {appointment.description || 'Consultation clinique'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-3 w-full sm:w-auto min-w-0">
+                      <span className={cn('shrink-0 text-[9px] font-black border px-2.5 py-1 rounded-full uppercase tracking-wider', statusColor)}>
+                        {statusLabel}
+                      </span>
+                      <div className="w-full sm:w-auto">{actionButton}</div>
+                    </div>
+                  </div>
+                );
+              })
+          ) : (
+            <div className="h-full flex flex-col items-center justify-center text-center py-16 space-y-4">
+              <div className="w-16 h-16 bg-gradient-to-br from-success-surface to-success-surface rounded-full flex items-center justify-center">
+                <Calendar size={28} className="text-success" aria-hidden="true" />
+              </div>
+              <div>
+                <h4 className="text-lg font-black text-primary font-outfit mb-2">Aucun patient aujourd'hui</h4>
+                <p className="text-text-muted text-xs font-medium mt-1 max-w-[250px] mx-auto leading-relaxed">
+                  Les rendez-vous programmés pour la journée apparaîtront ici pour le suivi de la file d'attente.
+                </p>
+              </div>
+              <Link
+                to="/agenda"
+                className="min-h-11 mt-4 px-5 py-2.5 bg-success-surface text-success rounded-lg text-xs font-black uppercase tracking-widest hover:brightness-95 transition-all inline-flex items-center"
+              >
+                Ouvrir l'agenda
+              </Link>
+            </div>
+          )}
+        </div>
+
+        <div className="relative z-10 border-t border-border-main pt-4 mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-[9px] font-black text-text-muted uppercase tracking-wider">
+          {isUnavailable ? (
+            <span className="text-warning">État non vérifié</span>
+          ) : (
+            <>
+              <span className="flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" aria-hidden="true" />
+                En Salle d'Attente : {safeAppointments.filter(item => item.status === 'EN_S_ATTENTE').length}
+              </span>
+              <span>Au Fauteuil : {safeAppointments.filter(item => item.status === 'EN_FAUTEUIL').length}</span>
+            </>
+          )}
+        </div>
+      </div>
+    </motion.section>
+  );
+};

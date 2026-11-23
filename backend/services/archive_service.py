@@ -1,0 +1,762 @@
+# ==============================================================================
+# ARCHIVE SERVICE - Gestion intelligente des documents
+# ==============================================================================
+import hashlib
+import os
+import uuid
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import List, Optional, Tuple, BinaryIO
+
+from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_, desc, func
+import shutil
+
+from backend import models
+from backend.models import DocumentType, DocumentStatus
+from backend.schemas import ConflictResolution
+
+# Configuration
+from backend.core.media_paths import get_media_root
+
+BASE_DIR = Path(__file__).parent.parent
+# MEDIA_ROOT permet d'isoler une instance de test/rehearsal (jamais défini
+# en cabinet réel -> comportement inchangé, identique à AppPaths.get_user_data_dir()).
+MEDIA_DIR = get_media_root()
+ARCHIVE_BASE_DIR = MEDIA_DIR / "archives"
+LEGACY_DOCS_DIR = MEDIA_DIR / "documents"
+TRASH_RETENTION_DAYS = 365  # 1 an
+THUMBNAIL_SIZE = (300, 400)
+_EDIT_ARCHIVE_ID_KEY = "_replace_archive_id"
+_GENERATED_PAYMENT_PREFIX = "Lien Doc ID: "
+_VOIDED_PAYMENT_PREFIX = "ANNULÉ — Lien Doc ID: "
+_TRASHED_PAYMENT_PREFIX = "CORBEILLE — Lien Doc ID: "
+_INSTALLMENT_TRASH_PREFIX = "__DC_TRASH_DOC__:"
+
+
+def _validate_archive_filename(filename: str) -> None:
+    """Reject client path components, NTFS alternate streams and reserved device names."""
+    invalid = (
+        not isinstance(filename, str)
+        or not filename or filename in {".", ".."}
+        or any(c in filename for c in '/\\<>:"|?*')
+        or any(ord(c) < 32 for c in filename)
+        or filename.rstrip(" .") != filename
+    )
+    if invalid:
+        raise ValueError("Nom de fichier invalide pour archivage")
+    base = filename.split(".", 1)[0].upper()
+    if base in {"CON", "PRN", "AUX", "NUL"} or (
+        len(base) == 4 and base[:3] in {"COM", "LPT"} and base[3] in "000000000"
+    ):
+        raise ValueError("Nom de fichier Windows réservé")
+
+
+class ArchiveService:
+    """
+    Service de gestion documentaire avec :
+    - Hashing SHA-256 pour détection des doublons
+    - Versioning automatique
+    - Corbeille avec récupération
+    - Génération de miniatures
+    """
+    
+    def __init__(self, db: Session):
+        self.db = db
+        ARCHIVE_BASE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    def _calculate_file_hash(self, file_content: bytes) -> str:
+        """Calcule le hash SHA-256 du fichier."""
+        return hashlib.sha256(file_content).hexdigest()
+
+    @staticmethod
+    def _installment_trash_marker(document_id: int) -> str:
+        return f"{_INSTALLMENT_TRASH_PREFIX}{document_id}\n"
+
+    def _trash_pending_installments(self, document_id: int, acte_ids: list[int]) -> None:
+        """Annule uniquement les échéances encore ouvertes dérivées du document."""
+        if not acte_ids:
+            return
+        marker = self._installment_trash_marker(document_id)
+        plans = self.db.query(models.InstallmentPlan).filter(
+            models.InstallmentPlan.acte_id.in_(acte_ids)
+        ).all()
+        for plan in plans:
+            for installment in plan.installments:
+                if str(installment.status or "").upper() != "EN_ATTENTE":
+                    continue
+                installment.status = "ANNULE"
+                original_notes = installment.notes or ""
+                if not original_notes.startswith(marker):
+                    installment.notes = marker + original_notes
+
+    def _restore_trashed_installments(self, document_id: int, acte_ids: list[int]) -> None:
+        """Restaure uniquement les échéances annulées par cette mise en corbeille."""
+        if not acte_ids:
+            return
+        marker = self._installment_trash_marker(document_id)
+        plans = self.db.query(models.InstallmentPlan).filter(
+            models.InstallmentPlan.acte_id.in_(acte_ids)
+        ).all()
+        for plan in plans:
+            for installment in plan.installments:
+                notes = installment.notes or ""
+                if str(installment.status or "").upper() != "ANNULE" or not notes.startswith(marker):
+                    continue
+                installment.status = "EN_ATTENTE"
+                restored_notes = notes[len(marker):]
+                installment.notes = restored_notes or None
+    
+    def _generate_document_group_id(self) -> str:
+        """Génère un UUID pour regrouper les versions d'un même document."""
+        return str(uuid.uuid4())
+    
+    def _get_storage_path(self, patient_id: int, doc_type: DocumentType, 
+                          filename: str, version: int = 1) -> Path:
+        """Génère le chemin de stockage hiérarchique."""
+        today = datetime.now()
+        path = ARCHIVE_BASE_DIR / str(patient_id) / doc_type.value / str(today.year) / str(today.month)
+        # Reject client-supplied path components before creating directories.
+        _validate_archive_filename(filename)
+        path.mkdir(parents=True, exist_ok=True)
+
+        # Ajouter la version dans le nom si > 1
+        if version > 1:
+            stem = Path(filename).stem
+            suffix = Path(filename).suffix
+            filename = f"{stem}_v{version}{suffix}"
+        
+        # Client filenames are labels, never trusted filesystem paths.
+        # Keep generated archives inside the patient/type/month directory.
+        _validate_archive_filename(filename)
+        return path / filename
+
+    def _resolve_archive_storage_path(self, doc: models.DocumentArchive) -> Path:
+        if doc.file_path.startswith("static/archives/") or doc.file_path.startswith("static/documents/"):
+            return MEDIA_DIR / doc.file_path.replace("static/", "", 1)
+        return BASE_DIR / doc.file_path
+
+    def _replace_document_in_place(
+        self,
+        *,
+        document_id: int,
+        patient_id: int,
+        file_content: bytes,
+        filename: str,
+        doc_type: DocumentType,
+        uploaded_by_id: Optional[int],
+        title: Optional[str],
+        description: Optional[str],
+        tags: List[str],
+        clinical_data: Optional[dict],
+        analysis_id: Optional[int],
+        is_accounted: bool,
+        is_collected: bool,
+        payment_status: models.PaiementStatut,
+        commit: bool = True,
+    ) -> models.DocumentArchive:
+        """Remplace explicitement une archive existante sans créer de version visible."""
+        doc = self.db.query(models.DocumentArchive).filter(
+            models.DocumentArchive.id == document_id
+        ).first()
+        if not doc:
+            raise ValueError("Document à modifier introuvable")
+        if doc.patient_id != patient_id:
+            raise ValueError("Le document à modifier n'appartient pas à ce patient")
+        if doc.document_type != doc_type:
+            raise ValueError("Le type du document modifié ne correspond pas à l'archive existante")
+        if doc.document_type == DocumentType.RAPPORT_CEPHALO:
+            raise ValueError("Une archive céphalométrique officielle ne peut pas être remplacée")
+        if doc.status != DocumentStatus.ACTIF:
+            raise ValueError("Un document placé à la corbeille ne peut pas être modifié")
+
+        storage_path = self._resolve_archive_storage_path(doc)
+        storage_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(storage_path, "wb") as f:
+            f.write(file_content)
+
+        doc.file_hash = self._calculate_file_hash(file_content)
+        doc.file_size = len(file_content)
+        doc.filename = storage_path.name
+        doc.original_filename = filename
+        doc.title = title or filename
+        doc.description = description
+        doc.tags = tags
+        doc.clinical_data = clinical_data
+        doc.analysis_id = analysis_id
+        doc.is_accounted = is_accounted
+        doc.is_collected = is_collected
+        doc.payment_status = payment_status
+        doc.uploaded_by_id = uploaded_by_id or doc.uploaded_by_id
+        doc.is_latest_version = True
+        doc.updated_at = datetime.now()
+        if commit:
+            self.db.commit()
+            self.db.refresh(doc)
+        else:
+            self.db.flush()
+        return doc
+    
+    def check_conflicts(self, patient_id: int, file_hash: str, 
+                       filename: str, doc_type: DocumentType, 
+                       clinical_data: Optional[dict] = None) -> dict:
+        """
+        Vérifie les conflits potentiels avant archivage.
+        Retourne : has_conflict, existing_doc, conflict_reason, suggested_action
+        """
+        # 1. Vérifier doublon exact (même hash)
+        existing_by_hash = self.db.query(models.DocumentArchive).filter(
+            and_(
+                models.DocumentArchive.patient_id == patient_id,
+                models.DocumentArchive.file_hash == file_hash,
+                models.DocumentArchive.status == DocumentStatus.ACTIF
+            )
+        ).first()
+        
+        if existing_by_hash:
+            return {
+                "has_conflict": True,
+                "existing_document": existing_by_hash,
+                "conflict_reason": "same_hash",
+                "suggested_action": ConflictResolution.CANCEL,
+                "message": "Ce fichier existe déjà (doublon exact)"
+            }
+        
+        # 2. Vérifier même nom même jour
+        today = datetime.now().date()
+        existing_by_name = self.db.query(models.DocumentArchive).filter(
+            and_(
+                models.DocumentArchive.patient_id == patient_id,
+                models.DocumentArchive.document_type == doc_type,
+                models.DocumentArchive.original_filename == filename,
+                func.date(models.DocumentArchive.created_at) == today,
+                models.DocumentArchive.status == DocumentStatus.ACTIF
+            )
+        ).first()
+        
+        if existing_by_name:
+            return {
+                "has_conflict": True,
+                "existing_document": existing_by_name,
+                "conflict_reason": "same_name_same_day",
+                "suggested_action": ConflictResolution.CREATE_VERSION,
+                "message": f"Un document '{filename}' existe déjà pour aujourd'hui"
+            }
+        
+        # 4. Vérifier Doublon de CONTENU (Mêmes actes, même montant)
+        if clinical_data:
+            existing_by_content = self.db.query(models.DocumentArchive).filter(
+                and_(
+                    models.DocumentArchive.patient_id == patient_id,
+                    models.DocumentArchive.document_type == doc_type,
+                    models.DocumentArchive.status == DocumentStatus.ACTIF
+                )
+            ).all()
+            
+            for doc in existing_by_content:
+                if doc.clinical_data == clinical_data:
+                    return {
+                        "has_conflict": True,
+                        "existing_document": doc,
+                        "conflict_reason": "duplicate_content",
+                        "suggested_action": ConflictResolution.CANCEL,
+                        "message": "Une note identique existe déjà pour ce patient (mêmes actes)."
+                    }
+        
+        return {"has_conflict": False}
+    
+    def archive_document(self, patient_id: int, file_content: bytes, 
+                        filename: str, doc_type: DocumentType,
+                        uploaded_by_id: Optional[int] = None,
+                        title: Optional[str] = None,
+                        description: Optional[str] = None,
+                        tags: List[str] = None,
+                        clinical_data: Optional[dict] = None,
+                        analysis_id: Optional[int] = None,
+                        on_conflict: ConflictResolution = ConflictResolution.CREATE_VERSION,
+                        force_group_id: Optional[str] = None,
+                        is_accounted: bool = True,
+                        is_collected: bool = False,
+                        payment_status: models.PaiementStatut = models.PaiementStatut.EN_ATTENTE,
+                        commit: bool = True) -> Tuple[models.DocumentArchive, bool]:
+        """
+        Archive un document avec gestion intelligente des conflits.
+        Retourne: (document, is_new_version)
+        """
+        tags = tags or []
+        clean_clinical_data = dict(clinical_data) if clinical_data else clinical_data
+        replace_archive_id = None
+        if isinstance(clean_clinical_data, dict):
+            raw_replace_id = clean_clinical_data.pop(_EDIT_ARCHIVE_ID_KEY, None)
+            if raw_replace_id not in (None, ""):
+                try:
+                    replace_archive_id = int(raw_replace_id)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Identifiant d'archive à modifier invalide") from exc
+        
+        # Official reports are only produced by the identity-bound PDF route.
+        # Generic service calls must never use a client-controlled destination.
+        _validate_archive_filename(filename)
+        if doc_type == DocumentType.RAPPORT_CEPHALO and not commit:
+            raise ValueError("Archive céphalométrique officielle : commit SQL requis")
+
+        # Calculer le hash
+        file_hash = self._calculate_file_hash(file_content)
+        file_size = len(file_content)
+
+        # Une édition explicite remplace l'archive ciblée. Elle ne doit jamais être
+        # transformée en nouvelle version par la détection de doublons.
+        if replace_archive_id is not None:
+            doc = self._replace_document_in_place(
+                document_id=replace_archive_id,
+                patient_id=patient_id,
+                file_content=file_content,
+                filename=filename,
+                doc_type=doc_type,
+                uploaded_by_id=uploaded_by_id,
+                title=title,
+                description=description,
+                tags=tags,
+                clinical_data=clean_clinical_data,
+                analysis_id=analysis_id,
+                is_accounted=is_accounted,
+                is_collected=is_collected,
+                payment_status=payment_status,
+                commit=commit,
+            )
+            return doc, False
+        
+        # Vérifier les conflits (Hash, Nom, ou Contenu clinique)
+        conflict = self.check_conflicts(patient_id, file_hash, filename, doc_type, clinical_data=clean_clinical_data)
+        
+        if conflict["has_conflict"]:
+            # Si c'est un doublon de contenu et que l'utilisateur n'a pas forcé
+            if conflict["conflict_reason"] == "duplicate_content" and on_conflict == ConflictResolution.CANCEL:
+                raise ValueError("DOUBLE_DETECTED: " + conflict["message"])
+            
+            # Autres types de conflits (nom, hash) gérés via le comportement par défaut
+            if on_conflict == ConflictResolution.CANCEL:
+                raise ValueError(conflict["message"])
+            
+            elif on_conflict == ConflictResolution.OVERWRITE:
+                # Remplacer le document existant en place. Cette option est
+                # utilisée par les notes d'honoraires modifiées afin de ne pas
+                # conserver une seconde version visible dans l'archive.
+                old_doc = conflict["existing_document"]
+                if old_doc:
+                    if old_doc.document_type == DocumentType.RAPPORT_CEPHALO:
+                        raise ValueError("Archive céphalométrique officielle immuable")
+                    if old_doc.file_path.startswith("static/archives/"):
+                        storage_path = MEDIA_DIR / old_doc.file_path.replace("static/", "", 1)
+                    else:
+                        storage_path = BASE_DIR / old_doc.file_path
+                    storage_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(storage_path, "wb") as f:
+                        f.write(file_content)
+
+                    old_doc.file_hash = file_hash
+                    old_doc.file_size = file_size
+                    old_doc.original_filename = filename
+                    old_doc.title = title or filename
+                    old_doc.description = description
+                    old_doc.tags = tags
+                    old_doc.clinical_data = clean_clinical_data
+                    old_doc.analysis_id = analysis_id
+                    old_doc.is_accounted = is_accounted
+                    old_doc.is_collected = is_collected
+                    old_doc.payment_status = payment_status
+                    old_doc.status = DocumentStatus.ACTIF
+                    old_doc.deleted_at = None
+                    old_doc.permanent_delete_at = None
+                    old_doc.is_latest_version = True
+                    old_doc.updated_at = datetime.now()
+                    if commit:
+                        self.db.commit()
+                        self.db.refresh(old_doc)
+                    else:
+                        self.db.flush()
+                    return old_doc, False
+                
+            elif on_conflict == ConflictResolution.CREATE_VERSION:
+                # Never group a generic upload into an official cephalometric archive.
+                if (conflict["existing_document"] is not None
+                        and conflict["existing_document"].document_type == DocumentType.RAPPORT_CEPHALO):
+                    raise ValueError("Archive céphalométrique officielle immuable")
+                # Créer une nouvelle version du groupe existant
+                if conflict["existing_document"]:
+                    force_group_id = conflict["existing_document"].document_group_id
+        
+        # Déterminer le groupe de versions
+        if force_group_id:
+            # Nouvelle version d'un document existant
+            existing_versions = self.db.query(models.DocumentArchive).filter(
+                models.DocumentArchive.document_group_id == force_group_id
+            ).all()
+            
+            # Marquer l'ancienne version comme obsolète
+            for doc in existing_versions:
+                doc.is_latest_version = False
+            
+            version_number = len(existing_versions) + 1
+            document_group_id = force_group_id
+        else:
+            # Nouveau document
+            version_number = 1
+            document_group_id = self._generate_document_group_id()
+        
+        # Générer le chemin de stockage
+        storage_path = self._get_storage_path(patient_id, doc_type, filename, version_number)
+        # A trashed archive may occupy the same filename. Never overwrite any
+        # pre-existing physical file when creating a new version/group.
+        if storage_path.exists() or storage_path.is_symlink():
+            storage_path = storage_path.with_name(
+                f"{storage_path.stem}_{uuid.uuid4().hex}{storage_path.suffix}"
+            )
+
+        # Only official cephalometric reports are enrolled in crash recovery.
+        # The caller must hold the selected-study SQL writer lock throughout
+        # this operation; a journal without matching identity never authorizes
+        # reusing arbitrary files.
+        pending_cephalo = None
+        if doc_type == DocumentType.RAPPORT_CEPHALO:
+            from backend.services.cephalo_archive_recovery import prepare_official_pdf
+
+            if not isinstance(clean_clinical_data, dict) or analysis_id is None:
+                raise ValueError("Archive céphalométrique : identité scientifique absente")
+            if clean_clinical_data.get("cephalo_analysis_id") != analysis_id:
+                raise ValueError("Archive céphalométrique : étude incohérente")
+            pending_cephalo = prepare_official_pdf(
+                self.db,
+                root=ARCHIVE_BASE_DIR,
+                proposed_path=storage_path,
+                patient_id=patient_id,
+                analysis_id=analysis_id,
+                revision=clean_clinical_data.get("cephalo_analysis_revision"),
+                payload_digest=clean_clinical_data.get("cephalo_archive_payload_digest"),
+                content=file_content,
+            )
+            storage_path = pending_cephalo.path
+            file_content = pending_cephalo.content
+            file_hash = self._calculate_file_hash(file_content)
+            file_size = len(file_content)
+        else:
+            # Existing generic archives still use exclusive create.
+            with open(storage_path, 'xb') as f:
+                f.write(file_content)
+        
+        # --- DOUBLE EXPORT : RESTAURATION DOSSIERS HISTORIQUES (static/documents/YYYY/MM) ---
+        if doc_type in [DocumentType.NOTE_HONORAIRES, DocumentType.DEVIS, DocumentType.ORDONNANCE, DocumentType.CERTIFICAT]:
+            today = datetime.now()
+            legacy_dir = LEGACY_DOCS_DIR / str(today.year) / f"{today.month:02d}"
+            legacy_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Consiste à utiliser le même nommage que l'ancien générateur
+            legacy_path = legacy_dir / storage_path.name
+            shutil.copy2(storage_path, legacy_path)
+
+        # Créer l'entrée en base
+        doc = models.DocumentArchive(
+            patient_id=patient_id,
+            uploaded_by_id=uploaded_by_id,
+            document_type=doc_type,
+            filename=storage_path.name,
+            original_filename=filename,
+            document_group_id=document_group_id,
+            version_number=version_number,
+            is_latest_version=True,
+            file_hash=file_hash,
+            file_size=file_size,
+            file_path=("static/archives/" + str(storage_path.relative_to(ARCHIVE_BASE_DIR))).replace("\\", "/"),
+            title=title or filename,
+            description=description,
+            tags=tags,
+            clinical_data=clean_clinical_data,
+            analysis_id=analysis_id,
+            is_accounted=is_accounted,
+            is_collected=is_collected,
+            payment_status=payment_status,
+            status=DocumentStatus.ACTIF
+        )
+        
+        self.db.add(doc)
+        if commit:
+            try:
+                self.db.commit()
+            except Exception:
+                # An official cephalo PDF is not a successful archive when its
+                # SQL row fails to commit. Remove only the newly written file;
+                # never leave an orphan containing clinical data on disk.
+                self.db.rollback()
+                if pending_cephalo is not None:
+                    from backend.services.cephalo_archive_recovery import abort_official_pdf
+                    try:
+                        abort_official_pdf(pending_cephalo)
+                    except OSError:
+                        # An incomplete cleanup must not disguise the failed
+                        # transaction; recovery will inspect the remaining journal.
+                        pass
+                raise
+            self.db.refresh(doc)
+            if pending_cephalo is not None:
+                from backend.services.cephalo_archive_recovery import finish_official_pdf
+                try:
+                    finish_official_pdf(pending_cephalo)
+                except OSError:
+                    # SQL is already committed; replay will verify its SHA256.
+                    # The leftover journal can be reconciled, not treated as
+                    # proof that the SQL transaction failed.
+                    pass
+        else:
+            self.db.flush()
+        
+        return doc, version_number > 1
+    
+    def get_document_versions(self, document_group_id: str) -> List[models.DocumentArchive]:
+        """Récupère toutes les versions d'un document."""
+        return self.db.query(models.DocumentArchive).filter(
+            models.DocumentArchive.document_group_id == document_group_id
+        ).order_by(desc(models.DocumentArchive.version_number)).all()
+    
+    def move_to_trash(self, document_id: int) -> models.DocumentArchive:
+        """Déplace un document et ses écritures dérivées dans la corbeille comptable."""
+        doc = self.db.query(models.DocumentArchive).filter(
+            models.DocumentArchive.id == document_id
+        ).first()
+        
+        if not doc:
+            raise ValueError("Document non trouvé")
+        if doc.status == DocumentStatus.SUPPRIME:
+            return doc
+
+        trash_at = datetime.now()
+        doc.status = DocumentStatus.SUPPRIME
+        doc.deleted_at = trash_at
+        doc.permanent_delete_at = trash_at + timedelta(days=TRASH_RETENTION_DAYS)
+
+        # Les actes générés par une note d'honoraires sont dérivés du document.
+        # On masque uniquement ceux qui étaient encore actifs, avec le même timestamp
+        # que le document pour pouvoir restaurer précisément ce lot ensuite.
+        linked_actes = self.db.query(models.Acte).filter(
+            models.Acte.document_archive_id == document_id,
+            models.Acte.deleted_at.is_(None),
+        ).all()
+        for acte in linked_actes:
+            acte.deleted_at = trash_at
+
+        linked_acte_ids = [acte.id for acte in linked_actes if acte.id is not None]
+        self._trash_pending_installments(document_id, linked_acte_ids)
+
+        # Les anciens flux pouvaient créer un Payment directement lié au document
+        # (sans acte_id). On lui donne un état de corbeille distinct de l'annulation
+        # par édition afin que seule cette suppression soit réversible.
+        generated_note = f"{_GENERATED_PAYMENT_PREFIX}{document_id}"
+        trashed_note = f"{_TRASHED_PAYMENT_PREFIX}{document_id}"
+        document_payments = self.db.query(models.Payment).filter(
+            models.Payment.notes == generated_note
+        ).all()
+        for payment in document_payments:
+            payment.notes = trashed_note
+        
+        self.db.commit()
+        return doc
+    
+    def restore_from_trash(self, document_id: int) -> models.DocumentArchive:
+        """Restaure un document et uniquement les écritures masquées par cette suppression."""
+        doc = self.db.query(models.DocumentArchive).filter(
+            and_(
+                models.DocumentArchive.id == document_id,
+                models.DocumentArchive.status == DocumentStatus.SUPPRIME
+            )
+        ).first()
+        
+        if not doc:
+            raise ValueError("Document non trouvé dans la corbeille")
+
+        # Never reactivate a second official archive for the same study/revision.
+        if doc.document_type == DocumentType.RAPPORT_CEPHALO:
+            if doc.analysis_id is None or not isinstance(doc.clinical_data, dict):
+                raise ValueError("Identité d'archive céphalométrique non vérifiable")
+            from backend.services.cephalo_document_lock import lock_selected_cephalo_for_archive
+            lock_selected_cephalo_for_archive(
+                self.db, patient_id=doc.patient_id, analysis_id=doc.analysis_id,
+            )
+            self.db.refresh(doc)
+            if doc.status != DocumentStatus.SUPPRIME:
+                raise ValueError("Archive modifiée pendant la restauration")
+            same_study = self.db.query(models.DocumentArchive).filter(
+                models.DocumentArchive.id != doc.id,
+                models.DocumentArchive.document_type == DocumentType.RAPPORT_CEPHALO,
+                models.DocumentArchive.analysis_id == doc.analysis_id,
+                models.DocumentArchive.status == DocumentStatus.ACTIF,
+            ).all()
+            old_revision = doc.clinical_data.get("cephalo_analysis_revision")
+            if type(old_revision) is not int or old_revision <= 0:
+                raise ValueError("Révision d'archive céphalométrique non vérifiable")
+            for active in same_study:
+                if (isinstance(active.clinical_data, dict)
+                        and active.clinical_data.get("cephalo_analysis_revision") == old_revision):
+                    raise ValueError("Une archive céphalométrique active existe déjà pour cette étude et révision")
+
+        trash_at = doc.deleted_at
+        if trash_at is not None:
+            linked_actes = self.db.query(models.Acte).filter(
+                models.Acte.document_archive_id == document_id,
+                models.Acte.deleted_at == trash_at,
+            ).all()
+            for acte in linked_actes:
+                acte.deleted_at = None
+            self._restore_trashed_installments(
+                document_id,
+                [acte.id for acte in linked_actes if acte.id is not None],
+            )
+
+        trashed_note = f"{_TRASHED_PAYMENT_PREFIX}{document_id}"
+        generated_note = f"{_GENERATED_PAYMENT_PREFIX}{document_id}"
+        trashed_payments = self.db.query(models.Payment).filter(
+            models.Payment.notes == trashed_note
+        ).all()
+        for payment in trashed_payments:
+            payment.notes = generated_note
+        
+        doc.status = DocumentStatus.ACTIF
+        doc.deleted_at = None
+        doc.permanent_delete_at = None
+        
+        self.db.commit()
+        return doc
+    
+    def permanent_delete(self, document_id: int) -> bool:
+        """Supprime définitivement un document sans réactiver ses écritures financières."""
+        doc = self.db.query(models.DocumentArchive).filter(
+            models.DocumentArchive.id == document_id
+        ).first()
+        
+        if not doc:
+            return False
+
+        generated_note = f"{_GENERATED_PAYMENT_PREFIX}{document_id}"
+        trashed_note = f"{_TRASHED_PAYMENT_PREFIX}{document_id}"
+        voided_note = f"{_VOIDED_PAYMENT_PREFIX}{document_id}"
+        document_payments = self.db.query(models.Payment).filter(
+            models.Payment.notes.in_([generated_note, trashed_note])
+        ).all()
+        for payment in document_payments:
+            payment.notes = voided_note
+
+        # Tout Acte encore lié doit rester hors comptabilité après disparition du
+        # DocumentArchive. On conserve la ligne pour audit mais on la soft-delete.
+        all_linked_actes = self.db.query(models.Acte).filter(
+            models.Acte.document_archive_id == document_id,
+        ).all()
+        self._trash_pending_installments(
+            document_id,
+            [acte.id for acte in all_linked_actes if acte.id is not None],
+        )
+        delete_at = datetime.now()
+        for acte in all_linked_actes:
+            if acte.deleted_at is None:
+                acte.deleted_at = delete_at
+        
+        # Supprimer le fichier physique
+        try:
+            file_path = self._resolve_archive_storage_path(doc)
+            if file_path.exists():
+                file_path.unlink()
+        except Exception as e:
+            print(f"Erreur suppression fichier: {e}")
+        
+        # Supprimer la miniature si existe
+        if doc.thumbnail_path:
+            try:
+                thumb_path = Path(doc.thumbnail_path)
+                if thumb_path.exists():
+                    thumb_path.unlink()
+            except:
+                pass
+        
+        # Supprimer de la base
+        self.db.delete(doc)
+        self.db.commit()
+        
+        return True
+    
+    def cleanup_expired_trash(self) -> int:
+        """
+        Nettoie les documents de la corbeille dont la date de suppression permanente est dépassée.
+        À exécuter via cron job quotidien.
+        Retourne le nombre de documents supprimés.
+        """
+        expired_docs = self.db.query(models.DocumentArchive).filter(
+            and_(
+                models.DocumentArchive.status == DocumentStatus.SUPPRIME,
+                models.DocumentArchive.permanent_delete_at <= datetime.now()
+            )
+        ).all()
+        
+        count = 0
+        for doc in expired_docs:
+            if self.permanent_delete(doc.id):
+                count += 1
+        
+        return count
+    
+    def search_documents(self, patient_id: Optional[int] = None,
+                        doc_type: Optional[DocumentType] = None,
+                        status: DocumentStatus = DocumentStatus.ACTIF,
+                        tags: List[str] = None,
+                        search_query: Optional[str] = None,
+                        date_from: Optional[datetime] = None,
+                        date_to: Optional[datetime] = None,
+                        page: int = 1, page_size: int = 20,
+                        employer_id: Optional[int] = None,
+                        allowed_doc_types: Optional[List[DocumentType]] = None) -> Tuple[List[models.DocumentArchive], int]:
+        """Recherche avancée des documents."""
+        query = self.db.query(models.DocumentArchive)
+        
+        if employer_id:
+            query = query.join(models.Patient).filter(models.Patient.employer_id == employer_id)
+        
+        # Filtres
+        if patient_id:
+            query = query.filter(models.DocumentArchive.patient_id == patient_id)
+        if doc_type:
+            query = query.filter(models.DocumentArchive.document_type == doc_type)
+        if allowed_doc_types is not None:
+            query = query.filter(models.DocumentArchive.document_type.in_(allowed_doc_types))
+        if status:
+            query = query.filter(models.DocumentArchive.status == status)
+        if tags:
+            # Recherche dans le JSON des tags
+            for tag in tags:
+                query = query.filter(models.DocumentArchive.tags.contains([tag]))
+        
+        # Recherche texte
+        if search_query:
+            search_filter = or_(
+                models.DocumentArchive.title.ilike(f"%{search_query}%"),
+                models.DocumentArchive.description.ilike(f"%{search_query}%"),
+                models.DocumentArchive.original_filename.ilike(f"%{search_query}%")
+            )
+            query = query.filter(search_filter)
+        
+        # Dates
+        if date_from:
+            query = query.filter(models.DocumentArchive.created_at >= date_from)
+        if date_to:
+            query = query.filter(models.DocumentArchive.created_at <= date_to)
+        
+        # Compter total
+        total = query.count()
+        
+        # Pagination
+        docs = query.order_by(desc(models.DocumentArchive.created_at))\
+                   .offset((page - 1) * page_size)\
+                   .limit(page_size)\
+                   .all()
+        
+        return docs, total
+
+
+# Singleton
+def get_archive_service(db: Session) -> ArchiveService:
+    return ArchiveService(db)

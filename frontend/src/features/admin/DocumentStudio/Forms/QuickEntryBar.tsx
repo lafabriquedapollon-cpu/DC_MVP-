@@ -1,0 +1,263 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { ChevronRight, Clock3, TrendingUp, Zap } from 'lucide-react';
+import { api } from '../../../../services/api';
+import { cn } from '../../../../utils/cn';
+import type { DrugItem } from './prescriptionTypes';
+
+interface QuickEntryBarProps {
+  quickVal: string;
+  setQuickVal: (v: string) => void;
+  quickSuggestions: string[];
+  quickHighlightedIdx: number;
+  setQuickHighlightedIdx: React.Dispatch<React.SetStateAction<number>>;
+  onSearchChange: (val: string) => void;
+  onAddDrug: (drug: DrugItem) => void;
+  onSetStep: (step: 'IDLE' | 'RESEARCH' | 'ASSESSMENT' | 'PLANNING') => void;
+  hydrateMedicationDetails: (drug: DrugItem) => Promise<DrugItem>;
+  parseQuickEntry: (text: string) => DrugItem;
+}
+
+interface QuickPicksResponse {
+  recent_medications?: string[];
+  frequent_medications?: string[];
+}
+
+export const QuickEntryBar: React.FC<QuickEntryBarProps> = ({
+  quickVal, setQuickVal, quickSuggestions, quickHighlightedIdx,
+  setQuickHighlightedIdx, onSearchChange, onAddDrug, onSetStep,
+  hydrateMedicationDetails, parseQuickEntry,
+}) => {
+  const [recentMedications, setRecentMedications] = useState<string[]>([]);
+  const [frequentMedications, setFrequentMedications] = useState<string[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.get('/prescriptions/habits/suggest', { params: { q: '' } })
+      .then(response => {
+        if (cancelled) return;
+        const data = (response.data || {}) as QuickPicksResponse;
+        setRecentMedications(Array.isArray(data.recent_medications) ? data.recent_medications.slice(0, 5) : []);
+        setFrequentMedications(Array.isArray(data.frequent_medications) ? data.frequent_medications.slice(0, 5) : []);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRecentMedications([]);
+          setFrequentMedications([]);
+        }
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const submitDrug = async (text: string) => {
+    if (!text.trim() || submittingRef.current) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      const newDrug = await hydrateMedicationDetails(parseQuickEntry(text));
+      onAddDrug(newDrug);
+      setQuickVal('');
+      setQuickHighlightedIdx(-1);
+      onSetStep('PLANNING');
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  };
+
+  const visibleRecent = recentMedications.slice(0, 4);
+  const visibleFrequent = frequentMedications.filter(name => !visibleRecent.includes(name)).slice(0, 4);
+  const showQuickPicks = !quickVal.trim() && (visibleRecent.length > 0 || visibleFrequent.length > 0);
+
+  return (
+    <section
+      data-ordonnance-quick-entry
+      data-ordonnance-premium="u3"
+      aria-label="Saisie rapide de l'ordonnance"
+      className="relative min-w-0 space-y-3 rounded-[1.75rem] border border-border-main/70 bg-card/60 p-3 shadow-lg shadow-slate-900/[0.03] backdrop-blur-2xl dark:border-white/10 dark:bg-slate-900/50 sm:p-4"
+    >
+      <style>{`
+        [data-ordonnance-hierarchy-header="primary"],
+        [data-ordonnance-density-context],
+        [data-ordonnance-protocol-chips],
+        [data-ordonnance-quick-entry],
+        [data-ordonnance-drug-card] {
+          background:
+            linear-gradient(
+              135deg,
+              color-mix(in srgb, var(--primary) 7%, transparent),
+              transparent 42%,
+              color-mix(in srgb, var(--accent) 5%, transparent)
+            ),
+            color-mix(in srgb, var(--glass-bg) 92%, transparent) !important;
+          border-color: var(--glass-border) !important;
+          color: var(--text-main) !important;
+          box-shadow:
+            0 18px 45px color-mix(in srgb, var(--primary) 8%, transparent),
+            inset 0 1px 0 color-mix(in srgb, var(--text-main) 8%, transparent) !important;
+          backdrop-filter: blur(24px) saturate(145%) !important;
+          -webkit-backdrop-filter: blur(24px) saturate(145%) !important;
+        }
+
+        [data-ordonnance-hierarchy-header="primary"] > div:last-child > div {
+          background: color-mix(in srgb, var(--card-bg) 82%, transparent) !important;
+          border-color: var(--glass-border) !important;
+          box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-main) 6%, transparent) !important;
+        }
+
+        [data-ordonnance-hierarchy-header="primary"] select,
+        [data-ordonnance-hierarchy-header="primary"] input {
+          color: var(--text-main) !important;
+        }
+
+        [data-ordonnance-quick-entry] input {
+          background: color-mix(in srgb, var(--input-bg) 88%, transparent) !important;
+          border-color: var(--border-color) !important;
+          color: var(--text-main) !important;
+          box-shadow:
+            0 10px 28px color-mix(in srgb, var(--primary) 5%, transparent),
+            inset 0 1px 0 color-mix(in srgb, var(--text-main) 5%, transparent) !important;
+        }
+
+        [data-ordonnance-quick-entry] input:focus {
+          border-color: color-mix(in srgb, var(--primary) 38%, var(--border-color)) !important;
+          box-shadow:
+            0 12px 30px color-mix(in srgb, var(--primary) 8%, transparent),
+            0 0 0 4px color-mix(in srgb, var(--primary) 10%, transparent) !important;
+        }
+
+        [data-ordonnance-drug-card] {
+          box-shadow:
+            0 16px 38px color-mix(in srgb, var(--primary) 7%, transparent),
+            inset 0 1px 0 color-mix(in srgb, var(--text-main) 7%, transparent) !important;
+        }
+      `}</style>
+
+      <div className="flex items-center justify-between gap-3 px-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-primary/10 bg-primary/10 text-primary">
+            <Zap size={15} />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[10px] font-black uppercase tracking-[0.18em] text-text-main dark:text-text-muted">Saisie rapide</div>
+            <div className="hidden text-[9px] font-semibold text-text-muted dark:text-text-muted sm:block">Médicament, dosage, forme et posologie en une ligne.</div>
+          </div>
+        </div>
+        <span className="hidden shrink-0 rounded-lg border border-border-main/70 bg-card/70 px-2.5 py-1 text-[9px] font-black uppercase tracking-wider text-text-muted dark:border-white/10 dark:bg-slate-950/50 dark:text-text-muted sm:inline-flex">
+          {submitting ? 'Ajout…' : '↵ Ajouter'}
+        </span>
+      </div>
+
+      <div className="relative min-w-0 group">
+        <div className="absolute inset-y-0 left-4 flex items-center text-primary/45 transition-colors group-focus-within:text-primary sm:left-5">
+          <Zap size={18} />
+        </div>
+        <input
+          type="text"
+          value={quickVal}
+          disabled={submitting}
+          aria-busy={submitting}
+          aria-label="Médicament, dosage, forme, posologie"
+          onChange={e => {
+            const v = e.target.value;
+            setQuickVal(v);
+            onSearchChange(v);
+          }}
+          className="min-h-14 w-full min-w-0 rounded-2xl border border-border-main/80 bg-card/85 py-3.5 pl-12 pr-4 text-sm font-bold text-text-main outline-none shadow-sm backdrop-blur-xl transition-all placeholder:text-text-muted focus:border-primary/30 focus:bg-card focus:ring-4 focus:ring-primary/10 disabled:opacity-60 dark:border-white/10 dark:bg-slate-950/60 dark:text-text-muted dark:placeholder:text-text-muted dark:focus:bg-slate-950 sm:pl-14 sm:pr-4 sm:text-base"
+          placeholder="Médicament, dosage, forme, posologie…"
+          onKeyDown={async e => {
+            if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              setQuickHighlightedIdx(i => Math.min(i + 1, quickSuggestions.length - 1));
+            } else if (e.key === 'ArrowUp') {
+              e.preventDefault();
+              setQuickHighlightedIdx(i => Math.max(i - 1, 0));
+            } else if (e.key === 'Enter') {
+              e.preventDefault();
+              let finalVal = quickVal;
+              if (quickHighlightedIdx >= 0) {
+                const sugg = quickSuggestions[quickHighlightedIdx];
+                const parts = quickVal.split(' ');
+                parts[0] = sugg;
+                finalVal = parts.join(' ');
+              }
+              await submitDrug(finalVal);
+              setQuickHighlightedIdx(-1);
+            } else if (e.key === 'Escape') {
+              setQuickHighlightedIdx(-1);
+            }
+          }}
+          onBlur={() => setTimeout(() => setQuickHighlightedIdx(-1), 200)}
+        />
+
+        <AnimatePresence>
+          {quickSuggestions.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 10 }}
+              className="absolute left-1 right-1 top-full z-[999] mt-2 overflow-hidden rounded-2xl border border-border-main bg-card py-2 shadow-2xl dark:border-white/10 dark:bg-slate-950 sm:left-3 sm:right-3"
+            >
+              <div className="mb-1 border-b border-border-main px-4 py-2 dark:border-white/10 sm:px-5">
+                <span className="text-[10px] font-black uppercase tracking-widest text-text-muted">Suggestions de médicaments</span>
+              </div>
+              {quickSuggestions.map((s, i) => (
+                <button
+                  key={s}
+                  type="button"
+                  disabled={submitting}
+                  onMouseDown={async e => {
+                    e.preventDefault();
+                    const parts = quickVal.split(' ');
+                    parts[0] = s;
+                    await submitDrug(parts.join(' '));
+                  }}
+                  className={cn(
+                    'flex min-h-11 w-full items-center justify-between px-5 py-2.5 text-left text-sm font-bold transition-all group disabled:opacity-50',
+                    i === quickHighlightedIdx
+                      ? 'bg-primary text-white'
+                      : 'text-text-muted hover:bg-primary/5 hover:text-primary dark:text-text-muted dark:hover:bg-white/5',
+                  )}
+                >
+                  <span>{s}</span>
+                  <ChevronRight size={14} className={cn('transition-transform', i === quickHighlightedIdx ? 'translate-x-1' : 'opacity-0 group-hover:opacity-100')} />
+                </button>
+              ))}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {showQuickPicks && (
+        <div className="flex flex-wrap items-center gap-2 px-1" aria-label="Accès rapides aux médicaments habituels">
+          {visibleRecent.map(name => (
+            <button
+              key={`recent-${name}`}
+              type="button"
+              disabled={submitting}
+              onClick={() => void submitDrug(name)}
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-border-main/80 bg-card/75 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-text-muted shadow-sm transition-colors hover:border-primary/30 hover:bg-card hover:text-primary disabled:opacity-50 dark:border-white/10 dark:bg-slate-950/50 dark:text-text-muted dark:hover:bg-slate-900"
+              title="Médicament récent"
+            >
+              <Clock3 size={11} />{name}
+            </button>
+          ))}
+          {visibleFrequent.map(name => (
+            <button
+              key={`frequent-${name}`}
+              type="button"
+              disabled={submitting}
+              onClick={() => void submitDrug(name)}
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-border-main/80 bg-card/75 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-text-muted shadow-sm transition-colors hover:border-primary/30 hover:bg-card hover:text-primary disabled:opacity-50 dark:border-white/10 dark:bg-slate-950/50 dark:text-text-muted dark:hover:bg-slate-900"
+              title="Médicament fréquent"
+            >
+              <TrendingUp size={11} />{name}
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+};

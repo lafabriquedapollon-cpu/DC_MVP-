@@ -1,0 +1,53 @@
+import { useEffect, useLayoutEffect, useState } from 'react';
+import { useParams } from 'react-router-dom';
+import { DigitalCrownLoader } from '../../components/DigitalCrownLoader';
+import '../../components/Layout/patientDossierResponsive.css';
+import { PatientDetails as PatientDetailsInner } from './PatientDetailsInner';
+import { PatientPractitionerContextPortal } from './components/PatientPractitionerContextPortal';
+import {
+  hasUnsavedPatientDocumentDraft,
+  resetPatientDocumentBoundary,
+} from './patientDocumentBoundary';
+
+/**
+ * Route-level patient isolation boundary.
+ *
+ * React Router can reuse the same route component when only /patients/:id changes.
+ * We therefore block rendering until all patient-scoped shared document state has
+ * been reset, then mount a fresh patient tree keyed by the current id.
+ */
+export const PatientDetails = () => {
+  const { id } = useParams();
+  const [readyPatientId, setReadyPatientId] = useState<string | null>(null);
+
+  useLayoutEffect(() => {
+    resetPatientDocumentBoundary();
+    setReadyPatientId(id ?? null);
+
+    return () => {
+      resetPatientDocumentBoundary();
+    };
+  }, [id]);
+
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (!hasUnsavedPatientDocumentDraft()) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', beforeUnload);
+    return () => window.removeEventListener('beforeunload', beforeUnload);
+  }, []);
+
+  if (!id || readyPatientId !== id) {
+    return <DigitalCrownLoader text="Sécurisation du dossier patient..." />;
+  }
+
+  const patientId = Number(id);
+  return (
+    <>
+      {Number.isFinite(patientId) && <PatientPractitionerContextPortal patientId={patientId} />}
+      <PatientDetailsInner key={id} />
+    </>
+  );
+};

@@ -1,0 +1,267 @@
+import React, { useState, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { X, UploadCloud, Calendar, FileText, CheckCircle2, AlertCircle } from 'lucide-react';
+import { api } from '../../services/api';
+import { parseIcsContent } from '../../utils/icsParser';
+import type { ParsedEvent } from '../../utils/icsParser';
+
+interface GoogleImportModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSuccess: () => void;
+}
+
+export const GoogleImportModal: React.FC<GoogleImportModalProps> = ({ isOpen, onClose, onSuccess }) => {
+  const [events, setEvents] = useState<ParsedEvent[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [step, setStep] = useState<1 | 2>(1); // 1: Upload, 2: Preview
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0];
+    if (!selectedFile) return;
+    
+    setError('');
+    
+    try {
+      const text = await selectedFile.text();
+      const parsed = parseIcsContent(text);
+      if (parsed.length === 0) {
+        setError('Aucun rendez-vous valide trouvé dans ce fichier.');
+      } else {
+        setEvents(parsed);
+        setSelectedIds(new Set(parsed.map((_, idx) => idx.toString())));
+        setStep(2);
+      }
+    } catch (err) {
+      setError('Erreur lors de la lecture du fichier. Assurez-vous qu\'il s\'agit d\'un fichier .ics valide.');
+    }
+  };
+
+  const handleImport = async () => {
+    setLoading(true);
+    setError('');
+
+    try {
+      const selectedEvents = events.filter((_, idx) => selectedIds.has(idx.toString()));
+
+      const payload = {
+        appointments: selectedEvents.map(ev => ({
+          patient_name: ev.patient_name.substring(0, 50),
+          datetime_start: ev.datetime_start,
+          duration_minutes: ev.duration_minutes,
+          notes: ev.notes || 'Importé depuis Google Agenda',
+          status: 'PRÉVU'
+        }))
+      };
+
+      await api.post('/appointments/bulk', payload);
+      onSuccess();
+      onClose();
+      setTimeout(() => {
+        setStep(1);
+        setEvents([]);
+        setSelectedIds(new Set());
+      }, 500);
+    } catch (err) {
+      console.error(err);
+      setError('Erreur lors de l\'importation des rendez-vous.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggleEvent = (idx: string) => {
+    setSelectedIds(prev => {
+      const updated = new Set(prev);
+      if (updated.has(idx)) {
+        updated.delete(idx);
+      } else {
+        updated.add(idx);
+      }
+      return updated;
+    });
+  };
+
+  const toggleAllEvents = () => {
+    if (selectedIds.size === events.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(events.map((_, idx) => idx.toString())));
+    }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <AnimatePresence>
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        {/* Backdrop */}
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          onClick={onClose}
+          className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+        />
+
+        {/* Modal */}
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95, y: 20 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: 0.95, y: 20 }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Import Google Agenda"
+          className="relative w-full max-w-3xl bg-card rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between p-6 border-b border-border-main bg-background/50">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-primary/10 text-primary rounded-xl">
+                <Calendar size={24} />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-text-main">Import Google Agenda</h2>
+                <p className="text-sm text-text-muted">Importez vos rendez-vous via un fichier .ics</p>
+              </div>
+            </div>
+            <button
+              onClick={onClose}
+              aria-label="Fermer l’import Google Agenda"
+              className="p-2 text-text-muted hover:text-text-muted hover:bg-input-field rounded-full transition-colors"
+            >
+              <X size={20} />
+            </button>
+          </div>
+
+          {/* Content */}
+          <div className="p-6 overflow-y-auto">
+            {error && (
+              <div className="mb-6 flex items-start gap-3 p-4 bg-red-50 text-red-600 rounded-xl">
+                <AlertCircle size={20} className="shrink-0 mt-0.5" />
+                <p className="text-sm font-medium">{error}</p>
+              </div>
+            )}
+
+            {step === 1 && (
+              <div 
+                className="border-2 border-dashed border-border-main rounded-2xl p-12 text-center hover:border-primary hover:bg-primary/5 transition-colors cursor-pointer group"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <div className="w-16 h-16 bg-primary/10 text-primary rounded-full flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
+                  <UploadCloud size={32} />
+                </div>
+                <h3 className="text-lg font-bold text-text-main mb-2">Sélectionnez un fichier .ics</h3>
+                <p className="text-text-muted text-sm max-w-sm mx-auto">
+                  Exportez votre calendrier depuis Google Agenda (Paramètres &gt; Exporter) et sélectionnez le fichier .ics.
+                </p>
+                <input 
+                  type="file" 
+                  accept=".ics" 
+                  className="hidden" 
+                  ref={fileInputRef}
+                  onChange={handleFileChange}
+                />
+              </div>
+            )}
+
+            {step === 2 && (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between bg-primary/5 p-4 rounded-xl border border-primary/20">
+                  <div className="flex items-center gap-3">
+                    <CheckCircle2 className="text-primary" size={24} />
+                    <div>
+                      <p className="font-bold text-primary">{selectedIds.size}/{events.length} rendez-vous sélectionnés</p>
+                      <p className="text-xs text-primary/80">Sélectionnez les rendez-vous à importer dans votre agenda.</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => { setStep(1); setEvents([]); setSelectedIds(new Set()); }}
+                    className="text-sm text-primary hover:brightness-110 font-medium"
+                  >
+                    Changer de fichier
+                  </button>
+                </div>
+
+                <div className="border border-border-main rounded-xl overflow-hidden max-h-[400px] overflow-y-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-background sticky top-0 border-b border-border-main">
+                      <tr>
+                        <th className="p-3 font-semibold text-text-muted w-12">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.size === events.length && events.length > 0}
+                            onChange={toggleAllEvents}
+                            className="w-4 h-4 accent-primary rounded"
+                          />
+                        </th>
+                        <th className="p-3 font-semibold text-text-muted">Patient / Titre</th>
+                        <th className="p-3 font-semibold text-text-muted">Date & Heure</th>
+                        <th className="p-3 font-semibold text-text-muted">Durée</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border-main">
+                      {events.slice(0, 50).map((ev, idx) => {
+                        const date = new Date(ev.datetime_start);
+                        const isSelected = selectedIds.has(idx.toString());
+                        return (
+                          <tr key={idx} className={isSelected ? 'bg-primary/5' : 'hover:bg-background'}>
+                            <td className="p-3 w-12">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleEvent(idx.toString())}
+                                className="w-4 h-4 accent-primary rounded"
+                              />
+                            </td>
+                            <td className="p-3 font-medium text-text-main">{ev.patient_name}</td>
+                            <td className="p-3 text-text-muted">
+                              {date.toLocaleDateString('fr-FR')} à {date.toLocaleTimeString('fr-FR', {hour: '2-digit', minute:'2-digit'})}
+                            </td>
+                            <td className="p-3 text-text-muted">
+                              {ev.duration_minutes} min
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {events.length > 50 && (
+                    <div className="p-3 text-center text-sm text-text-muted bg-background border-t border-border-main">
+                      Et {events.length - 50} autres événements non affichés...
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Footer */}
+          <div className="p-6 border-t border-border-main bg-background/50 flex justify-end gap-3">
+            <button
+              onClick={onClose}
+              className="px-5 py-2.5 text-text-muted font-medium hover:bg-input-field/50 rounded-xl transition-colors"
+            >
+              Annuler
+            </button>
+            <button
+              onClick={handleImport}
+              disabled={step === 1 || loading || selectedIds.size === 0}
+              className="px-6 py-2.5 bg-primary text-white font-bold rounded-xl shadow-lg shadow-primary/20 hover:brightness-110 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              {loading ? (
+                <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+              ) : (
+                <FileText size={18} />
+              )}
+              {loading ? 'Importation...' : 'Confirmer l\'import'}
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    </AnimatePresence>
+  );
+};

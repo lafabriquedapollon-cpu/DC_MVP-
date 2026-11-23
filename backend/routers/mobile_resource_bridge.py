@@ -1,0 +1,857 @@
+from backend.core.key_material import mobile_pairing_key_hex, MOBILE_KEY_VERSION
+"""Contextual mobile resource bridge: patient, panoramic, document and appointment resources."""
+from datetime import datetime, timedelta
+from pathlib import Path
+from io import BytesIO
+import base64
+import logging
+import mimetypes
+import os
+import secrets
+
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from PIL import Image, ImageOps, UnidentifiedImageError
+
+from backend.services.clinical_photo_normalization import (
+    CLINICAL_PHOTO_MAX_BYTES,
+    normalize_clinical_photo,
+)
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Table, delete, insert, or_, select
+from sqlalchemy.orm import Session
+
+from backend import database, models
+from backend.routers import documents as _documents
+from backend.routers.auth import get_current_user, has_permission
+from backend.utils.access_control import assert_patient_access
+from . import admin_legacy as _admin_legacy
+from . import mobile_legacy as _legacy
+from .mobile import _approval_value, _role_name
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+# Server-side context. Neither resource id nor PHI is encoded in QR or mobile URL.
+BRIDGE_CONTEXT_TABLE = Table(
+    "mobile_bridge_contexts",
+    models.Base.metadata,
+    Column("id", Integer, primary_key=True),
+    Column("context_key", String(64), unique=True, index=True, nullable=False),
+    Column("pairing_id", Integer, ForeignKey("zka_pairing_tokens.id", ondelete="CASCADE"), unique=True, index=True, nullable=False),
+    Column("employer_id", Integer, index=True, nullable=False),
+    Column("target_user_id", Integer, index=True, nullable=False),
+    Column("device_id", String(64), index=True, nullable=True),
+    Column("resource_type", String(32), nullable=False),
+    Column("resource_id", Integer, nullable=False),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+    extend_existing=True,
+)
+
+_RESOURCE_SPECS = {
+    "patient": {"permission": "clinical", "label": "Dossier patient"},
+    "panoramic": {"permission": "panoramic", "label": "Radio panoramique"},
+    "document": {"permission": None, "label": "Document"},
+    "appointment": {"permission": "agenda", "label": "Rendez-vous"},
+}
+
+
+class ResourceBridgePairingRequest(BaseModel):
+    resource_type: str
+    resource_id: int
+    target_user_id: int | None = None
+
+
+class ResourceBridgeDestinationRequest(BaseModel):
+    credential: str
+
+
+class ResourceContextRequest(BaseModel):
+    context_key: str
+
+
+def _resource_token() -> str:
+    # Same 192-bit secret budget as M6.4, still within ZKAPairingToken.token VARCHAR(36).
+    return f"c.{secrets.token_urlsafe(24)}"
+
+
+def _resource_type(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in _RESOURCE_SPECS:
+        raise HTTPException(status_code=422, detail="Type de ressource mobile non pris en charge.")
+    return normalized
+
+
+def _document_type_value(document: models.DocumentArchive) -> str:
+    value = getattr(document.document_type, "value", document.document_type)
+    return str(value or "").strip().lower()
+
+
+def _document_permission(document: models.DocumentArchive) -> str:
+    # Same source of truth as document generation/download. Unknown historical
+    # types stay conservative instead of becoming permission-free on mobile.
+    return str(_documents.DOCUMENT_TYPE_PERMISSIONS.get(_document_type_value(document), "patients"))
+
+
+def _resource_permission(resource_type: str, resource=None) -> str:
+    resource_type = _resource_type(resource_type)
+    if resource_type == "document":
+        if not isinstance(resource, models.DocumentArchive):
+            raise HTTPException(status_code=422, detail="Document mobile non résolu.")
+        return _document_permission(resource)
+    return str(_RESOURCE_SPECS[resource_type]["permission"])
+
+
+def _resource_label(resource_type: str) -> str:
+    return str(_RESOURCE_SPECS[_resource_type(resource_type)]["label"])
+
+
+def _patient_resource(db: Session, user: models.User, resource_id: int) -> models.Patient:
+    if not has_permission(user, "clinical"):
+        raise HTTPException(status_code=403, detail="Accès clinique mobile refusé.")
+    patient = db.query(models.Patient).filter(
+        models.Patient.id == int(resource_id),
+        models.Patient.employer_id == user.get_employer_id(),
+        models.Patient.deleted_at.is_(None),
+    ).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Dossier patient introuvable dans ce cabinet.")
+    return patient
+
+
+def _panoramic_resource(db: Session, user: models.User, resource_id: int) -> models.PanoramicAnalysis:
+    if not has_permission(user, "panoramic"):
+        raise HTTPException(status_code=403, detail="Accès panoramique mobile refusé.")
+    analysis = db.query(models.PanoramicAnalysis).filter(models.PanoramicAnalysis.id == int(resource_id)).first()
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Radio panoramique introuvable.")
+    assert_patient_access(analysis.patient_id, user, db)
+    patient = db.query(models.Patient.id).filter(
+        models.Patient.id == analysis.patient_id,
+        models.Patient.employer_id == user.get_employer_id(),
+        models.Patient.deleted_at.is_(None),
+    ).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient de la radio panoramique indisponible.")
+    return analysis
+
+
+def _document_resource(db: Session, user: models.User, resource_id: int) -> models.DocumentArchive:
+    document = db.query(models.DocumentArchive).filter(
+        models.DocumentArchive.id == int(resource_id),
+        models.DocumentArchive.status == models.DocumentStatus.ACTIF,
+    ).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document actif introuvable.")
+    permission = _document_permission(document)
+    if not has_permission(user, permission):
+        raise HTTPException(status_code=403, detail=f"Accès document mobile refusé. Permission requise : {permission}.")
+    assert_patient_access(document.patient_id, user, db)
+    patient = db.query(models.Patient.id).filter(
+        models.Patient.id == document.patient_id,
+        models.Patient.employer_id == user.get_employer_id(),
+        models.Patient.deleted_at.is_(None),
+    ).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient du document indisponible.")
+    return document
+
+
+def _appointment_resource(db: Session, user: models.User, resource_id: int) -> models.Appointment:
+    if not has_permission(user, "agenda"):
+        raise HTTPException(status_code=403, detail="Accès rendez-vous mobile refusé.")
+    appointment = db.query(models.Appointment).filter(
+        models.Appointment.id == int(resource_id),
+        models.Appointment.employer_id == user.get_employer_id(),
+    ).first()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Rendez-vous introuvable dans ce cabinet.")
+    if appointment.patient_id:
+        assert_patient_access(appointment.patient_id, user, db)
+        patient = db.query(models.Patient.id).filter(
+            models.Patient.id == appointment.patient_id,
+            models.Patient.employer_id == user.get_employer_id(),
+            models.Patient.deleted_at.is_(None),
+        ).first()
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient du rendez-vous indisponible.")
+    return appointment
+
+
+def _resource_entity(db: Session, user: models.User, resource_type: str, resource_id: int):
+    resource_type = _resource_type(resource_type)
+    if resource_type == "patient":
+        return _patient_resource(db, user, resource_id)
+    if resource_type == "panoramic":
+        return _panoramic_resource(db, user, resource_id)
+    if resource_type == "document":
+        return _document_resource(db, user, resource_id)
+    if resource_type == "appointment":
+        return _appointment_resource(db, user, resource_id)
+    raise HTTPException(status_code=422, detail="Type de ressource mobile non pris en charge.")
+
+
+def _resource_bridge_target_users(
+    db: Session,
+    current_user: models.User,
+    resource_type: str,
+    resource,
+) -> list[models.User]:
+    permission = _resource_permission(resource_type, resource)
+    if not has_permission(current_user, "admin"):
+        return [current_user] if current_user.is_active and has_permission(current_user, permission) else []
+
+    employer_id = current_user.get_employer_id()
+    users = db.query(models.User).filter(
+        or_(models.User.id == employer_id, models.User.employer_id == employer_id)
+    ).order_by(models.User.id.asc()).all()
+    result = []
+    for user in users:
+        if not user.is_active:
+            continue
+        if user.id != employer_id and _approval_value(user) != "approved":
+            continue
+        if not has_permission(user, permission):
+            continue
+        result.append(user)
+    return result
+
+
+def _resolve_resource_bridge_target(
+    db: Session,
+    current_user: models.User,
+    target_user_id: int | None,
+    resource_type: str,
+    resource,
+) -> models.User:
+    requested_id = int(target_user_id or current_user.id)
+    if requested_id != current_user.id and not has_permission(current_user, "admin"):
+        raise HTTPException(status_code=403, detail="Seul un administrateur peut cibler un autre utilisateur mobile.")
+
+    employer_id = current_user.get_employer_id()
+    target = db.query(models.User).filter(models.User.id == requested_id).first()
+    if not target or target.get_employer_id() != employer_id:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable dans ce cabinet.")
+    if not target.is_active or (target.id != employer_id and _approval_value(target) != "approved"):
+        raise HTTPException(status_code=403, detail="Utilisateur inactif ou non approuvé.")
+
+    permission = _resource_permission(resource_type, resource)
+    if not has_permission(target, permission):
+        raise HTTPException(status_code=403, detail=f"Utilisateur cible sans permission {permission}.")
+    return target
+
+
+def _context_for_pairing(db: Session, pairing_id: int):
+    return db.execute(select(BRIDGE_CONTEXT_TABLE).where(BRIDGE_CONTEXT_TABLE.c.pairing_id == int(pairing_id))).mappings().first()
+
+
+def _context_by_key(db: Session, context_key: str):
+    return db.execute(select(BRIDGE_CONTEXT_TABLE).where(BRIDGE_CONTEXT_TABLE.c.context_key == context_key)).mappings().first()
+
+
+def _purge_expired(db: Session, employer_id: int, now: datetime) -> None:
+    expired_ids = [row[0] for row in db.query(models.ZKAPairingToken.id).filter(
+        models.ZKAPairingToken.employer_id == employer_id,
+        models.ZKAPairingToken.expires_at < now,
+    ).all()]
+    if expired_ids:
+        db.execute(delete(BRIDGE_CONTEXT_TABLE).where(BRIDGE_CONTEXT_TABLE.c.pairing_id.in_(expired_ids)))
+        db.query(models.ZKAPairingToken).filter(models.ZKAPairingToken.id.in_(expired_ids)).delete(synchronize_session=False)
+
+
+def _context_state(db: Session, mobile_user: models.User, context) -> tuple[str, str | None, int | None]:
+    if context["employer_id"] != mobile_user.get_employer_id() or context["target_user_id"] != mobile_user.id:
+        raise HTTPException(status_code=403, detail="Contexte mobile incompatible avec cette session.")
+
+    resource_type = str(context["resource_type"]).lower()
+    if resource_type not in _RESOURCE_SPECS:
+        return "unavailable", "Type de ressource mobile non pris en charge.", 404
+
+    try:
+        _resource_entity(db, mobile_user, resource_type, int(context["resource_id"]))
+    except HTTPException as exc:
+        if exc.status_code in (403, 404):
+            return "unavailable", str(exc.detail), int(exc.status_code)
+        raise
+    return "ready", None, None
+
+
+def _validated_mobile_context(
+    db: Session,
+    authorization: str,
+    context_key: str,
+):
+    mobile_user, tenant_id, mobile_payload = _legacy._decode_mobile_identity(authorization, db)
+    context = _context_by_key(db, context_key.strip()) if context_key.strip() else None
+    if not context:
+        raise HTTPException(status_code=404, detail="Contexte mobile introuvable.")
+    if context["target_user_id"] != mobile_user.id or context["employer_id"] != tenant_id:
+        raise HTTPException(status_code=403, detail="Contexte mobile incompatible avec cette session.")
+    device_id = str(mobile_payload.get("device_id") or "")
+    if not device_id or context["device_id"] != device_id:
+        raise HTTPException(status_code=403, detail="Contexte mobile lié à un autre appareil.")
+
+    state, reason, error_status = _context_state(db, mobile_user, context)
+    if state != "ready":
+        raise HTTPException(status_code=error_status or 404, detail=reason or "Ressource mobile indisponible.")
+    return mobile_user, context
+
+
+def _document_file(document: models.DocumentArchive) -> Path:
+    raw_path = str(document.file_path or "").strip()
+    if not raw_path:
+        raise HTTPException(status_code=404, detail="Fichier du document introuvable.")
+
+    if raw_path.startswith("static/archives/") or raw_path.startswith("static/documents/"):
+        candidate = (Path(_documents.MEDIA_DIR) / raw_path.replace("static/", "", 1)).resolve()
+        allowed_root = Path(_documents.MEDIA_DIR).resolve()
+    else:
+        candidate = (Path(_documents.BASE_DIR) / raw_path).resolve()
+        allowed_root = Path(_documents.BASE_DIR).resolve()
+
+    if candidate != allowed_root and allowed_root not in candidate.parents:
+        raise HTTPException(status_code=404, detail="Chemin du document invalide.")
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Fichier du document introuvable sur ce serveur.")
+    return candidate
+
+
+_DOCUMENT_SCAN_MAX_PAGES = 8
+_DOCUMENT_SCAN_MAX_PAGE_BYTES = 12 * 1024 * 1024
+_DOCUMENT_SCAN_MAX_TOTAL_BYTES = 48 * 1024 * 1024
+_DOCUMENT_SCAN_MAX_PIXELS = 50_000_000
+_DOCUMENT_SCAN_SOURCE_FORMATS = {'JPEG', 'PNG', 'WEBP'}
+
+
+def _normalize_document_scan_page(raw: bytes) -> bytes:
+    """Validate and rewrite one scan page as a metadata-free JPEG."""
+    if not raw:
+        raise HTTPException(status_code=422, detail="La page scannée est vide.")
+    if len(raw) > _DOCUMENT_SCAN_MAX_PAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Une page scannée dépasse la limite de 12 MiB.")
+
+    try:
+        with Image.open(BytesIO(raw)) as probe:
+            source_format = str(probe.format or '').upper()
+            width, height = probe.size
+            if source_format not in _DOCUMENT_SCAN_SOURCE_FORMATS:
+                raise HTTPException(status_code=422, detail="Format de page non pris en charge. Utilisez JPEG, PNG ou WebP.")
+            if width <= 0 or height <= 0 or width * height > _DOCUMENT_SCAN_MAX_PIXELS:
+                raise HTTPException(status_code=413, detail="La résolution d'une page scannée est trop élevée.")
+            probe.verify()
+
+        with Image.open(BytesIO(raw)) as image:
+            image = ImageOps.exif_transpose(image)
+            image.load()
+            if image.width <= 0 or image.height <= 0 or image.width * image.height > _DOCUMENT_SCAN_MAX_PIXELS:
+                raise HTTPException(status_code=413, detail="La résolution d'une page scannée est trop élevée.")
+            if image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info):
+                rgba = image.convert('RGBA')
+                normalized_image = Image.new('RGB', rgba.size, 'white')
+                normalized_image.paste(rgba, mask=rgba.getchannel('A'))
+            else:
+                normalized_image = image.convert('RGB')
+            output = BytesIO()
+            normalized_image.save(output, format='JPEG', quality=90, optimize=True)
+            normalized = output.getvalue()
+            if not normalized:
+                raise HTTPException(status_code=422, detail="Impossible de normaliser une page scannée.")
+            return normalized
+    except HTTPException:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise HTTPException(status_code=422, detail="Le fichier sélectionné n'est pas une page de document valide.") from exc
+
+
+def _document_scan_pdf(normalized_pages: list[bytes]) -> bytes:
+    if not normalized_pages:
+        raise HTTPException(status_code=422, detail="Le scan ne contient aucune page.")
+
+    # Keep pages compressed while assembling the PDF. Loading every 50 MP page
+    # as a simultaneous RGB bitmap could otherwise exceed 1 GiB at the 8-page cap.
+    import fitz
+
+    document = fitz.open()
+    try:
+        for raw in normalized_pages:
+            with Image.open(BytesIO(raw)) as image:
+                width_px, height_px = image.size
+            width_pt = max(1.0, width_px * 72.0 / 150.0)
+            height_pt = max(1.0, height_px * 72.0 / 150.0)
+            page = document.new_page(width=width_pt, height=height_pt)
+            page.insert_image(page.rect, stream=raw, keep_proportion=True)
+
+        pdf = document.tobytes(garbage=4, deflate=True)
+        if not pdf.startswith(b'%PDF'):
+            raise HTTPException(status_code=422, detail="Impossible de générer le PDF scanné.")
+        return pdf
+    finally:
+        document.close()
+
+
+@router.get('/resource-bridge-options', summary='Cibles autorisées pour un pont mobile de ressource')
+def get_resource_bridge_options(
+    resource_type: str,
+    resource_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    resource_type = _resource_type(resource_type)
+    resource = _resource_entity(db, current_user, resource_type, resource_id)
+    targets = _resource_bridge_target_users(db, current_user, resource_type, resource)
+    return {
+        "resource_type": resource_type,
+        "resource_label": _resource_label(resource_type),
+        "targets": [{
+            "id": user.id,
+            "name": user.nom_complet or user.email,
+            "email": user.email,
+            "role": _role_name(user),
+            "is_current_user": user.id == current_user.id,
+        } for user in targets],
+        "expires_in": 300,
+        "contains_patient_data": False,
+        "contains_resource_data": False,
+    }
+
+
+@router.post('/resource-bridge-pairing', summary='Générer un pont opaque vers une ressource mobile')
+def create_resource_bridge_pairing(
+    body: ResourceBridgePairingRequest,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    resource_type = _resource_type(body.resource_type)
+    resource = _resource_entity(db, current_user, resource_type, body.resource_id)
+    target = _resolve_resource_bridge_target(db, current_user, body.target_user_id, resource_type, resource)
+    _resource_entity(db, target, resource_type, body.resource_id)
+
+    employer_id = current_user.get_employer_id()
+    config = db.query(models.CabinetConfig).filter(models.CabinetConfig.owner_id == employer_id).first()
+    master_key = mobile_pairing_key_hex()
+    if not config or not master_key:
+        raise HTTPException(status_code=404, detail="Configuration ZKA incomplète.")
+
+    now = datetime.utcnow()
+    _purge_expired(db, employer_id, now)
+    manual_code = None
+    for _ in range(20):
+        candidate = f"{secrets.randbelow(900000) + 100000:06d}"
+        collision = db.query(models.ZKAPairingToken).filter(
+            models.ZKAPairingToken.manual_code == candidate,
+            models.ZKAPairingToken.used_at.is_(None),
+            models.ZKAPairingToken.expires_at > now,
+        ).first()
+        if collision is None:
+            manual_code = candidate
+            break
+    if manual_code is None:
+        raise HTTPException(status_code=503, detail="Impossible de générer un code mobile unique.")
+
+    record = models.ZKAPairingToken(
+        token=_resource_token(), manual_code=manual_code, employer_id=employer_id,
+        user_id=target.id, public_id=config.public_id, master_key=master_key,
+        role=_role_name(target), expires_at=now + timedelta(minutes=5),
+    )
+    db.add(record)
+    db.flush()
+    db.execute(insert(BRIDGE_CONTEXT_TABLE).values(
+        context_key=secrets.token_urlsafe(24), pairing_id=record.id, employer_id=employer_id,
+        target_user_id=target.id, device_id=None, resource_type=resource_type,
+        resource_id=int(body.resource_id), created_at=now,
+    ))
+
+    base_url = _legacy.get_lan_base_url()
+    qr_payload = f"{base_url}/mobile/onboarding?token={record.token}"
+    try:
+        qr_bytes = _admin_legacy.QRService.generate_qr_bytes(
+            qr_payload, color="#4F46E5", box_size=10, add_logo=False, qr_style="classic",
+        )
+        img_str = base64.b64encode(qr_bytes.getvalue()).decode()
+    except Exception as exc:
+        db.rollback()
+        logger.error("Resource QR generation failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Échec de génération du QR Code.") from exc
+
+    db.commit()
+    db.refresh(record)
+    _admin_legacy.audit_service.log(
+        db=db, user_id=current_user.id, employer_id=employer_id,
+        action="MOBILE_RESOURCE_BRIDGE_ISSUED", resource_type=resource_type,
+        resource_id=str(getattr(resource, "id", body.resource_id)), severity="WARNING",
+        details=f"Pont mobile {resource_type} généré pour user_id={target.id}; QR opaque sans donnée clinique.",
+    )
+    return {
+        "qr_code": f"data:image/png;base64,{img_str}", "expires_in": 300,
+        "lan_url": base_url, "token_code": manual_code, "target_user_id": target.id,
+        "target_user_name": target.nom_complet or target.email, "target_role": _role_name(target),
+        "resource_type": resource_type, "resource_label": _resource_label(resource_type),
+        "contains_patient_data": False, "contains_resource_data": False,
+    }
+
+
+@router.post('/resource-bridge-destination', summary='Résoudre un contexte ressource après appairage')
+def resolve_resource_bridge_destination(
+    body: ResourceBridgeDestinationRequest,
+    authorization: str = Header(...),
+    db: Session = Depends(database.get_db),
+):
+    mobile_user, tenant_id, mobile_payload = _legacy._decode_mobile_identity(authorization, db)
+    credential = body.credential.strip()
+    if not credential:
+        raise HTTPException(status_code=404, detail="Contexte ressource absent.")
+    record = db.query(models.ZKAPairingToken).filter(
+        or_(models.ZKAPairingToken.token == credential, models.ZKAPairingToken.manual_code == credential)
+    ).order_by(models.ZKAPairingToken.id.desc()).first()
+    if not record or record.used_at is None:
+        raise HTTPException(status_code=404, detail="Pont ressource introuvable ou non consommé.")
+    if record.user_id != mobile_user.id or record.employer_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Pont ressource incompatible avec cette session.")
+    context = _context_for_pairing(db, record.id)
+    if not context:
+        raise HTTPException(status_code=404, detail="Ce pont ne contient pas de contexte ressource.")
+
+    device_id = str(mobile_payload.get("device_id") or "")
+    if not device_id:
+        raise HTTPException(status_code=401, detail="Session mobile sans appareil associé.")
+    if context["device_id"] and context["device_id"] != device_id:
+        raise HTTPException(status_code=403, detail="Contexte mobile lié à un autre appareil.")
+    if not context["device_id"]:
+        db.execute(BRIDGE_CONTEXT_TABLE.update().where(BRIDGE_CONTEXT_TABLE.c.id == context["id"]).values(device_id=device_id))
+        db.commit()
+        context = _context_for_pairing(db, record.id)
+
+    state, reason, _error_status = _context_state(db, mobile_user, context)
+    return {
+        "destination": "context", "label": _resource_label(str(context["resource_type"])), "fallback": False,
+        "context": {"type": context["resource_type"], "key": context["context_key"], "state": state, "reason": reason},
+    }
+
+
+@router.post('/resource-context', summary='Relire une ressource mobile contextuelle autorisée')
+def get_resource_context(
+    body: ResourceContextRequest,
+    authorization: str = Header(...),
+    db: Session = Depends(database.get_db),
+):
+    mobile_user, context = _validated_mobile_context(db, authorization, body.context_key)
+    resource_type = str(context["resource_type"])
+
+    if resource_type == "patient":
+        patient = _patient_resource(db, mobile_user, int(context["resource_id"]))
+        assurance = getattr(patient.assurance, "value", patient.assurance)
+        return {
+            "type": "patient", "label": "Dossier patient",
+            "patient": {
+                "id": patient.id, "numero_dossier": patient.numero_dossier,
+                "nom": patient.nom, "prenom": patient.prenom,
+                "date_naissance": patient.date_naissance.isoformat() if patient.date_naissance else None,
+                "telephone": patient.telephone, "assurance": assurance,
+                "has_medical_alert": bool(patient.antecedents_medicaux),
+                "motif_consultation": patient.motif_consultation,
+            },
+        }
+
+    if resource_type == "panoramic":
+        analysis = _panoramic_resource(db, mobile_user, int(context["resource_id"]))
+        patient = db.query(models.Patient).filter(
+            models.Patient.id == analysis.patient_id,
+            models.Patient.employer_id == mobile_user.get_employer_id(),
+            models.Patient.deleted_at.is_(None),
+        ).first()
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient de la radio panoramique indisponible.")
+        detections = analysis.detections_data if isinstance(analysis.detections_data, dict) else {}
+        landmarks = detections.get("detections") if isinstance(detections.get("detections"), list) else []
+        return {
+            "type": "panoramic",
+            "label": "Radio panoramique",
+            "panoramic": {
+                "patient_name": f"{patient.nom.upper()} {patient.prenom}",
+                "created_at": analysis.created_at.isoformat() if analysis.created_at else None,
+                "landmarks_count": len(landmarks),
+                "report_saved": bool((analysis.report_narrative or "").strip()),
+            },
+        }
+
+    if resource_type == "document":
+        document = _document_resource(db, mobile_user, int(context["resource_id"]))
+        patient = db.query(models.Patient).filter(
+            models.Patient.id == document.patient_id,
+            models.Patient.employer_id == mobile_user.get_employer_id(),
+            models.Patient.deleted_at.is_(None),
+        ).first()
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient du document indisponible.")
+        doc_type = getattr(document.document_type, "value", document.document_type)
+        return {
+            "type": "document",
+            "label": "Document",
+            "document": {
+                "patient_name": f"{patient.nom.upper()} {patient.prenom}",
+                "document_type": str(doc_type),
+                "name": document.title or document.original_filename or document.filename,
+                "filename": document.original_filename or document.filename,
+                "created_at": document.created_at.isoformat() if document.created_at else None,
+                "mime_type": mimetypes.guess_type(document.original_filename or document.filename or "")[0] or "application/octet-stream",
+            },
+        }
+
+    if resource_type == "appointment":
+        appointment = _appointment_resource(db, mobile_user, int(context["resource_id"]))
+        patient_name = appointment.patient_name or "Patient externe"
+        if appointment.patient_id:
+            patient = db.query(models.Patient).filter(
+                models.Patient.id == appointment.patient_id,
+                models.Patient.employer_id == mobile_user.get_employer_id(),
+                models.Patient.deleted_at.is_(None),
+            ).first()
+            if not patient:
+                raise HTTPException(status_code=404, detail="Patient du rendez-vous indisponible.")
+            patient_name = f"{patient.nom.upper()} {patient.prenom}"
+        status_value = getattr(appointment.status, "value", appointment.status)
+        scheduling_value = getattr(appointment.scheduling_type, "value", appointment.scheduling_type)
+        return {
+            "type": "appointment",
+            "label": "Rendez-vous",
+            "appointment": {
+                "patient_name": patient_name,
+                "datetime_start": appointment.datetime_start.isoformat() if appointment.datetime_start else None,
+                "duration_minutes": appointment.duration_minutes,
+                "motif": appointment.motif or "",
+                "status": str(status_value),
+                "scheduling_type": str(scheduling_value),
+                "notes": appointment.notes,
+            },
+        }
+
+    raise HTTPException(status_code=422, detail="Type de ressource mobile non pris en charge.")
+
+
+@router.post('/resource-context-photo', summary='Capturer une photo clinique dans le Media Core patient')
+async def upload_resource_context_photo(
+    context_key: str = Form(...),
+    file: UploadFile = File(...),
+    authorization: str = Header(...),
+    db: Session = Depends(database.get_db),
+):
+    from backend.services.clinical_asset_ingestion import (
+        ClinicalAssetIngestionError,
+        ingest_clinical_asset_bytes,
+    )
+    from backend.services.clinical_asset_service import ClinicalAssetInvariantError
+    from backend.services.clinical_asset_storage import ClinicalAssetStorageError
+
+    mobile_user, context = _validated_mobile_context(db, authorization, context_key)
+    if not has_permission(mobile_user, 'clinical'):
+        raise HTTPException(status_code=403, detail="Accès clinique mobile refusé.")
+    if str(context['resource_type']).lower() != 'patient':
+        raise HTTPException(status_code=422, detail="La photo clinique exige un contexte Patient.")
+
+    patient = _patient_resource(db, mobile_user, int(context['resource_id']))
+    claimed_type = str(file.content_type or '').strip().lower()
+    if claimed_type and not claimed_type.startswith('image/'):
+        raise HTTPException(status_code=422, detail="Le fichier sélectionné n'est pas une image.")
+
+    try:
+        raw = await file.read(CLINICAL_PHOTO_MAX_BYTES + 1)
+    finally:
+        await file.close()
+    normalized = normalize_clinical_photo(raw)
+
+    captured_at = datetime.utcnow()
+    filename = f"device-capture-{captured_at.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}.jpg"
+    try:
+        result = ingest_clinical_asset_bytes(
+            db,
+            employer_id=int(mobile_user.get_employer_id()),
+            patient_id=int(patient.id),
+            asset_type='PHOTO',
+            source_kind='DEVICE_CAPTURE',
+            content=normalized,
+            original_filename=filename,
+            claimed_mime_type='image/jpeg',
+            source_ref='MOBILE_RESOURCE_BRIDGE',
+            captured_at=captured_at,
+            created_by=int(mobile_user.id),
+            provenance_json={
+                'ingestion_channel': 'MOBILE_RESOURCE_BRIDGE',
+                'capture_kind': 'SMARTPHONE_CAMERA',
+                'bridge_resource_type': 'patient',
+                'device_id': str(context.get('device_id') or ''),
+            },
+        )
+        db.commit()
+        db.refresh(result.asset)
+        if result.thumbnail_asset is not None:
+            db.refresh(result.thumbnail_asset)
+    except HTTPException:
+        db.rollback()
+        raise
+    except (ClinicalAssetIngestionError, ClinicalAssetInvariantError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (ClinicalAssetStorageError, OSError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Clinical media storage unavailable") from exc
+
+    _documents.audit_service.log(
+        db=db,
+        user_id=mobile_user.id,
+        employer_id=mobile_user.get_employer_id(),
+        action='CLINICAL_PHOTO_CAPTURED',
+        resource_type='CLINICAL_ASSET',
+        resource_id=str(result.asset.id),
+        severity='INFO',
+        details=(
+            f"Photo clinique mobile enregistrée asset_id={result.asset.id} "
+            f"source_kind=DEVICE_CAPTURE patient_id={patient.id}"
+        ),
+    )
+    thumbnail_id = result.thumbnail_asset.id if result.thumbnail_asset is not None else None
+    created_at = result.asset.created_at.isoformat() if result.asset.created_at else None
+    return {
+        'success': True,
+        'asset': {
+            'id': result.asset.id,
+            'asset_type': result.asset.asset_type,
+            'source_kind': result.asset.source_kind,
+            'mime_type': result.asset.mime_type,
+            'thumbnail_asset_id': thumbnail_id,
+            'created_at': created_at,
+        },
+        # Backward-compatible mobile contract: the UI only checks this marker.
+        # The identifier now belongs to ClinicalAsset; no DocumentArchive row is created.
+        'document': {
+            'id': result.asset.id,
+            'document_type': models.DocumentType.PHOTO_CLINIQUE.value,
+            'title': 'Photo clinique',
+            'created_at': created_at,
+        },
+    }
+
+
+@router.post('/resource-context-document-scan', summary='Archiver un scan multi-page depuis le contexte Patient mobile')
+async def upload_resource_context_document_scan(
+    context_key: str = Form(...),
+    pages: list[UploadFile] = File(...),
+    authorization: str = Header(...),
+    db: Session = Depends(database.get_db),
+):
+    mobile_user, context = _validated_mobile_context(db, authorization, context_key)
+    if not has_permission(mobile_user, 'clinical'):
+        raise HTTPException(status_code=403, detail="Accès clinique mobile refusé.")
+    if str(context['resource_type']).lower() != 'patient':
+        raise HTTPException(status_code=422, detail="Le scan de document exige un contexte Patient.")
+    patient = _patient_resource(db, mobile_user, int(context['resource_id']))
+
+    if not pages:
+        raise HTTPException(status_code=422, detail="Ajoutez au moins une page au document.")
+    if len(pages) > _DOCUMENT_SCAN_MAX_PAGES:
+        raise HTTPException(status_code=413, detail="Un document scanné est limité à 8 pages.")
+
+    normalized_pages: list[bytes] = []
+    total_raw_bytes = 0
+    for page in pages:
+        claimed_type = str(page.content_type or '').strip().lower()
+        if claimed_type and not claimed_type.startswith('image/'):
+            await page.close()
+            raise HTTPException(status_code=422, detail="Chaque page doit être une image JPEG, PNG ou WebP.")
+        try:
+            raw = await page.read(_DOCUMENT_SCAN_MAX_PAGE_BYTES + 1)
+        finally:
+            await page.close()
+        total_raw_bytes += len(raw)
+        if total_raw_bytes > _DOCUMENT_SCAN_MAX_TOTAL_BYTES:
+            raise HTTPException(status_code=413, detail="Le scan dépasse la limite cumulée de 48 MiB.")
+        normalized_pages.append(_normalize_document_scan_page(raw))
+
+    pdf = _document_scan_pdf(normalized_pages)
+    filename = f"document-scanne-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}.pdf"
+    archive_service = _documents.get_archive_service(db)
+    document, _ = archive_service.archive_document(
+        patient_id=patient.id,
+        file_content=pdf,
+        filename=filename,
+        doc_type=models.DocumentType.AUTRE,
+        uploaded_by_id=mobile_user.id,
+        title='Document scanné',
+        description=f'Scan mobile contextuel · {len(normalized_pages)} page(s)',
+        tags=['mobile', 'document-scan'],
+        is_accounted=False,
+    )
+    _documents.audit_service.log(
+        db=db,
+        user_id=mobile_user.id,
+        employer_id=mobile_user.get_employer_id(),
+        action='DOCUMENT_SCANNED',
+        resource_type='AUTRE',
+        resource_id=str(document.id),
+        severity='INFO',
+        details=f"Document mobile scanné document_id={document.id} pages={len(normalized_pages)}",
+    )
+    return {
+        'success': True,
+        'pages': len(normalized_pages),
+        'document': {
+            'id': document.id,
+            'document_type': models.DocumentType.AUTRE.value,
+            'title': document.title or 'Document scanné',
+            'created_at': document.created_at.isoformat() if document.created_at else None,
+        },
+    }
+
+
+@router.post('/resource-context-media', summary='Charger le média protégé du contexte mobile')
+def get_resource_context_media(
+    body: ResourceContextRequest,
+    authorization: str = Header(...),
+    db: Session = Depends(database.get_db),
+):
+    mobile_user, context = _validated_mobile_context(db, authorization, body.context_key)
+    resource_type = str(context["resource_type"])
+
+    if resource_type == "panoramic":
+        analysis = _panoramic_resource(db, mobile_user, int(context["resource_id"]))
+        raw_path = str(analysis.image_path or "").strip().lstrip("/")
+        if raw_path.startswith("api/"):
+            raw_path = raw_path[4:]
+
+        backend_root = Path(__file__).resolve().parents[1]
+        allowed_root = (backend_root / "static" / "uploads" / "panoramic").resolve()
+        candidate = (backend_root / raw_path).resolve()
+        if candidate != allowed_root and allowed_root not in candidate.parents:
+            raise HTTPException(status_code=404, detail="Média panoramique invalide.")
+        if not candidate.is_file():
+            raise HTTPException(status_code=404, detail="Média panoramique introuvable.")
+
+        media_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        return FileResponse(
+            path=str(candidate),
+            media_type=media_type,
+            filename=None,
+            headers={"Cache-Control": "private, no-store, max-age=0", "Pragma": "no-cache"},
+        )
+
+    if resource_type == "document":
+        document = _document_resource(db, mobile_user, int(context["resource_id"]))
+        candidate = _document_file(document)
+        media_type = mimetypes.guess_type(document.original_filename or candidate.name)[0] or "application/octet-stream"
+        _admin_legacy.audit_service.log(
+            db=db,
+            user_id=mobile_user.id,
+            employer_id=mobile_user.get_employer_id(),
+            action="MEDIA_ACCESS_GRANTED",
+            resource_type=str(getattr(document.document_type, "value", document.document_type)),
+            resource_id=str(document.id),
+            severity="INFO",
+            details=f"Document mobile contextuel {document.id} chargé sur appareil appairé.",
+        )
+        return FileResponse(
+            path=str(candidate),
+            media_type=media_type,
+            filename=None,
+            headers={"Cache-Control": "private, no-store, max-age=0", "Pragma": "no-cache"},
+        )
+
+    raise HTTPException(status_code=422, detail="Ce contexte mobile ne contient pas de média chargeable.")

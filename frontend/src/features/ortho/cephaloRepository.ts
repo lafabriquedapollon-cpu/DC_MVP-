@@ -1,0 +1,120 @@
+import { api } from '../../services/api';
+
+
+/**
+ * Repository central pour la gestion des analyses céphalométriques.
+ * Centralise les appels API pour assurer la cohérence des données.
+ */
+export const cephaloRepository = {
+  
+  /**
+   * Récupère une analyse existante par son ID.
+   */
+  async getAnalysis(analysisId: number) {
+    const res = await api.get(`/ia/analyses/${analysisId}`);
+    return res.data;
+  },
+
+  /** R23-G4: reference-only opt-in, never silently falls back to clinical GET. */
+  async getR23G4ReferenceProfiles(analysisId: number, revision: number, signal?: AbortSignal): Promise<any> {
+    if (!Number.isSafeInteger(analysisId) || analysisId <= 0
+      || !Number.isSafeInteger(revision) || revision <= 0) {
+      throw new Error("Identité ou révision source non vérifiée");
+    }
+    const res = await api.get(`/ia/analyses/${analysisId}/r23g2-reference-profiles`, {
+      params: { expected_revision: revision },
+      signal,
+      // The endpoint responds Cache-Control: no-store. Do not add a custom
+      // request header here: CORS preflight would reject it on local Cabinet.
+    });
+    return res.data;
+  },
+
+  /**
+   * Upload une radiographie et lance l'analyse géométrique automatique.
+   */
+  async uploadRadio(patientId: number | string, file: File) {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await api.post(`/ia/upload-radio?patient_id=${patientId}`, form);
+    return res.data;
+  },
+
+  /**
+   * Sauvegarde l'état complet d'une analyse.
+   */
+  async saveAnalysis(analysisId: number, payload: any) {
+    const res = await api.put(`/ia/analyses/${analysisId}`, payload);
+    return res.data;
+  },
+
+  /**
+   * Demande au serveur de vérifier le candidat fiducial déjà persisté.
+   * Aucun profil physique n'est sélectionnable côté client.
+   */
+  async autoCalibrate(analysisId: number) {
+    const res = await api.post(`/ia/analyses/${analysisId}/auto-calibrate`, {});
+    return res.data;
+  },
+
+  /**
+   * Confirme facultativement une auto-calibration déjà AUTO_VERIFIED.
+   */
+  async confirmAutoCalibration(analysisId: number) {
+    const res = await api.post(`/ia/analyses/${analysisId}/auto-calibration/confirm`, {});
+    return res.data;
+  },
+
+  /**
+   * Applique une calibration mm/pixel manuelle auditée sur une analyse.
+   */
+  async calibrate(analysisId: number, p1: {x: number, y: number}, p2: {x: number, y: number}, distanceMm: number) {
+    const res = await api.post(`/ia/analyses/${analysisId}/calibrate`, {
+      p1, 
+      p2, 
+      distance_mm: distanceMm
+    });
+    return res.data;
+  },
+
+  /**
+   * Exporte le snapshot canonique du Workbench.
+   * Le payload client ne transporte que l'état de présentation LOT07;
+   * le backend résout toute l'autorité scientifique depuis LOT06.
+   */
+  async exportWorkbench(analysisId: number, presentationState: unknown) {
+    const res = await api.post(`/ia/analyses/${analysisId}/ortho-workbench-export`, presentationState);
+    return res.data;
+  },
+
+  /**
+   * Génère le rapport PDF complet.
+   */
+  async generatePDF(
+    patientId: number | string,
+    payload: { analysis_id: number; expected_revision: number; archive?: boolean; [key: string]: unknown },
+  ) {
+    return (await this.generatePDFWithReceipt(patientId, payload)).blob;
+  },
+
+  async generatePDFWithReceipt(
+    patientId: number | string,
+    payload: { analysis_id: number; expected_revision: number; archive?: boolean; [key: string]: unknown },
+  ): Promise<{ blob: Blob; replayed: boolean }> {
+    if (!Number.isSafeInteger(payload.analysis_id) || payload.analysis_id <= 0
+      || !Number.isSafeInteger(payload.expected_revision) || payload.expected_revision <= 0) {
+      throw new Error("Identité ou révision de l'étude non vérifiée.");
+    }
+    const res = await api.post(`/patients/${patientId}/pdf`, payload, {
+      responseType: 'blob' as any,
+    });
+    if (String(res.headers?.['x-cephalo-analysis-id'] ?? '') !== String(payload.analysis_id)
+      || String(res.headers?.['x-cephalo-revision'] ?? '') !== String(payload.expected_revision)) {
+      throw new Error("Le PDF reçu ne correspond pas à l'étude sélectionnée.");
+    }
+    return {
+      blob: res.data as Blob,
+      replayed: String(res.headers?.['x-cephalo-archive-replayed'] ?? '').toLowerCase() === 'true',
+    };
+  }
+};

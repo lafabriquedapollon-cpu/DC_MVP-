@@ -1,0 +1,45 @@
+import React from 'react';
+import { Pill, FileBadge, Calculator, Receipt, Type } from 'lucide-react';
+import { cn } from '../../../utils/cn';
+import { DOCUMENT_STUDIO_LABELS, type CertifiableDocumentStudioTab } from './DocumentStudioVocabulary';
+
+interface StudioTabsProps {
+  activeTab: CertifiableDocumentStudioTab;
+  onTabChange: (tab: CertifiableDocumentStudioTab) => void;
+  allowedTabs: CertifiableDocumentStudioTab[];
+  'data-tour'?: string;
+}
+
+export const StudioTabs: React.FC<StudioTabsProps> = ({ activeTab, onTabChange, allowedTabs, 'data-tour': dataTour }) => (
+  <div
+    data-tour={dataTour}
+    aria-label="Types de documents"
+    className="grid w-full grid-cols-2 sm:grid-cols-3 lg:flex lg:justify-center bg-input-field/90 dark:bg-slate-900/80 p-1.5 rounded-2xl gap-1 shrink-0 relative z-50 border border-border-main/70 dark:border-white/10 shadow-inner"
+  >
+    {allowedTabs.includes('ordonnance') && <TabButton active={activeTab === 'ordonnance'} onClick={() => onTabChange('ordonnance')} icon={<Pill size={16} />} label={DOCUMENT_STUDIO_LABELS.ordonnance} tourId="tab-ordonnance" />}
+    {allowedTabs.includes('certificat') && <TabButton active={activeTab === 'certificat'} onClick={() => onTabChange('certificat')} icon={<FileBadge size={16} />} label={DOCUMENT_STUDIO_LABELS.certificat} tourId="tab-certificat" />}
+    {allowedTabs.includes('devis') && <TabButton active={activeTab === 'devis'} onClick={() => onTabChange('devis')} icon={<Calculator size={16} />} label={DOCUMENT_STUDIO_LABELS.devis} tourId="tab-devis" />}
+    {allowedTabs.includes('honoraires') && <TabButton active={activeTab === 'honoraires'} onClick={() => onTabChange('honoraires')} icon={<Receipt size={16} />} label={DOCUMENT_STUDIO_LABELS.honoraires} tourId="tab-honoraires" />}
+    {allowedTabs.includes('echeancier') && <TabButton active={activeTab === 'echeancier'} onClick={() => onTabChange('echeancier')} icon={<Calculator size={16} />} label={DOCUMENT_STUDIO_LABELS.echeancier} tourId="tab-suivi" />}
+    {allowedTabs.includes('libre') && <TabButton active={activeTab === 'libre'} onClick={() => onTabChange('libre')} icon={<Type size={16} />} label={DOCUMENT_STUDIO_LABELS.libre} tourId="tab-libre" />}
+  </div>
+);
+
+const TabButton = ({ active, onClick, icon, label, tourId }: { active: boolean, onClick: () => void, icon: React.ReactNode, label: string, tourId?: string }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    data-tour={tourId}
+    aria-pressed={active}
+    className={cn(
+      "flex min-h-11 min-w-0 w-full lg:w-auto items-center justify-center gap-1.5 sm:gap-2 px-2 sm:px-3 lg:px-4 py-2 rounded-xl text-[9px] sm:text-[10px] font-black uppercase tracking-[0.04em] sm:tracking-[0.08em] lg:tracking-widest transition-all text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
+      active
+        ? "bg-card dark:bg-slate-800 text-primary shadow-sm ring-1 ring-black/5 dark:ring-white/10"
+        : "text-text-muted dark:text-text-muted hover:text-primary hover:bg-card/70 dark:hover:bg-slate-800/70"
+    )}
+    style={active ? { color: 'var(--primary)' } : {}}
+  >
+    <span className="shrink-0">{icon}</span>
+    <span className="min-w-0 leading-tight">{label}</span>
+  </button>
+);

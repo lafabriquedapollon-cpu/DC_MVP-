@@ -1,0 +1,831 @@
+import { create } from 'zustand';
+import { cephaloRepository } from '../cephaloRepository';
+import { emptyStudyClinicalContext } from '../cephaloClinicalIsolation';
+import { cephaloArchiveErrorMessage } from '../cephaloArchiveGate';
+import toast from 'react-hot-toast';
+import { prepareBoundCephaloDocumentSource, type BoundCephaloDocumentSource } from '../cephaloDocumentSource';
+import { API_BASE } from '../../../services/api';
+import {
+  buildPayload, computeMcNamaraProjections, initializeDefaultApexes,
+  calcDDMCephalo, computeLocalImpa
+} from '../cephaloUtils';
+import type { Landmark, SyncState, ImageFilters, UIMode, VTOSettings, StepId } from '../cephaloShared';
+import type { LocalState, DDMState, DiagnosticTexts, DonneesEtape2, DonneesEtape3, PhotoUpload, ProfilFacial } from '../cephaloTypes';
+import {
+  clampLayerOpacity,
+  createDefaultLayerOpacity,
+  createDefaultLayerVisibility,
+  type OrthoLayerId,
+  type OrthoLayerOpacity,
+  type OrthoLayerVisibility,
+} from '../orthoLayerRegistry';
+import {
+  applyLandmarkEdit,
+  createLandmarkEditTimeline,
+  redoLandmarkEdit,
+  resetLandmarksToBaseline,
+  undoLandmarkEdit,
+  type LandmarkEditTimeline,
+} from '../orthoLandmarkEditHistory';
+
+const normalizeProfilFacial = (value?: string | null): ProfilFacial | '' => {
+  const normalized = (value || '').trim().toLowerCase();
+  if (normalized === 'convexe' || normalized === 'droit' || normalized === 'concave') {
+    return normalized;
+  }
+  return '';
+};
+
+interface OrthoState {
+  patientId: number | null;
+  patientName: string;
+  analysisId: number | undefined;
+  imageSrc: string | undefined;
+  local: LocalState;
+  activePointId: string | null;
+  imgFilters: ImageFilters;
+  imgDim: { w: number; h: number };
+  mode: UIMode;
+  magnifierEnabled: boolean;
+  performanceMode: boolean;
+  isStep1Fullscreen: boolean;
+  vtoSettings: VTOSettings;
+  activeMorphing: 'none' | 'T1' | 'T2';
+  anglesData: Record<string, any>;
+  visionMetadata: any;
+  isCalibrated: boolean;
+  mmPerPixel: number | null;
+  showCalibration: boolean;
+  calibrationClickPoints: { x: number; y: number }[];
+  calibrationDistance: string;
+  calibrationStep: 'selecting' | 'entering';
+  autoCalibMessage: string | null;
+  ddm: DDMState;
+  diag: DiagnosticTexts;
+  etape2Data: DonneesEtape2;
+  etape3Data: DonneesEtape3;
+  step: StepId;
+  completedSteps: Set<number>;
+  uploadError: string | null;
+  isUploading: boolean;
+  isSaving: boolean;
+  isPrinting: boolean;
+  previewPdfUrl: string | null;
+  isPreviewLoading: boolean;
+  syncState: SyncState;
+  photos: PhotoUpload[];
+  layerVisibility: OrthoLayerVisibility;
+  layerOpacity: OrthoLayerOpacity;
+  landmarkEditTimeline: LandmarkEditTimeline;
+  dateConsultation: string;
+  sexePatient: 'Synthetic Patient' | 'F' | null;
+  setStep: (step: StepId) => void;
+  setCompletedSteps: (updater: Set<number> | ((prev: Set<number>) => Set<number>)) => void;
+  setPhotos: (updater: PhotoUpload[] | ((prev: PhotoUpload[]) => PhotoUpload[])) => void;
+  setLayerVisible: (id: OrthoLayerId, visible: boolean) => void;
+  toggleLayer: (id: OrthoLayerId) => void;
+  setLayerOpacity: (id: OrthoLayerId, opacity: number) => void;
+  resetLayers: () => void;
+  setLandmarkEditBaseline: (landmarks: Landmark[]) => void;
+  undoLandmarkEdit: () => void;
+  redoLandmarkEdit: () => void;
+  resetLandmarkEdits: () => void;
+  setDateConsultation: (date: string) => void;
+  setSexePatient: (sexe: 'M' | 'F' | null) => void;
+  setPatientInfo: (id: number, name: string) => void;
+  setAnalysisId: (id: number | undefined) => void;
+  setImageSrc: (src: string | undefined) => void;
+  setLocal: (updater: LocalState | ((prev: LocalState) => LocalState)) => void;
+  setActivePointId: (id: string | null) => void;
+  setImgFilters: (updater: ImageFilters | ((prev: ImageFilters) => ImageFilters)) => void;
+  setImgDim: (dim: { w: number; h: number }) => void;
+  setMode: (updater: UIMode | ((prev: UIMode) => UIMode)) => void;
+  setMagnifierEnabled: (updater: boolean | ((prev: boolean) => boolean)) => void;
+  setPerformanceMode: (enabled: boolean) => void;
+  setIsStep1Fullscreen: (updater: boolean | ((prev: boolean) => boolean)) => void;
+  setVtoSettings: (updater: VTOSettings | ((prev: VTOSettings) => VTOSettings)) => void;
+  setActiveMorphing: (morphing: 'none' | 'T1' | 'T2') => void;
+  setAnglesData: (data: Record<string, any>) => void;
+  setVisionMetadata: (meta: any) => void;
+  setIsCalibrated: (calibrated: boolean) => void;
+  setMmPerPixel: (mm: number | null) => void;
+  setShowCalibration: (updater: boolean | ((prev: boolean) => boolean)) => void;
+  setCalibrationClickPoints: (pts: { x: number; y: number }[] | ((prev: { x: number; y: number }[]) => { x: number; y: number }[])) => void;
+  setCalibrationDistance: (dist: string | ((prev: string) => string)) => void;
+  setCalibrationStep: (step: 'selecting' | 'entering' | ((prev: 'selecting' | 'entering') => 'selecting' | 'entering')) => void;
+  setAutoCalibMessage: (msg: string | null) => void;
+  setDdm: (updater: DDMState | ((prev: DDMState) => DDMState)) => void;
+  setDiag: (updater: DiagnosticTexts | ((prev: DiagnosticTexts) => DiagnosticTexts)) => void;
+  setEtape2Data: (updater: DonneesEtape2 | ((prev: DonneesEtape2) => DonneesEtape2)) => void;
+  setEtape3Data: (updater: DonneesEtape3 | ((prev: DonneesEtape3) => DonneesEtape3)) => void;
+  setUploadError: (err: string | null) => void;
+  setIsUploading: (uploading: boolean) => void;
+  setIsSaving: (saving: boolean) => void;
+  setIsPrinting: (printing: boolean) => void;
+  setPreviewPdfUrl: (url: string | null) => void;
+  setIsPreviewLoading: (loading: boolean) => void;
+  setSyncState: (state: SyncState) => void;
+  clearSyncTimer: () => void;
+  runAnalysis: (file: File) => Promise<void>;
+  silentSave: (id?: number, strict?: boolean) => Promise<void>;
+  handleSave: () => Promise<void>;
+  applyCalibration: () => Promise<void>;
+  updateLandmarksOptimistic: (newLms: Landmark[]) => void;
+  handlePreview: () => Promise<void>;
+  handlePrint: (prevalidatedSource?: BoundCephaloDocumentSource) => Promise<void>;
+  handlePhotoUpload: (id: string, file: File) => void;
+  goToStep: (target: StepId) => Promise<void>;
+}
+
+let previewOperationGeneration = 0;
+// Separate epochs for the active radio upload and the user's study selection.
+let radioUploadGeneration = 0;
+let studySelectionGeneration = 0;
+// Discard stale explicit-save results and their delayed success/error banners.
+let saveFeedbackGeneration = 0;
+let landmarkSaveGeneration = 0;
+let landmarkSaveChain: Promise<void> = Promise.resolve();
+
+const queueAuditedLandmarkSave = (
+  landmarks: Landmark[],
+  get: () => OrthoState,
+  set: (partial: Partial<OrthoState>) => void,
+) => {
+  const state = get();
+  if (!state.analysisId || state.patientId === null) return;
+
+  const scheduledAnalysisId = state.analysisId;
+  const scheduledPatientId = state.patientId;
+  const generation = ++landmarkSaveGeneration;
+  const max = state.ddm.maxillaire === '' ? null : Number(state.ddm.maxillaire);
+  const mand = state.ddm.mandibulaire === '' ? null : Number(state.ddm.mandibulaire);
+  const impa = computeLocalImpa(landmarks);
+  const ceph = calcDDMCephalo(impa);
+  const real = (mand !== null && ceph !== null) ? mand + ceph : null;
+  const projections = computeMcNamaraProjections(landmarks);
+  const payload = buildPayload(
+    landmarks,
+    max,
+    mand,
+    real,
+    state.diag,
+    projections,
+    state.mmPerPixel,
+    state.etape2Data,
+    state.etape3Data,
+  );
+
+  set({ syncState: 'syncing' });
+
+  // Each pointer-up / undo / redo / reset is already a committed clinical edit.
+  // Persist every transaction in FIFO order so backend evidence revisions cannot
+  // be collapsed by debounce or reordered by concurrent requests.
+  landmarkSaveChain = landmarkSaveChain
+    .catch(() => undefined)
+    .then(async () => {
+      try {
+        await cephaloRepository.saveAnalysis(scheduledAnalysisId, payload);
+        let authoritativeRead: any = null;
+        try {
+          authoritativeRead = await cephaloRepository.getAnalysis(scheduledAnalysisId);
+        } catch (readError) {
+          console.warn('Landmark sauvegardé mais relecture scientifique indisponible:', readError);
+        }
+        const current = get();
+        if (
+          generation === landmarkSaveGeneration
+          && current.analysisId === scheduledAnalysisId
+          && current.patientId === scheduledPatientId
+        ) {
+          if (authoritativeRead) {
+            const refreshedAngles = authoritativeRead.angles_data || {};
+            set({
+              anglesData: { ...refreshedAngles, __calibrationData: authoritativeRead.calibration_data || null },
+              visionMetadata: refreshedAngles.vision_metadata || {},
+              isCalibrated: Boolean(authoritativeRead.is_calibrated),
+              mmPerPixel: typeof authoritativeRead.mm_per_pixel === 'number' ? authoritativeRead.mm_per_pixel : null,
+            });
+          }
+          set({ syncState: 'success' });
+          setTimeout(() => {
+            const latest = get();
+            if (
+              generation === landmarkSaveGeneration
+              && latest.analysisId === scheduledAnalysisId
+              && latest.patientId === scheduledPatientId
+            ) set({ syncState: 'idle' });
+          }, 1500);
+        }
+      } catch {
+        const current = get();
+        if (
+          generation === landmarkSaveGeneration
+          && current.analysisId === scheduledAnalysisId
+          && current.patientId === scheduledPatientId
+        ) {
+          set({ syncState: 'error' });
+          setTimeout(() => {
+            const latest = get();
+            if (
+              generation === landmarkSaveGeneration
+              && latest.analysisId === scheduledAnalysisId
+              && latest.patientId === scheduledPatientId
+            ) set({ syncState: 'idle' });
+          }, 2500);
+        }
+      }
+    });
+};
+
+export function snapshotCephaloPdfClinicalInputs(
+  s: Pick<OrthoState, 'local' | 'ddm' | 'diag' | 'mmPerPixel' | 'etape2Data' | 'etape3Data'>,
+) {
+  const max = s.ddm.maxillaire === '' ? null : Number(s.ddm.maxillaire);
+  const mand = s.ddm.mandibulaire === '' ? null : Number(s.ddm.mandibulaire);
+  const impa = computeLocalImpa(s.local.landmarks);
+  const ceph = calcDDMCephalo(impa);
+  const real = (mand !== null && ceph !== null) ? mand + ceph : null;
+  const clinical = buildPayload(
+    s.local.landmarks, max, mand, real, s.diag,
+    computeMcNamaraProjections(s.local.landmarks),
+    s.mmPerPixel, s.etape2Data, s.etape3Data,
+  );
+  return { clinical_data: clinical.clinical_data, ai_diagnostic: clinical.ai_diagnostic };
+}
+
+export const useOrthoStore = create<OrthoState>((set, get) => ({
+  patientId: null,
+  patientName: '',
+  analysisId: undefined,
+  imageSrc: undefined,
+  local: { landmarks: [], version: 0 },
+  activePointId: null,
+  imgFilters: { brightness: 100, contrast: 110, invert: false },
+  imgDim: { w: 800, h: 1000 },
+  mode: (typeof document !== 'undefined' && (document.body?.dataset?.theme === 'dark' || document.body?.dataset?.theme === 'prestige')) ? 'dark' : 'light',
+  magnifierEnabled: false,
+  performanceMode: false,
+  isStep1Fullscreen: false,
+  vtoSettings: {
+    enabled: false,
+    showGhostFace: true,
+    showSoftTissue: true,
+    u1_offset: { x: 0, y: 0 },
+    l1_offset: { x: 0, y: 0 },
+    mand_offset: { x: 0, y: 0 }
+  },
+  activeMorphing: 'none',
+  anglesData: {},
+  visionMetadata: {},
+  isCalibrated: false,
+  mmPerPixel: null,
+  showCalibration: false,
+  calibrationClickPoints: [],
+  calibrationDistance: '',
+  calibrationStep: 'selecting',
+  autoCalibMessage: null,
+  ddm: { maxillaire: '', mandibulaire: '' },
+  diag: {
+    analyse_dentaire: '',
+    diagnostic_squelettique: '',
+    analyse_moulages: '',
+    synthese_diagnostique: '',
+    strategie_therapeutique: ''
+  },
+  etape2Data: {
+    occlusal: { molaire_gauche: '', molaire_droite: '', canine_gauche: '', canine_droite: '' },
+    type_arcade: null
+  },
+  etape3Data: {
+    age: '', cvm: '', date_teles: new Date().toISOString().split('T')[0],
+    dentaire: { surplomb: '', recouvrement: '', impa: '', i_francfort: '', inter_incisif: '' },
+    osseuse: { angle_tweed: '', decalage_ab: '', situation_a: '', situation_b: '', profondeur_faciale: '', sna: '', snb: '', anb: '' },
+    esthetique: { ligne_e_ls: '', ligne_e_li: '', angle_nasolabial: '' },
+    ddm_clinique: '', ddm_cephalo: '', division: null, classe_squelettique: '',
+    pattern_vertical: '', profil: '', severite_ddm: '', subdivision: false, analyse_moulages_auto: '',
+    selectedAnalysis: 'COM',
+    denture_type: '', preference_technique: ''
+  },
+  step: 1,
+  completedSteps: new Set<number>(),
+  uploadError: null,
+  isUploading: false,
+  isSaving: false,
+  isPrinting: false,
+  previewPdfUrl: null,
+  isPreviewLoading: false,
+  syncState: 'idle',
+  layerVisibility: createDefaultLayerVisibility(),
+  layerOpacity: createDefaultLayerOpacity(),
+  landmarkEditTimeline: createLandmarkEditTimeline(),
+  photos: [
+    { id: 'radio', type: 'radio', file: null, preview: null, label: 'Radiographie Céphalométrique' },
+    { id: 'moulage_max', type: 'moulage_max', file: null, preview: null, label: 'Moulage Maxillaire' },
+    { id: 'moulage_mand', type: 'moulage_mand', file: null, preview: null, label: 'Moulage Mandibulaire' },
+    { id: 'extra_face', type: 'extra_face', file: null, preview: null, label: 'Photo Extra-orale Face' },
+    { id: 'extra_profile', type: 'extra_profile', file: null, preview: null, label: 'Photo Extra-orale Profil' },
+    { id: 'extra_sourire', type: 'extra_sourire', file: null, preview: null, label: 'Photo Extra-orale Sourire' },
+    { id: 'intra_face', type: 'intra_face', file: null, preview: null, label: 'Photo Intra-orale Face' },
+    { id: 'intra_profile', type: 'intra_profile', file: null, preview: null, label: 'Photo Intra-orale Profil' },
+  ],
+  dateConsultation: new Date().toISOString().split('T')[0],
+  sexePatient: null,
+  setStep: (step) => set({ step }),
+  setCompletedSteps: (updater) => set((state) => ({ completedSteps: typeof updater === 'function' ? updater(state.completedSteps) : updater })),
+  setPhotos: (updater) => set((state) => ({ photos: typeof updater === 'function' ? updater(state.photos) : updater })),
+  setLayerVisible: (id, visible) => set((state) => ({
+    layerVisibility: { ...state.layerVisibility, [id]: visible },
+  })),
+  toggleLayer: (id) => set((state) => ({
+    layerVisibility: { ...state.layerVisibility, [id]: !state.layerVisibility[id] },
+  })),
+  setLayerOpacity: (id, opacity) => set((state) => ({
+    layerOpacity: { ...state.layerOpacity, [id]: clampLayerOpacity(opacity) },
+  })),
+  resetLayers: () => set((state) => ({
+    layerVisibility: createDefaultLayerVisibility(),
+    layerOpacity: createDefaultLayerOpacity(),
+    activeMorphing: 'none',
+    vtoSettings: { ...state.vtoSettings, showSoftTissue: true },
+  })),
+  setLandmarkEditBaseline: (landmarks) => set({
+    landmarkEditTimeline: createLandmarkEditTimeline(landmarks),
+  }),
+  undoLandmarkEdit: () => {
+    const state = get();
+    const transition = undoLandmarkEdit(state.landmarkEditTimeline, state.local.landmarks);
+    if (!transition.changed) return;
+    set({
+      local: { landmarks: transition.landmarks, version: state.local.version + 1 },
+      landmarkEditTimeline: transition.timeline,
+    });
+    queueAuditedLandmarkSave(transition.landmarks, get, set);
+  },
+  redoLandmarkEdit: () => {
+    const state = get();
+    const transition = redoLandmarkEdit(state.landmarkEditTimeline, state.local.landmarks);
+    if (!transition.changed) return;
+    set({
+      local: { landmarks: transition.landmarks, version: state.local.version + 1 },
+      landmarkEditTimeline: transition.timeline,
+    });
+    queueAuditedLandmarkSave(transition.landmarks, get, set);
+  },
+  resetLandmarkEdits: () => {
+    const state = get();
+    const transition = resetLandmarksToBaseline(state.landmarkEditTimeline, state.local.landmarks);
+    if (!transition.changed) return;
+    set({
+      local: { landmarks: transition.landmarks, version: state.local.version + 1 },
+      landmarkEditTimeline: transition.timeline,
+    });
+    queueAuditedLandmarkSave(transition.landmarks, get, set);
+  },
+  setDateConsultation: (date) => set({ dateConsultation: date }),
+  setSexePatient: (sexe) => set({ sexePatient: sexe }),
+  setPatientInfo: (id, name) => {
+    const current = get();
+    if (current.patientId !== null && current.patientId !== id) {
+      landmarkSaveGeneration += 1;
+      previewOperationGeneration += 1;
+      studySelectionGeneration += 1;
+      radioUploadGeneration += 1;
+      saveFeedbackGeneration += 1;
+      if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+        if (current.previewPdfUrl?.startsWith('blob:')) URL.revokeObjectURL(current.previewPdfUrl);
+        for (const photo of current.photos) {
+          if (photo.preview?.startsWith('blob:')) URL.revokeObjectURL(photo.preview);
+        }
+      }
+      set({
+        imageSrc: undefined,
+        analysisId: undefined,
+        previewPdfUrl: null,
+        isPreviewLoading: false,
+        isUploading: false,
+        uploadError: null,
+        isSaving: false,
+        syncState: 'idle',
+        photos: current.photos.map(photo => ({ ...photo, file: null, preview: null })),
+        local: { landmarks: [], version: 0 },
+        landmarkEditTimeline: createLandmarkEditTimeline(),
+        anglesData: {},
+        isCalibrated: false,
+        mmPerPixel: null,
+        completedSteps: new Set<number>(),
+        step: 1,
+        ...emptyStudyClinicalContext(),
+      });
+    }
+    const photosKey = `digitalcrown_photos_${id}`;
+    const savedPhotos = localStorage.getItem(photosKey);
+    const savedMeta = localStorage.getItem(`digitalcrown_etape4_${id}`);
+    set({ patientId: id, patientName: name, sexePatient: null });
+    if (savedPhotos) {
+      try {
+        const parsed = JSON.parse(savedPhotos);
+        // Object URLs exist only in the origin document that created them.
+        // Never resurrect revoked blob: links after patient navigation/reload.
+        const durable = Object.fromEntries(
+          Object.entries(parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {})
+            .filter(([, value]) => typeof value === 'string' && !value.startsWith('blob:')),
+        ) as Record<string, string>;
+        set(s => ({ photos: s.photos.map(p => ({ ...p, preview: durable[p.id] || null })) }));
+        if (Object.keys(durable).length) localStorage.setItem(photosKey, JSON.stringify(durable));
+        else localStorage.removeItem(photosKey);
+      } catch (err) {
+        localStorage.removeItem(photosKey);
+        console.warn('Failed to parse savedPhotos', err);
+      }
+    }
+    if (savedMeta) {
+      try {
+        const parsed = JSON.parse(savedMeta);
+        set({
+          dateConsultation: parsed.dateConsultation || new Date().toISOString().split('T')[0],
+          sexePatient: parsed.sexePatient === 'M' || parsed.sexePatient === 'F' ? parsed.sexePatient : null
+        });
+      } catch (err) {
+        console.warn('Failed to parse savedMeta', err);
+      }
+    }
+  },
+  setAnalysisId: (id) => {
+    const current = get();
+    if (current.analysisId === id) return;
+    if (current.previewPdfUrl?.startsWith('blob:')
+      && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      URL.revokeObjectURL(current.previewPdfUrl);
+    }
+    // Invalidating selection also invalidates every clinical field. Nothing
+    // from the previous analysis may be used by PDF/save operations.
+    landmarkSaveGeneration += 1;
+    previewOperationGeneration += 1;
+    studySelectionGeneration += 1;
+    saveFeedbackGeneration += 1;
+    set({
+      analysisId: id, previewPdfUrl: null, isPreviewLoading: false,
+      isUploading: false, uploadError: null, isSaving: false,
+      imageSrc: undefined, local: { landmarks: [], version: 0 },
+      landmarkEditTimeline: createLandmarkEditTimeline(),
+      anglesData: {}, visionMetadata: {}, isCalibrated: false, mmPerPixel: null,
+      completedSteps: new Set<number>(), syncState: 'idle',
+      ...emptyStudyClinicalContext(),
+    });
+  },
+  setImageSrc: (src) => set({ imageSrc: src }),
+  setLocal: (updater) => set((state) => ({ local: typeof updater === 'function' ? updater(state.local) : updater })),
+  setActivePointId: (id) => set({ activePointId: id }),
+  setImgFilters: (updater) => set((state) => ({ imgFilters: typeof updater === 'function' ? updater(state.imgFilters) : updater })),
+  setImgDim: (dim) => set({ imgDim: dim }),
+  setMode: (updater) => set((state) => ({ mode: typeof updater === 'function' ? updater(state.mode) : updater })),
+  setMagnifierEnabled: (updater) => set((state) => ({ magnifierEnabled: typeof updater === 'function' ? updater(state.magnifierEnabled) : updater })),
+  setPerformanceMode: (enabled) => set({ performanceMode: enabled }),
+  setIsStep1Fullscreen: (updater) => set((state) => ({ isStep1Fullscreen: typeof updater === 'function' ? updater(state.isStep1Fullscreen) : updater })),
+  setVtoSettings: (updater) => set((state) => ({ vtoSettings: typeof updater === 'function' ? updater(state.vtoSettings) : updater })),
+  setActiveMorphing: (morphing) => set({ activeMorphing: morphing }),
+  setAnglesData: (data) => set({ anglesData: data }),
+  setVisionMetadata: (meta) => set({ visionMetadata: meta }),
+  setIsCalibrated: (calibrated) => set({ isCalibrated: calibrated }),
+  setMmPerPixel: (mm) => set({ mmPerPixel: mm }),
+  setShowCalibration: (updater) => set((state) => ({ showCalibration: typeof updater === 'function' ? updater(state.showCalibration) : updater })),
+  setCalibrationClickPoints: (updater) => set((state) => ({ calibrationClickPoints: typeof updater === 'function' ? updater(state.calibrationClickPoints) : updater })),
+  setCalibrationDistance: (updater) => set((state) => ({ calibrationDistance: typeof updater === 'function' ? updater(state.calibrationDistance) : updater })),
+  setCalibrationStep: (updater) => set((state) => ({ calibrationStep: typeof updater === 'function' ? updater(state.calibrationStep) : updater })),
+  setAutoCalibMessage: (msg) => set({ autoCalibMessage: msg }),
+  setDdm: (updater) => set((state) => ({ ddm: typeof updater === 'function' ? updater(state.ddm) : updater })),
+  setDiag: (updater) => set((state) => ({ diag: typeof updater === 'function' ? updater(state.diag) : updater })),
+  setEtape2Data: (updater) => set((state) => ({
+    etape2Data: typeof updater === 'function' ? updater(state.etape2Data) : updater,
+  })),
+  setEtape3Data: (updater) => set((state) => ({
+    etape3Data: typeof updater === 'function' ? updater(state.etape3Data) : updater,
+  })),
+  setUploadError: (err) => set({ uploadError: err }),
+  setIsUploading: (uploading) => set({ isUploading: uploading }),
+  setIsSaving: (saving) => set({ isSaving: saving }),
+  setIsPrinting: (printing) => set({ isPrinting: printing }),
+  setPreviewPdfUrl: (url) => set({ previewPdfUrl: url }),
+  setIsPreviewLoading: (loading) => set({ isPreviewLoading: loading }),
+  setSyncState: (s) => set({ syncState: s }),
+  clearSyncTimer: () => {
+    // Legacy lifecycle hook name retained for callers. Serial clinical revisions
+    // are never cancelled; only stale UI success/error state is invalidated.
+    landmarkSaveGeneration += 1;
+  },
+  handlePhotoUpload: (id, file) => {
+    const url = URL.createObjectURL(file);
+    set(s => {
+      // Revoke replaced object URLs instead of retaining stale patient images.
+      const replaced = s.photos.find(p => p.id === id)?.preview;
+      if (replaced?.startsWith('blob:') && typeof URL.revokeObjectURL === 'function') {
+        URL.revokeObjectURL(replaced);
+      }
+      const next = s.photos.map(p => p.id === id ? { ...p, file, preview: url } : p);
+      if (s.patientId) {
+        const key = `digitalcrown_photos_${s.patientId}`;
+        // File/blob: URLs cannot be rehydrated across document lifetimes.
+        // Persist only independently durable URLs, never fake a saved photo.
+        const durable = Object.fromEntries(
+          next.filter(p => p.preview && !p.preview.startsWith('blob:'))
+            .map(p => [p.id, p.preview]),
+        );
+        if (Object.keys(durable).length) localStorage.setItem(key, JSON.stringify(durable));
+        else localStorage.removeItem(key);
+      }
+      return { photos: next };
+    });
+  },
+  goToStep: async (target) => {
+    const s = get();
+    if (target >= 2) {
+      if (!s.imageSrc) {
+        set({ uploadError: 'Veuillez d\'abord uploader une radiographie.' });
+        setTimeout(() => set({ uploadError: null }), 4000);
+        return;
+      }
+      if (!s.isCalibrated) {
+        set({ showCalibration: true, calibrationClickPoints: [], calibrationDistance: '', calibrationStep: 'selecting' });
+        return;
+      }
+    }
+    await s.silentSave();
+    // A delayed save from study A must never move study B's workflow.
+    if (get().patientId !== s.patientId || get().analysisId !== s.analysisId) return;
+    set(prev => ({ completedSteps: new Set([...prev.completedSteps, prev.step]), step: target }));
+  },
+  runAnalysis: async (file: File) => {
+    const state = get();
+    if (!state.patientId) return;
+    const operation = ++radioUploadGeneration;
+    const selection = studySelectionGeneration;
+    const stillCurrent = () => radioUploadGeneration === operation
+      && studySelectionGeneration === selection
+      && get().patientId === state.patientId
+      && get().analysisId === state.analysisId;
+    set({ uploadError: null, isUploading: true });
+    try {
+      const data = await cephaloRepository.uploadRadio(state.patientId, file);
+      // Do not let an A upload overwrite study B, even after an A→B→A switch.
+      // Parallel uploads also obey latest-request-wins within one selection.
+      if (!stillCurrent()) return;
+      if (data.analysis_id) get().setAnalysisId(data.analysis_id);
+      if (data.image_path || data.file_url) {
+        const raw: string = data.image_path || data.file_url;
+        let src: string;
+        if (/^https?:\/\//i.test(raw)) {
+          try {
+            const u = new URL(raw);
+            src = `${API_BASE.replace(/\/$/, '')}${u.pathname}`;
+          } catch {
+            src = raw;
+          }
+        } else {
+          src = `${API_BASE.replace(/\/$/, '')}/${raw.replace(/^\//, '')}`;
+        }
+        set({ imageSrc: src });
+      }
+      if (data.results) {
+        set({ anglesData: data.results });
+        const m = data.results.metrics;
+        if (m) {
+          set(s => {
+            const e3 = JSON.parse(JSON.stringify(s.etape3Data));
+            if (m.analyse_dentaire) {
+              if (m.analyse_dentaire.Surplomb?.valeur !== undefined) e3.dentaire.surplomb = String(m.analyse_dentaire.Surplomb.valeur);
+              if (m.analyse_dentaire.Recouvrement?.valeur !== undefined) e3.dentaire.recouvrement = String(m.analyse_dentaire.Recouvrement.valeur);
+              if (m.analyse_dentaire.IMPA?.valeur !== undefined) e3.dentaire.impa = String(m.analyse_dentaire.IMPA.valeur);
+              if (m.analyse_dentaire.I_Francfort?.valeur !== undefined) e3.dentaire.i_francfort = String(m.analyse_dentaire.I_Francfort.valeur);
+              if (m.analyse_dentaire.Inter_Incisif?.valeur !== undefined) e3.dentaire.inter_incisif = String(m.analyse_dentaire.Inter_Incisif.valeur);
+            }
+            if (m.analyse_osseuse) {
+              if (m.analyse_osseuse.Angle_de_Tweed?.valeur !== undefined) e3.osseuse.angle_tweed = String(m.analyse_osseuse.Angle_de_Tweed.valeur);
+              if (m.analyse_osseuse.Decalage_A_B?.valeur !== undefined) e3.osseuse.decalage_ab = String(m.analyse_osseuse.Decalage_A_B.valeur);
+              if (m.analyse_osseuse.Situation_A?.valeur !== undefined) e3.osseuse.situation_a = String(m.analyse_osseuse.Situation_A.valeur);
+              if (m.analyse_osseuse.Situation_B?.valeur !== undefined) e3.osseuse.situation_b = String(m.analyse_osseuse.Situation_B.valeur);
+              if (m.analyse_osseuse.Profondeur_Faciale?.valeur !== undefined) e3.osseuse.profondeur_faciale = String(m.analyse_osseuse.Profondeur_Faciale.valeur);
+              if (m.analyse_osseuse.SNA?.valeur !== undefined) e3.osseuse.sna = String(m.analyse_osseuse.SNA.valeur);
+              if (m.analyse_osseuse.SNB?.valeur !== undefined) e3.osseuse.snb = String(m.analyse_osseuse.SNB.valeur);
+              if (m.analyse_osseuse.ANB?.valeur !== undefined) {
+                e3.osseuse.anb = String(m.analyse_osseuse.ANB.valeur);
+                e3.classe_squelettique = 'Non classifiable';
+              }
+            }
+            if (m.analyse_esthetique) {
+              if (m.analyse_esthetique.Ligne_E_Ls?.valeur !== undefined) e3.esthetique.ligne_e_ls = String(m.analyse_esthetique.Ligne_E_Ls.valeur);
+              if (m.analyse_esthetique.Ligne_E_Li?.valeur !== undefined) e3.esthetique.ligne_e_li = String(m.analyse_esthetique.Ligne_E_Li.valeur);
+              if (m.analyse_esthetique.Angle_Nasolabial?.valeur !== undefined) e3.esthetique.angle_nasolabial = String(m.analyse_esthetique.Angle_Nasolabial.valeur);
+            }
+            return { etape3Data: e3 };
+          });
+        }
+      }
+      if (data.results?.vision_metadata) set({ visionMetadata: data.results.vision_metadata });
+      if (data.is_calibrated !== undefined) {
+        set({ isCalibrated: data.is_calibrated, mmPerPixel: data.mm_per_pixel || null });
+        if (data.is_calibrated && data.mm_per_pixel) {
+          set({ autoCalibMessage: `Auto-calibration réussie : ${data.mm_per_pixel.toFixed(4)} mm/px` });
+          setTimeout(() => set({ autoCalibMessage: null }), 8000);
+        }
+      }
+      if (data.landmarks) set({
+        local: { landmarks: data.landmarks, version: 1 },
+        landmarkEditTimeline: createLandmarkEditTimeline(data.landmarks),
+      });
+      if (data.results?.ai_narrative) {
+        const n = data.results.ai_narrative;
+        set(s => ({
+          diag: {
+            ...s.diag,
+            diagnostic_squelettique: s.diag.diagnostic_squelettique || n.diagnostic_squelettique || '',
+            analyse_moulages: s.diag.analyse_moulages || n.analyse_moulages || '',
+            synthese_diagnostique: s.diag.synthese_diagnostique || n.synthese_diagnostique || '',
+            strategie_therapeutique: s.diag.strategie_therapeutique
+          }
+        }));
+        if (n.profil_cutane) {
+          set(s => ({ etape3Data: { ...s.etape3Data, profil: normalizeProfilFacial(n.profil_cutane) } }));
+        }
+      }
+      set(s => ({ completedSteps: new Set([...s.completedSteps, 1]) }));
+    } catch (e: any) {
+      if (stillCurrent()) {
+        const raw = e?.response?.data?.detail;
+        set({ uploadError: typeof raw === 'string' ? raw : 'Échec de l\'analyse. Vérifiez l\'image.' });
+      }
+    } finally {
+      // A stale completion must not hide a newer pending upload.
+      if (radioUploadGeneration === operation) set({ isUploading: false });
+    }
+  },
+  silentSave: async (id?: number, strict = false) => {
+    const s = get();
+    const aid = id ?? s.analysisId;
+    if (!aid) return;
+    const max = s.ddm.maxillaire === '' ? null : Number(s.ddm.maxillaire);
+    const mand = s.ddm.mandibulaire === '' ? null : Number(s.ddm.mandibulaire);
+    const impa = computeLocalImpa(s.local.landmarks);
+    const ceph = calcDDMCephalo(impa);
+    const real = (mand !== null && ceph !== null) ? mand + ceph : null;
+    try {
+      const projections = computeMcNamaraProjections(s.local.landmarks);
+      await cephaloRepository.saveAnalysis(aid, buildPayload(s.local.landmarks, max, mand, real, s.diag, projections, s.mmPerPixel, s.etape2Data, s.etape3Data));
+    } catch (err) {
+      console.warn('Silent save failed:', err);
+      if (strict) throw err;
+    }
+  },
+  handleSave: async () => {
+    const s = get();
+    if (!s.analysisId) return;
+    const operation = ++saveFeedbackGeneration;
+    const stillCurrent = () => operation === saveFeedbackGeneration
+      && get().patientId === s.patientId && get().analysisId === s.analysisId;
+    set({ isSaving: true, syncState: 'idle' });
+    const feedback = (status: 'success' | 'error', duration: number) => {
+      if (!stillCurrent()) return;
+      set({ syncState: status });
+      setTimeout(() => {
+        if (stillCurrent()) set({ syncState: 'idle' });
+      }, duration);
+    };
+    try {
+      const max = s.ddm.maxillaire === '' ? null : Number(s.ddm.maxillaire);
+      const mand = s.ddm.mandibulaire === '' ? null : Number(s.ddm.mandibulaire);
+      const impa = computeLocalImpa(s.local.landmarks);
+      const ceph = calcDDMCephalo(impa);
+      const real = (mand !== null && ceph !== null) ? mand + ceph : null;
+      const projections = computeMcNamaraProjections(s.local.landmarks);
+      await cephaloRepository.saveAnalysis(s.analysisId, buildPayload(s.local.landmarks, max, mand, real, s.diag, projections, s.mmPerPixel, s.etape2Data, s.etape3Data));
+      feedback('success', 1500);
+    } catch {
+      feedback('error', 2000);
+    } finally {
+      // An A completion must never hide B's pending save indicator.
+      if (stillCurrent()) set({ isSaving: false });
+    }
+  },
+  updateLandmarksOptimistic: (newLms: Landmark[]) => {
+    const state = get();
+    const transition = applyLandmarkEdit(
+      state.landmarkEditTimeline,
+      state.local.landmarks,
+      newLms,
+      'POINTER_DRAG',
+    );
+    if (!transition.changed) return;
+    set({
+      local: { landmarks: transition.landmarks, version: state.local.version + 1 },
+      landmarkEditTimeline: transition.timeline,
+    });
+    queueAuditedLandmarkSave(transition.landmarks, get, set);
+  },
+  applyCalibration: async () => {
+    const s = get();
+    if (!s.analysisId || s.calibrationClickPoints.length !== 2 || !s.calibrationDistance) return;
+    const p1 = s.calibrationClickPoints[0];
+    const p2 = s.calibrationClickPoints[1];
+    const distPixels = Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+    const distMm = parseFloat(s.calibrationDistance);
+    if (distMm <= 0 || distPixels <= 0) return;
+    const ratio = distMm / distPixels;
+    try {
+      await cephaloRepository.calibrate(s.analysisId, p1, p2, distMm);
+      set({
+        mmPerPixel: ratio,
+        isCalibrated: true,
+        showCalibration: false,
+        calibrationClickPoints: [],
+        calibrationDistance: '',
+        calibrationStep: 'selecting'
+      });
+      const updatedData = await cephaloRepository.saveAnalysis(s.analysisId, { landmarks: s.local.landmarks, mm_per_pixel: ratio });
+      if (updatedData.results) set({ anglesData: updatedData.results });
+    } catch (e) {
+      console.error('Erreur calibration:', e);
+    }
+  },
+  handlePreview: async () => {
+    const s = get();
+    if (!s.analysisId || !s.patientId) return;
+    if (get().isPrinting) {
+      toast.error("Archivage en cours : aperçu indisponible pour le moment.");
+      return;
+    }
+    const operation = ++previewOperationGeneration;
+    set({ isPreviewLoading: true, previewPdfUrl: null });
+    const stillSelected = () => get().analysisId === s.analysisId && get().patientId === s.patientId;
+    try {
+      const bound = await prepareBoundCephaloDocumentSource(
+        s.patientId, s.analysisId, stillSelected, () => s.silentSave(s.analysisId, true),
+      );
+      const data = await cephaloRepository.generatePDF(s.patientId, {
+        ...bound, ...snapshotCephaloPdfClinicalInputs(s), archive: false,
+      });
+      if (!stillSelected() || operation !== previewOperationGeneration) return;
+      const url = URL.createObjectURL(new Blob([data], { type: 'application/pdf' }));
+      set({ previewPdfUrl: url });
+    } catch (e) {
+      console.error('[Preview] Erreur:', e);
+      if (stillSelected() && operation === previewOperationGeneration) {
+        toast.error(await cephaloArchiveErrorMessage(e));
+      }
+    } finally {
+      if (stillSelected() && operation === previewOperationGeneration) {
+        set({ isPreviewLoading: false });
+      }
+    }
+  },
+  handlePrint: async (prevalidatedSource?: BoundCephaloDocumentSource) => {
+    const s = get();
+    if (!s.analysisId || !s.patientId) return;
+    if (get().isPrinting || get().isPreviewLoading) {
+      throw new Error("Une opération PDF est déjà en cours pour cette étude.");
+    }
+    set({ isPrinting: true });
+    const stillSelected = () => get().analysisId === s.analysisId && get().patientId === s.patientId;
+    try {
+      const bound = prevalidatedSource ?? await prepareBoundCephaloDocumentSource(
+        s.patientId, s.analysisId, stillSelected, () => s.silentSave(s.analysisId, true),
+      );
+      if (!stillSelected() || bound.analysis_id !== s.analysisId) {
+        throw new Error("Le PDF ne correspond pas à l'étude prévalidée.");
+      }
+      const receipt = await cephaloRepository.generatePDFWithReceipt(s.patientId, {
+        ...bound, ...snapshotCephaloPdfClinicalInputs(s), archive: true,
+      });
+      const status = receipt.replayed
+        ? "Archive existante réutilisée sans modification"
+        : "Nouvelle archive enregistrée";
+      // A committed server archive is not a failure merely because Cabinet
+      // switched to study B before receiving study A's HTTP 200.
+      if (!stillSelected()) {
+        toast.success(`${status} pour l'étude ${bound.analysis_id} (révision ${bound.expected_revision}).`);
+        return;
+      }
+      const url = URL.createObjectURL(new Blob([receipt.blob], { type: 'application/pdf' }));
+      const userChoice = window.confirm(
+        `${status} pour l'étude ${bound.analysis_id}.\n\n` +
+        '• OK = Ouvrir dans un nouvel onglet (pour imprimer)\n' +
+        '• Annuler = Télécharger le fichier'
+      );
+      if (userChoice) {
+        window.open(url, '_blank');
+      } else {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `Bilan_COM_${s.patientName.replace(/\s+/g, '_')}.pdf`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
+    } catch (e) {
+      console.error('[Print] Erreur:', e);
+      // A stale failure for prior study A must not be displayed over study B.
+      if (stillSelected()) throw e;
+    } finally {
+      set({ isPrinting: false });
+    }
+
+  }
+}));

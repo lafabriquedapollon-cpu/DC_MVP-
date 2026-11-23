@@ -1,0 +1,266 @@
+import axios from 'axios';
+import toast from 'react-hot-toast';
+import { MobileStorage } from './zka/MobileStorage';
+import { isExplicitMobileBiometricLock } from './zka/mobileBiometricLock';
+import { resolveApiBase } from './apiBase';
+
+const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+export const API_BASE = resolveApiBase(
+  viteEnv?.VITE_API_URL,
+  typeof window !== 'undefined' ? window.location : undefined,
+);
+
+export const api = axios.create({
+  baseURL: `${API_BASE}/api`,
+  timeout: 30000,
+  withCredentials: true,
+});
+
+// Synchronisation du token entre onglets (BroadcastChannel)
+const _authChannel = typeof BroadcastChannel !== 'undefined'
+  ? new BroadcastChannel('dc_auth')
+  : null;
+
+function storeTokens(token: string, refresh?: string) {
+  // Sauvegarde dans le localStorage comme fallback indispensable pour le développement local (cross-origin)
+  localStorage.setItem('token', token);
+  if (refresh) {
+      localStorage.setItem('refresh_token', refresh);
+  }
+  _authChannel?.postMessage({ type: 'TOKEN_REFRESH', token, refresh });
+}
+
+if (_authChannel) {
+  _authChannel.onmessage = (e) => {
+    if (e.data?.type === 'TOKEN_REFRESH') {
+      // Cookies HttpOnly posés par le backend — pas d'écriture localStorage ici
+    } else if (e.data?.type === 'LOGOUT') {
+      // Un autre onglet a déclenché le logout — on coupe aussi ici
+      _authFailed = true;
+      localStorage.removeItem('token');
+      localStorage.removeItem('refresh_token');
+      if (window.location.pathname !== '/login') window.location.href = '/login';
+    }
+  };
+}
+
+let _refreshing: Promise<boolean> | null = null;
+// Coupe-circuit : dès qu'un logout est déclenché, toutes les requêtes suivantes
+// sont annulées immédiatement sans toucher le serveur.
+let _authFailed = false;
+
+export function resetAuthState() {
+  _authFailed = false;
+}
+
+/**
+ * Token d'autorisation courant. Sur les routes mobiles, un step-up biométrique
+ * doit rester mémoire-only mais primer sur le JWT durable pour TOUS les clients
+ * partagés (Axios, SSE, WebSocket). Desktop conserve exactement le contrat web.
+ */
+export function getRuntimeAuthToken(): string | null {
+  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/mobile')) {
+    // Pocket must never fall back to desktop browser storage. Shared Axios requests
+    // hydrate the durable paired-device JWT asynchronously in the request interceptor;
+    // only the memory-only biometric step-up token is synchronously exposable here.
+    return MobileStorage.getBiometricAccessToken() || null;
+  }
+  try {
+    return localStorage.getItem('token') || sessionStorage.getItem('token');
+  } catch {
+    return null;
+  }
+}
+
+function isPublicStationRoute(): boolean {
+  if (typeof window === 'undefined') return false;
+  const { pathname } = window.location;
+  return pathname === '/station' || pathname.startsWith('/station/');
+}
+
+function propagateMobileBiometricLock(): void {
+  if (typeof window === 'undefined' || !window.location.pathname.startsWith('/mobile')) return;
+  MobileStorage.lockBiometricVault();
+  window.dispatchEvent(new CustomEvent('digitalcrown:mobile-biometric-locked'));
+}
+
+// Request interceptor — annule toute requête si la session est terminée
+api.interceptors.request.use(async (config) => {
+  if (_authFailed) {
+    return Promise.reject(new axios.Cancel('Session expirée — requête annulée.'));
+  }
+
+  // Les PDFs fraîchement générés par Document Studio sont déjà exposés sous
+  // forme d'URL blob: locale. Axios/XHR ne les traite pas de façon fiable dans
+  // tous les navigateurs headless ; un adapter fetch natif garde le même contrat
+  // responseType:'blob' sans repasser par le backend ni ouvrir un onglet fallback.
+  if (typeof config.url === 'string' && config.url.startsWith('blob:')) {
+    config.baseURL = undefined;
+    config.adapter = async (adapterConfig) => {
+      const response = await fetch(adapterConfig.url!);
+      if (!response.ok) {
+        throw new Error(`Impossible de lire le PDF local (${response.status})`);
+      }
+      const data = adapterConfig.responseType === 'blob'
+        ? await response.blob()
+        : await response.arrayBuffer();
+      return {
+        data,
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        config: adapterConfig,
+        request: null,
+      };
+    };
+  }
+
+  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/mobile')) {
+    // Pocket must authenticate only with its paired-device Authorization token.
+    // Do not co-send desktop HttpOnly cookies across the mobile boundary.
+    config.withCredentials = false;
+    const uvToken = MobileStorage.getBiometricAccessToken();
+    const creds = uvToken ? null : await MobileStorage.getCredentials();
+    const mobileToken = uvToken || creds?.access_token || null;
+    if (mobileToken) config.headers.Authorization = `Bearer ${mobileToken}`;
+  } else {
+    const token = getRuntimeAuthToken();
+    if (token) config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+api.interceptors.response.use(
+  (response) => {
+    return response;
+  },
+  async (error) => {
+    // Requête annulée par le coupe-circuit — ne rien faire
+    if (axios.isCancel(error)) return Promise.reject(error);
+
+    const original = error.config;
+    // Hub/Control Center already expose explicit offline recovery. Suppress duplicate
+    // generic toasts ONLY for their own workstation authority probes, not clinical APIs.
+    const recoveryWorkstationProbe = (
+      original?.url === '/workstation/bootstrap' || original?.url === '/workstation/state'
+    ) && typeof window !== 'undefined' &&
+      (window.location.pathname === '/hub' || window.location.pathname === '/control-center');
+
+    if (!error.response) {
+      if (recoveryWorkstationProbe) return Promise.reject(error);
+      if (!_authFailed) {
+        const method = original?.method?.toLowerCase() || 'get';
+        if (isPublicStationRoute()) return Promise.reject(error);
+        if (!navigator.onLine && ['post', 'put', 'patch', 'delete'].includes(method)) {
+          toast.error('Mode hors-ligne : sauvegarde impossible sans confirmation serveur.', { id: 'offline-write-blocked', duration: 4000 });
+          return Promise.reject(error);
+        } else {
+          toast.error('Serveur injoignable', { id: 'network-error' });
+        }
+      }
+      return Promise.reject(error);
+    }
+
+    const { status, data, config: cfg } = error.response;
+    if (!_authFailed) {
+      console.group(`API Error [${status}]`);
+      console.error('Path:', cfg?.url);
+      console.error('Details:', data?.detail || data || error.message);
+      if (data?.detail && Array.isArray(data.detail)) console.table(data.detail);
+      console.groupEnd();
+    }
+
+    if (status === 423 && typeof window !== 'undefined' && window.location.pathname.startsWith('/mobile')) {
+      // All 423 refusals still reach the caller; only the canonical server code
+      // may switch the UI to a biometric lock screen.
+      if (isExplicitMobileBiometricLock(status, data)) propagateMobileBiometricLock();
+      return Promise.reject(error);
+    }
+
+    // Certaines routes partagées historiques normalisent le verrou mobile en 401.
+    // Après UNE tentative de refresh device-bound, un second 401 avec coffre
+    // biométrique présent signifie que la session UV n'est plus valable : relock.
+    // Une vraie révocation n'arrive pas ici : le refresh 401/403 invalide d'abord
+    // la session et renvoie vers l'onboarding.
+    if (status === 401 && typeof window !== 'undefined' && window.location.pathname.startsWith('/mobile') && original?._mobileRetried) {
+      const vault = await MobileStorage.getBiometricVaultEnvelope().catch(() => null);
+      if (vault) propagateMobileBiometricLock();
+      return Promise.reject(error);
+    }
+
+    // Une session mobile a un refresh device-bound distinct du refresh web.
+    if (status === 401 && window.location.pathname.startsWith('/mobile') && !original._mobileRetried) {
+      original._mobileRetried = true;
+      // Un JWT UV de 5 min peut simplement avoir expiré. Il ne faut surtout pas
+      // le réutiliser après refresh : la requête durable suivante doit être refusée
+      // par le gate biométrique puis reverrouiller l'interface.
+      if (MobileStorage.getBiometricAccessToken()) MobileStorage.clearBiometricAccessToken();
+      const refreshed = await MobileStorage.refreshCredentials();
+      if (refreshed?.access_token) {
+        original.headers = original.headers ?? {};
+        original.headers['Authorization'] = `Bearer ${refreshed.access_token}`;
+        return api(original);
+      }
+      return Promise.reject(error);
+    }
+
+    // Auto-refresh/Sync web on 401
+    if (status === 401 && !window.location.pathname.startsWith('/mobile') && !original._retried && !original.url?.includes('/auth/')) {
+      original._retried = true;
+
+      if (!_refreshing) {
+        _refreshing = (async () => {
+          // 1. Essayer le refresh via token local ou cookie HttpOnly
+          const refreshToken = localStorage.getItem('refresh_token') || '';
+          try {
+            const res = await axios.post(`${API_BASE}/api/auth/refresh`, {
+              refresh_token: refreshToken
+            }, { withCredentials: true });
+            const { access_token, refresh_token: newRefresh } = res.data;
+            if (access_token) {
+              storeTokens(access_token, newRefresh);
+              return true;
+            }
+          } catch {
+            localStorage.removeItem('refresh_token');
+          }
+
+          // 2. Fallback : redirect to login since Supabase is gone
+          localStorage.removeItem('token');
+          return false;
+        })().finally(() => { _refreshing = null; });
+      }
+
+      const ok = await _refreshing;
+      if (ok) {
+        // Cookies HttpOnly rafraîchis par le backend — withCredentials les envoie automatiquement
+        // Fallback localStorage pour sessions mobiles/transitoires encore actives
+        const fallbackToken = localStorage.getItem('token');
+        if (fallbackToken) original.headers['Authorization'] = `Bearer ${fallbackToken}`;
+        return api(original);
+      }
+
+      // Échec total → coupe-circuit ON + logout immédiat
+      // Sur le dashboard mobile, ne pas rediriger — la session mobile n'a pas de refresh token standard
+      if (window.location.pathname.startsWith('/mobile')) {
+        return Promise.reject(error);
+      }
+      _authFailed = true;
+      localStorage.removeItem('token');
+      localStorage.removeItem('refresh_token');
+      _authChannel?.postMessage({ type: 'LOGOUT' });
+      if (window.location.pathname !== '/login') window.location.href = '/login';
+    } else if (status === 402) {
+      // Licence expirée ou invalide (Soft-Lock) — ne pas interrompre la session mobile
+      if (window.location.pathname !== '/login' && !(window as any)._isRedirecting402 && !window.location.pathname.startsWith('/mobile')) {
+        (window as any)._isRedirecting402 = true;
+        window.location.href = '/login?locked=true';
+      }
+    } else if (status >= 500 && !isPublicStationRoute() && !(status === 503 && recoveryWorkstationProbe)) {
+      toast.error('Erreur Serveur (500)', { id: 'server-error' });
+    }
+
+
+    return Promise.reject(error);
+  }
+);

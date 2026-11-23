@@ -1,0 +1,479 @@
+"""
+Treatment Journey — agrégation en lecture seule du parcours patient.
+
+Fusionne 12 sources indépendantes (Appointment, TreatmentPlanStep, DocumentArchive,
+PanoramicAnalysis, CephaloAnalysis, Payment, Installment, LabJob, JourneyMilestone,
+OrthoPhaseEvent) en un
+flux chronologique unique, sans jamais dupliquer la donnée : chaque table source reste la
+seule vérité, ce module ne fait que lire et normaliser.
+
+`Acte` est délibérément exclu (voir docs/TREATMENT_JOURNEY_DESIGN.md / STATE.md) : sur la
+DB cabinet réelle, la table ne couvre que ~13% des patients et porte la signature de
+données de seed — le vrai flux de facturation passe par Payment/DocumentArchive.
+"""
+import logging
+from datetime import datetime, timedelta
+from typing import Optional
+
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func
+
+from backend import models, schemas
+
+logger = logging.getLogger(__name__)
+
+WINDOW_MONTHS = 12
+FULL_HISTORY_CAP = 500
+RELATED_REPORT_WINDOW_MINUTES = 5
+
+_NEXT_APPOINTMENT_STATUSES = [
+    models.AppointmentStatus.PREVU,
+    models.AppointmentStatus.EN_SALLE_ATTENTE,
+    models.AppointmentStatus.EN_FAUTEUIL,
+    models.AppointmentStatus.CONFIRME,
+]
+
+
+def _parse_step_date(date_str: Optional[str], fallback: datetime) -> datetime:
+    """TreatmentPlanStep.date_str est une string libre ("Aujourd'hui" par défaut),
+    pas un DateTime — best-effort, retombe sur `fallback` (updated_at du plan) si non parseable."""
+    if not date_str:
+        return fallback
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(date_str.strip(), fmt)
+        except (ValueError, AttributeError):
+            continue
+    return fallback
+
+
+def _event(event_key, source, type_, ref_id, date, title, status, phase_hint,
+           navigation_target, related_event_key=None) -> schemas.JourneyEventResponse:
+    return schemas.JourneyEventResponse(
+        event_key=event_key, source=source, type=type_, ref_id=ref_id, date=date,
+        title=title, status=str(status), phase_hint=phase_hint,
+        navigation_target=navigation_target, related_event_key=related_event_key,
+    )
+
+
+def _collect_events(db: Session, patient_id: int, since: Optional[datetime], employer_id: Optional[int] = None) -> list:
+    events = []
+
+    # 1. Appointment (status=TERMINE) — événements passés de la timeline
+    appt_q = db.query(models.Appointment).filter(
+        models.Appointment.patient_id == patient_id,
+        models.Appointment.status == models.AppointmentStatus.TERMINE,
+    )
+    if since is not None:
+        appt_q = appt_q.filter(models.Appointment.datetime_start >= since)
+    for a in appt_q.all():
+        events.append(_event(
+            f"appointment:{a.id}", "appointment", "consultation", a.id, a.datetime_start,
+            a.motif or "Consultation", a.status.value, "consultation",
+            schemas.NavigationTarget.INLINE,
+        ))
+
+    # 2. TreatmentPlanStep (via TreatmentMasterPlan) — toujours inclus si PENDING (item ouvert)
+    steps_q = (
+        db.query(models.TreatmentPlanStep)
+        .join(models.TreatmentMasterPlan, models.TreatmentPlanStep.plan_id == models.TreatmentMasterPlan.id)
+        .filter(models.TreatmentMasterPlan.patient_id == patient_id)
+        .options(joinedload(models.TreatmentPlanStep.master_plan))
+    )
+    for s in steps_q.all():
+        step_date = _parse_step_date(s.date_str, s.master_plan.updated_at)
+        is_open = s.status == models.PlanStatus.PENDING
+        if since is not None and step_date < since and not is_open:
+            continue
+        events.append(_event(
+            f"treatment_plan_step:{s.id}", "treatment_plan_step", "plan_step", s.id, step_date,
+            s.title, s.status.value, "plan",
+            schemas.NavigationTarget.TREATMENT_PLAN_TAB,
+        ))
+
+    # 3. DocumentArchive (tous types actifs, dernière version uniquement)
+    docs_q = db.query(models.DocumentArchive).filter(
+        models.DocumentArchive.patient_id == patient_id,
+        models.DocumentArchive.is_latest_version.is_(True),
+        models.DocumentArchive.status == models.DocumentStatus.ACTIF,
+        models.DocumentArchive.deleted_at.is_(None),
+    )
+    if since is not None:
+        docs_q = docs_q.filter(models.DocumentArchive.created_at >= since)
+    doc_type_to_phase = {
+        "DEVIS": "devis",
+        "NOTE_HONORAIRES": "prestation",
+        "ORDONNANCE": "ordonnance",
+        "CERTIFICAT": "certificat",
+        "BILAN": "diagnostic",
+        "RADIOGRAPHIE": "radio",
+        "RAPPORT_CEPHALO": "radio",
+    }
+    doc_events = docs_q.all()
+    for d in doc_events:
+        dtype = d.document_type.value if hasattr(d.document_type, "value") else str(d.document_type)
+        events.append(_event(
+            f"document_archive:{d.id}", "document_archive", dtype, d.id, d.created_at,
+            d.title or d.original_filename, d.status.value, doc_type_to_phase.get(dtype, "document"),
+            schemas.NavigationTarget.DOCUMENT,
+        ))
+
+    # 4. PanoramicAnalysis
+    pano_q = db.query(models.PanoramicAnalysis).filter(models.PanoramicAnalysis.patient_id == patient_id)
+    if since is not None:
+        pano_q = pano_q.filter(models.PanoramicAnalysis.created_at >= since)
+    pano_events = pano_q.all()
+    for p in pano_events:
+        events.append(_event(
+            f"panoramic_analysis:{p.id}", "panoramic_analysis", "panoramique", p.id, p.created_at,
+            "Analyse panoramique", "TERMINE", "radio",
+            schemas.NavigationTarget.RADIOLOGY_TAB,
+        ))
+
+    # 5. CephaloAnalysis
+    cephalo_q = db.query(models.CephaloAnalysis).filter(models.CephaloAnalysis.patient_id == patient_id)
+    if since is not None:
+        cephalo_q = cephalo_q.filter(models.CephaloAnalysis.created_at >= since)
+    cephalo_events = cephalo_q.all()
+    for c in cephalo_events:
+        events.append(_event(
+            f"cephalo_analysis:{c.id}", "cephalo_analysis", "cephalometrie", c.id, c.created_at,
+            "Analyse céphalométrique", "CALIBRE" if c.is_calibrated else "NON_CALIBRE", "radio",
+            schemas.NavigationTarget.RADIOLOGY_TAB,
+        ))
+
+    # Affichage groupé (pas de masquage) : un DocumentArchive(RAPPORT_CEPHALO/rapport pano) généré
+    # à moins de 5 min d'une analyse pointe vers l'événement source.
+    _link_related_reports(events, doc_events, pano_events, cephalo_events)
+
+    # 6. Payment
+    pay_q = db.query(models.Payment).filter(models.Payment.patient_id == patient_id)
+    if since is not None:
+        pay_q = pay_q.filter(models.Payment.payment_date >= since)
+    for p in pay_q.all():
+        events.append(_event(
+            f"payment:{p.id}", "payment", "paiement", p.id, p.payment_date,
+            f"Paiement — {p.amount:.2f} MAD", p.payment_method.value if hasattr(p.payment_method, "value") else str(p.payment_method),
+            "paiement", schemas.NavigationTarget.ACCOUNTING_TAB,
+        ))
+
+    # 7. Installment (via InstallmentPlan) — toujours inclus si EN_ATTENTE (item ouvert)
+    inst_q = (
+        db.query(models.Installment)
+        .join(models.InstallmentPlan, models.Installment.plan_id == models.InstallmentPlan.id)
+        .filter(models.InstallmentPlan.patient_id == patient_id)
+    )
+    for i in inst_q.all():
+        is_open = i.status == "EN_ATTENTE"
+        ref_date = i.due_date
+        if since is not None and ref_date < since and not is_open:
+            continue
+        events.append(_event(
+            f"installment:{i.id}", "installment", "echeance", i.id, ref_date,
+            f"Échéance — {i.label}", i.status, "paiement",
+            schemas.NavigationTarget.ACCOUNTING_TAB,
+        ))
+
+    # 8. LabJob (via patient_id direct)
+    lab_q = db.query(models.LabJob).filter(models.LabJob.patient_id == patient_id)
+    if since is not None:
+        lab_q = lab_q.filter(models.LabJob.created_at >= since)
+    for lj in lab_q.all():
+        events.append(_event(
+            f"lab_job:{lj.id}", "lab_job", lj.type, lj.id, lj.created_at,
+            f"Labo — {lj.type}", lj.status.value, "labo",
+            schemas.NavigationTarget.LAB_PAGE,
+        ))
+
+    # 9. JourneyMilestone (jalons manuels, exclut les supprimés)
+    milestone_q = db.query(models.JourneyMilestone).filter(
+        models.JourneyMilestone.patient_id == patient_id,
+        models.JourneyMilestone.deleted_at.is_(None),
+    )
+    if since is not None:
+        milestone_q = milestone_q.filter(models.JourneyMilestone.milestone_date >= since)
+    milestone_phase = {
+        "DIAGNOSTIC": "diagnostic", "DEVIS_VALIDE": "devis",
+        "CONTROLE": "controle", "CLOTURE": "cloture",
+    }
+    for m in milestone_q.all():
+        mtype = m.milestone_type.value if hasattr(m.milestone_type, "value") else str(m.milestone_type)
+        events.append(_event(
+            f"journey_milestone:{m.id}", "journey_milestone", mtype, m.id, m.milestone_date,
+            mtype.replace("_", " ").title(), mtype, milestone_phase.get(mtype, "autre"),
+            schemas.NavigationTarget.INLINE,
+        ))
+
+    # 10. OrthoPhaseEvent — événements factuels de cycle/phase, source de vérité F1A.
+    # employer_id reste optionnel pour préserver les appels internes historiques de
+    # _collect_events() utilisés par les tests P2. En production, build_journey()
+    # fournit toujours explicitement le tenant.
+    ortho_q = db.query(models.OrthoPhaseEvent).filter(
+        models.OrthoPhaseEvent.patient_id == patient_id,
+    )
+    if employer_id is not None:
+        ortho_q = ortho_q.filter(models.OrthoPhaseEvent.employer_id == employer_id)
+    if since is not None:
+        ortho_q = ortho_q.filter(models.OrthoPhaseEvent.effective_at >= since)
+
+    ortho_titles = {
+        "START": "Traitement orthodontique démarré",
+        "ENTER_PHASE": "Phase orthodontique enregistrée",
+        "INTERRUPT": "Traitement orthodontique interrompu",
+        "RESUME": "Traitement orthodontique repris",
+        "ABANDON": "Traitement orthodontique abandonné",
+        "CLOSE": "Traitement orthodontique clôturé",
+    }
+    for e in ortho_q.all():
+        title = ortho_titles.get(e.event_type, e.event_type.replace("_", " ").title())
+        if e.event_type == "ENTER_PHASE" and e.phase_key:
+            title = f"{title} — {e.phase_key.replace('_', ' ').title()}"
+        events.append(_event(
+            f"ortho_phase_event:{e.id}",
+            "ortho_phase_event",
+            e.event_type,
+            e.id,
+            e.effective_at,
+            title,
+            e.event_type,
+            (e.phase_key or "ortho").lower(),
+            schemas.NavigationTarget.INLINE,
+        ))
+
+    # 11. OrthoControl — contrôle orthodontique structuré, source F1B.
+    control_q = db.query(models.OrthoControl).filter(
+        models.OrthoControl.patient_id == patient_id,
+    )
+    if employer_id is not None:
+        control_q = control_q.filter(models.OrthoControl.employer_id == employer_id)
+    if since is not None:
+        control_q = control_q.filter(models.OrthoControl.occurred_at >= since)
+
+    for control in control_q.all():
+        title = "Contrôle orthodontique"
+        if control.phase_key:
+            title = f"{title} — {control.phase_key.replace('_', ' ').title()}"
+        events.append(_event(
+            f"ortho_control:{control.id}",
+            "ortho_control",
+            "CONTROLE",
+            control.id,
+            control.occurred_at,
+            title,
+            "ENREGISTRE",
+            (control.phase_key or "controle").lower(),
+            schemas.NavigationTarget.INLINE,
+        ))
+
+    # 12. OrthoTimepoint — repère longitudinal factuel T0..T999, sans inférence.
+    timepoint_q = db.query(models.OrthoTimepoint).filter(
+        models.OrthoTimepoint.patient_id == patient_id,
+    )
+    if employer_id is not None:
+        timepoint_q = timepoint_q.filter(models.OrthoTimepoint.employer_id == employer_id)
+    if since is not None:
+        timepoint_q = timepoint_q.filter(models.OrthoTimepoint.occurred_at >= since)
+
+    for tp in timepoint_q.all():
+        events.append(_event(
+            f"ortho_timepoint:{tp.id}",
+            "ortho_timepoint",
+            f"T{tp.ordinal}",
+            tp.id,
+            tp.occurred_at,
+            f"Timepoint orthodontique T{tp.ordinal}",
+            "ENREGISTRE",
+            "ortho",
+            schemas.NavigationTarget.INLINE,
+        ))
+
+    return events
+
+
+def _link_related_reports(events: list, doc_events: list, pano_events: list, cephalo_events: list) -> None:
+    """Affichage groupé optionnel — ne masque jamais un événement, ajoute juste related_event_key."""
+    window = timedelta(minutes=RELATED_REPORT_WINDOW_MINUTES)
+    analyses = [(f"panoramic_analysis:{p.id}", p.created_at) for p in pano_events]
+    analyses += [(f"cephalo_analysis:{c.id}", c.created_at) for c in cephalo_events]
+    if not analyses:
+        return
+    report_types = {"RAPPORT_CEPHALO", "RADIOGRAPHIE"}
+    by_key = {e.event_key: e for e in events}
+    for d in doc_events:
+        dtype = d.document_type.value if hasattr(d.document_type, "value") else str(d.document_type)
+        if dtype not in report_types:
+            continue
+        for akey, adate in analyses:
+            if abs((d.created_at - adate).total_seconds()) <= window.total_seconds():
+                ev = by_key.get(f"document_archive:{d.id}")
+                if ev is not None:
+                    ev.related_event_key = akey
+                break
+
+
+def _sort_key(event: "schemas.JourneyEventResponse"):
+    return (-(event.date.timestamp()), event.source, event.ref_id)
+
+
+def build_journey(db: Session, patient_id: int, employer_id: int, full_history: bool = False) -> schemas.PatientJourneyResponse:
+    since = None if full_history else (datetime.now() - timedelta(days=WINDOW_MONTHS * 30))
+
+    events = _collect_events(db, patient_id, since=since, employer_id=employer_id)
+    events.sort(key=_sort_key)
+
+    total_available = len(events)
+    truncated = False
+    if full_history and total_available > FULL_HISTORY_CAP:
+        events = events[:FULL_HISTORY_CAP]
+        truncated = True
+
+    summary = _build_summary(db, patient_id)
+
+    return schemas.PatientJourneyResponse(
+        patient_id=patient_id,
+        window_months=WINDOW_MONTHS,
+        truncated=truncated,
+        total_events_available=total_available,
+        summary=summary,
+        events=events,
+    )
+
+
+def _build_summary(db: Session, patient_id: int) -> schemas.JourneySummaryResponse:
+    total_plan_steps = (
+        db.query(func.count(models.TreatmentPlanStep.id))
+        .join(models.TreatmentMasterPlan, models.TreatmentPlanStep.plan_id == models.TreatmentMasterPlan.id)
+        .filter(models.TreatmentMasterPlan.patient_id == patient_id)
+        .scalar() or 0
+    )
+    active_plan_steps = (
+        db.query(func.count(models.TreatmentPlanStep.id))
+        .join(models.TreatmentMasterPlan, models.TreatmentPlanStep.plan_id == models.TreatmentMasterPlan.id)
+        .filter(
+            models.TreatmentMasterPlan.patient_id == patient_id,
+            models.TreatmentPlanStep.status == models.PlanStatus.PENDING,
+        )
+        .scalar() or 0
+    )
+
+    # Reste dû : même calcul que get_patient_financial_snapshot (patients.py) pour rester
+    # cohérent avec le reste de l'app — la fiabilité de cette donnée est un problème connu et
+    # séparé (backlog UNIFY-ACT-PERSISTENCE-1), pas réintroduit ici. `has_billing_data` est un
+    # correctif transitoire d'honnêteté (pas la vraie unification) : sans ligne Acte, remaining_due
+    # vaut toujours 0 quel que soit le paiement réel — le frontend doit afficher un état neutre
+    # plutôt qu'un "0 MAD" vert qui affirmerait à tort "aucun impayé".
+    acte_total, acte_count = (
+        db.query(func.sum(models.Acte.montant), func.count(models.Acte.id))
+        .filter(models.Acte.patient_id == patient_id)
+        .one()
+    )
+    total_billed = float(acte_total or 0.0)
+    has_billing_data = (acte_count or 0) > 0
+    total_collected = float(
+        db.query(func.sum(models.Payment.amount)).filter(models.Payment.patient_id == patient_id).scalar() or 0.0
+    )
+    remaining_due = max(total_billed - total_collected, 0.0)
+
+    next_appt = (
+        db.query(models.Appointment)
+        .filter(
+            models.Appointment.patient_id == patient_id,
+            models.Appointment.datetime_start >= datetime.now(),
+            models.Appointment.status.in_(_NEXT_APPOINTMENT_STATUSES),
+        )
+        .order_by(models.Appointment.datetime_start.asc())
+        .first()
+    )
+
+    last_doc = (
+        db.query(func.max(models.DocumentArchive.created_at))
+        .filter(
+            models.DocumentArchive.patient_id == patient_id,
+            models.DocumentArchive.is_latest_version.is_(True),
+            models.DocumentArchive.status == models.DocumentStatus.ACTIF,
+            models.DocumentArchive.deleted_at.is_(None),
+        )
+        .scalar()
+    )
+
+    return schemas.JourneySummaryResponse(
+        active_plan_steps=int(active_plan_steps),
+        total_plan_steps=int(total_plan_steps),
+        remaining_due=round(remaining_due, 2),
+        has_billing_data=has_billing_data,
+        next_appointment=next_appt.datetime_start if next_appt else None,
+        last_document_date=last_doc,
+    )
+
+
+def check_and_create_milestone(
+    db: Session,
+    patient_id: int,
+    employer_id: int,
+    milestone_type: "models.MilestoneType",
+    milestone_date: datetime,
+    note: Optional[str],
+    confirm_duplicate: bool,
+    created_by: int,
+) -> schemas.JourneyMilestoneCreateResponse:
+    """Verrouille la ligne Patient (SELECT ... FOR UPDATE) avant de vérifier/insérer —
+    protège contre deux requêtes concurrentes créant chacune un doublon (n'a d'effet réel
+    que sur PostgreSQL ; SQLite ne sérialise pas FOR UPDATE en connexions concurrentes)."""
+    db.query(models.Patient).filter(models.Patient.id == patient_id).with_for_update().first()
+
+    same_day_start = milestone_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    same_day_end = same_day_start + timedelta(days=1)
+    existing = (
+        db.query(models.JourneyMilestone)
+        .filter(
+            models.JourneyMilestone.patient_id == patient_id,
+            models.JourneyMilestone.milestone_type == milestone_type,
+            models.JourneyMilestone.milestone_date >= same_day_start,
+            models.JourneyMilestone.milestone_date < same_day_end,
+            models.JourneyMilestone.note == note,
+            models.JourneyMilestone.deleted_at.is_(None),
+        )
+        .first()
+    )
+
+    if existing is not None and not confirm_duplicate:
+        db.commit()  # libère le verrou sans rien créer
+        return schemas.JourneyMilestoneCreateResponse(
+            milestone=None, possible_duplicate=True, existing_milestone_id=existing.id,
+        )
+
+    milestone = models.JourneyMilestone(
+        patient_id=patient_id,
+        employer_id=employer_id,
+        milestone_type=milestone_type,
+        milestone_date=milestone_date,
+        note=note,
+        created_by=created_by,
+    )
+    db.add(milestone)
+    db.commit()
+    db.refresh(milestone)
+
+    return schemas.JourneyMilestoneCreateResponse(
+        milestone=schemas.JourneyMilestoneOut.model_validate(milestone),
+        possible_duplicate=existing is not None,
+    )
+
+
+def soft_delete_milestone(db: Session, patient_id: int, milestone_id: int, deleted_by: int) -> models.JourneyMilestone:
+    milestone = (
+        db.query(models.JourneyMilestone)
+        .filter(
+            models.JourneyMilestone.id == milestone_id,
+            models.JourneyMilestone.patient_id == patient_id,
+            models.JourneyMilestone.deleted_at.is_(None),
+        )
+        .first()
+    )
+    if milestone is None:
+        return None
+    milestone.deleted_at = datetime.now()
+    milestone.deleted_by = deleted_by
+    db.commit()
+    db.refresh(milestone)
+    return milestone

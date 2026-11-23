@@ -1,0 +1,1103 @@
+import asyncio
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Request
+from fastapi.responses import FileResponse, HTMLResponse
+from sqlalchemy.orm import Session
+from sqlalchemy import func, desc, and_, or_
+from typing import List, Optional, Dict
+from datetime import date, datetime
+import os
+import pathlib
+import time
+import json
+import logging
+
+from backend import models, schemas, database
+from backend.routers.auth import get_current_user, has_permission, is_superadmin_user
+from backend.utils.access_control import assert_patient_access
+from backend.services.document_factory import DocumentFactory
+from backend.services.archive_service import get_archive_service
+from backend.services.far_ordonnance_archive_service import archive_far_ordonnance_from_source
+from backend.services.far_ordonnance_bridge import patient_requires_far_ordonnance
+from backend.services.generators.report_gen import ReportGenerator
+from backend.services.clinical_coherence import coherence_service
+from backend.utils.accounting_utils import extract_amount_from_clinical_data
+from backend.services.audit_service import audit_service
+from backend.services.devis_document_lifecycle import (
+    should_archive_financial_document,
+    should_learn_financial_document,
+    should_offer_financial_rdv_suggestion,
+)
+
+logger = logging.getLogger(__name__)
+router = APIRouter(tags=["Documents & Accounting"])
+
+# Configuration
+import pathlib
+from backend.core.media_paths import get_media_root
+from backend.core.paths import AppPaths
+BASE_DIR = pathlib.Path(__file__).parent.parent
+MEDIA_DIR = get_media_root()
+DOCS_DIR = str(MEDIA_DIR / "documents")
+STATIC_DIR = str(AppPaths.get_static_dir())
+
+os.makedirs(DOCS_DIR, exist_ok=True)
+doc_factory = DocumentFactory(output_dir=DOCS_DIR, static_dir=STATIC_DIR)
+
+# Logic moved to backend.utils.accounting_utils
+
+
+DOCUMENT_TYPE_PERMISSIONS = {
+    "ordonnance": "prescriptions",
+    "rapport_cephalo": "cephalo",
+    "certificat": "patients",
+    "devis": "accounting",
+    "note": "accounting",
+    "note_honoraires": "accounting",
+    "honoraires": "accounting",
+    "libre": "clinical",
+    "lettre": "clinical",
+    "lettre_medicale": "clinical",
+    "document_libre": "clinical",
+    "photo_clinique": "patients",
+    "radiographie": "patients",
+    "moulage": "patients",
+    "autre": "patients",
+    "echeancier": "accounting",
+}
+
+
+def require_document_permission(doc_type: str, current_user: models.User) -> None:
+    """Fail closed for document kinds without an explicit server-side permission."""
+    normalized_type = str(doc_type or "").lower()
+    permission = DOCUMENT_TYPE_PERMISSIONS.get(normalized_type)
+    if permission is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Type de document sans politique d'autorisation explicite.",
+        )
+    if not has_permission(current_user, permission):
+        raise HTTPException(status_code=403, detail=f"Accès refusé. Permission requise : {permission}.")
+
+def can_read_historic_bilan(patient: models.Patient, actor: models.User) -> bool:
+    """DEC-R2-01: dedicated R entitlement, never a general archive CRUD grant.
+
+    An owner dentist may read their own cabinet's registered BILAN.  An ADMIN
+    must belong to that cabinet AND carry the explicit 'bilan_read' grant;
+    the canonical has_permission() intentionally grants ADMIN too broadly for
+    this owner-approved historical BILAN exception.
+    """
+    if patient is None or actor is None or patient.employer_id is None:
+        return False
+    if actor.get_employer_id() != patient.employer_id:
+        return False
+    role = actor.role.value if hasattr(actor.role, "value") else str(actor.role)
+    if role == "DENTISTE" and actor.employer_id is None and actor.id == patient.employer_id:
+        return True
+    return (
+        role == "ADMIN"
+        and isinstance(actor.permissions, dict)
+        and actor.permissions.get("bilan_read") is True
+    )
+
+
+def require_historic_bilan_reader(patient_id: int, actor: models.User, db: Session) -> None:
+    """Authorize only the R view, never archive signature/download/mutation."""
+    assert_patient_access(patient_id, actor, db)
+    patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
+    if not can_read_historic_bilan(patient, actor):
+        raise HTTPException(status_code=403, detail="Lecture BILAN non autorisée.")
+
+
+@router.get("/bilan/{document_id}/view", include_in_schema=True)
+def view_historic_bilan(
+    document_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Authenticated read-only inline PDF; never infer BILAN from legacy names."""
+    doc = db.query(models.DocumentArchive).filter(
+        models.DocumentArchive.id == document_id,
+        models.DocumentArchive.document_type == models.DocumentType.BILAN,
+        models.DocumentArchive.status == models.DocumentStatus.ACTIF,
+        models.DocumentArchive.is_latest_version == True,
+    ).first()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="BILAN introuvable.")
+    require_historic_bilan_reader(doc.patient_id, current_user, db)
+
+    rel = str(doc.file_path or "").replace("\\\\", "/")
+    if rel.startswith("static/archives/"):
+        root = (MEDIA_DIR / "archives").resolve()
+        suffix = rel[len("static/archives/"):]
+    elif rel.startswith("static/documents/"):
+        root = (MEDIA_DIR / "documents").resolve()
+        suffix = rel[len("static/documents/"):]
+    else:
+        raise HTTPException(status_code=404, detail="Archive BILAN non classée.")
+    candidate = (root / suffix).resolve()
+    if not suffix or not candidate.is_relative_to(root) or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Fichier BILAN indisponible.")
+    audit_service.log(
+        db=db, user_id=current_user.id, employer_id=current_user.get_employer_id(),
+        action="MEDIA_ACCESS_GRANTED", resource_type="BILAN", resource_id=str(doc.id),
+        severity="INFO", details="Lecture BILAN historique autorisée.",
+    )
+    return FileResponse(
+        str(candidate), media_type="application/pdf",
+        headers={"Content-Disposition": "inline", "Cache-Control": "no-store"},
+    )
+
+
+@router.get("/bilan/{document_id}/page", include_in_schema=True)
+def view_historic_bilan_page(
+    document_id: int,
+    page: int = 1,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """DEC-R2-01: securely render a BILAN PDF page for browsers without PDF plugins.
+
+    Reuses the exact typed, patient-scoped and actor-scoped PDF authorization,
+    file provenance and status checks. Returns in-memory pixels, never a public
+    static PNG or a mutation. The original PDF route remains available.
+    """
+    from fastapi.responses import Response
+    import fitz
+
+    if not 1 <= page <= 100:
+        raise HTTPException(status_code=404, detail="Page BILAN introuvable.")
+    guarded_pdf = view_historic_bilan(document_id, db, current_user)
+    source = pathlib.Path(str(guarded_pdf.path))
+    # Bound decoding to prevent untrusted huge clinical PDFs exhausting memory.
+    if source.stat().st_size > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Aperçu BILAN trop volumineux.")
+    try:
+        with fitz.open(str(source)) as pdf:
+            if page > pdf.page_count:
+                raise HTTPException(status_code=404, detail="Page BILAN introuvable.")
+            sheet = pdf[page - 1]
+            if not (100 <= sheet.rect.width <= 2000 and 100 <= sheet.rect.height <= 2000):
+                raise HTTPException(status_code=422, detail="Format de page BILAN non pris en charge.")
+            bitmap = sheet.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), alpha=False)
+            if bitmap.width * bitmap.height > 6_000_000:
+                raise HTTPException(status_code=422, detail="Page BILAN trop grande.")
+            pixels = bitmap.tobytes("png")
+            count = pdf.page_count
+    except (fitz.FileDataError, fitz.EmptyFileError, ValueError):
+        raise HTTPException(status_code=422, detail="PDF BILAN illisible.")
+    return Response(
+        content=pixels,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store, private",
+            "X-Bilan-Page-Count": str(count),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.post("/generate",
+    summary="Générer un document PDF",
+    description="Génère une ordonnance, certificat, devis ou note d'honoraires. La génération ReportLab tourne dans un thread dédié pour ne pas bloquer l'event loop.")
+async def generate_document(req: schemas.DocumentRequest, archive: bool = False, preview: bool = False, force: bool = False, db: Session = Depends(database.get_db), current_user: models.User = Depends(get_current_user)):
+    require_document_permission(req.type, current_user)
+    assert_patient_access(req.patient_id, current_user, db)
+    patient_id = req.patient_id
+    user_id = current_user.id
+
+    # Génération ReportLab dans un thread dédié (non-bloquant pour l'event loop FastAPI).
+    # Chaque thread crée sa propre session SQLAlchemy (thread-safety SQLite/SQLCipher).
+    def _generate_pdf_in_thread() -> str:
+        with database.SessionLocal() as thread_db:
+            thread_patient = thread_db.query(models.Patient).filter(models.Patient.id == patient_id).first()
+            if req.type == "ordonnance":
+                return doc_factory.create_ordonnance(thread_patient, schemas.OrdonnanceData(**req.data), thread_db, user_id)
+            elif req.type == "certificat":
+                return doc_factory.create_certificat(thread_patient, schemas.CertificatData(**req.data), thread_db, user_id)
+            elif req.type == "devis":
+                return doc_factory.create_devis(thread_patient, schemas.DevisData(**req.data), thread_db, user_id)
+            elif req.type in ["honoraires", "note"]:
+                return doc_factory.create_note_honoraires(thread_patient, schemas.HonorairesData(**req.data), thread_db, user_id)
+            elif req.type in ["libre", "lettre"]:
+                return doc_factory.create_document_libre(thread_patient, schemas.LibreData(**req.data), thread_db, user_id)
+            elif req.type == "echeancier":
+                if req.data.get("plan_id"):
+                    return doc_factory.create_installment_plan(
+                        thread_db,
+                        req.data.get("plan_id"),
+                        user_id,
+                        archive=not preview,
+                    )
+                else:
+                    # Données directes depuis le frontend. Une preview peut utiliser
+                    # des objets temporaires dans la transaction, mais ne doit rien
+                    # persister en base.
+                    plan_data = req.data
+                    db_plan = models.InstallmentPlan(
+                        patient_id=thread_patient.id,
+                        title=plan_data.get("title", "Échéancier"),
+                        total_amount=plan_data.get("totalAmount", 0)
+                    )
+                    thread_db.add(db_plan)
+                    if preview:
+                        thread_db.flush()
+                    else:
+                        thread_db.commit()
+                        thread_db.refresh(db_plan)
+                    
+                    for inst in plan_data.get("items", []):
+                        db_inst = models.Installment(
+                            plan_id=db_plan.id,
+                            label=inst.get("label"),
+                            amount=inst.get("amount"),
+                            due_date=datetime.fromisoformat(inst.get("dueDate", datetime.now().isoformat()).split("T")[0])
+                        )
+                        thread_db.add(db_inst)
+
+                    if preview:
+                        thread_db.flush()
+                        try:
+                            return doc_factory.create_installment_plan(
+                                thread_db,
+                                db_plan.id,
+                                user_id,
+                                archive=False,
+                            )
+                        finally:
+                            thread_db.rollback()
+
+                    thread_db.commit()
+                    return doc_factory.create_installment_plan(thread_db, db_plan.id, user_id)
+            raise ValueError(f"Type de document non supporté : {req.type}")
+
+    patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
+    far_required = bool(
+        req.type == "ordonnance"
+        and patient is not None
+        and patient_requires_far_ordonnance(assurance=patient.assurance)
+    )
+    far_status = "pending_archive" if far_required else "not_required"
+    far_document = None
+    far_error = None
+    far_source_ordonnance_document_id = None
+    replacement_file_backups: list[tuple[pathlib.Path, Optional[bytes]]] = []
+    financial_edit_committed = False
+
+    def _backup_financial_edit_files() -> None:
+        if req.type not in ["honoraires", "note"]:
+            return
+        raw_id = req.data.get("_replace_archive_id") if isinstance(req.data, dict) else None
+        if raw_id in (None, ""):
+            return
+        try:
+            archive_id = int(raw_id)
+        except (TypeError, ValueError):
+            return
+        target = db.query(models.DocumentArchive).filter(
+            models.DocumentArchive.id == archive_id,
+            models.DocumentArchive.patient_id == patient_id,
+        ).first()
+        if target is None:
+            return
+        if target.file_path.startswith("static/archives/") or target.file_path.startswith("static/documents/"):
+            canonical = MEDIA_DIR / target.file_path.replace("static/", "", 1)
+        else:
+            canonical = BASE_DIR / target.file_path
+        candidates = [canonical]
+        if target.created_at:
+            candidates.append(
+                MEDIA_DIR / "documents" / str(target.created_at.year) / f"{target.created_at.month:02d}" / canonical.name
+            )
+        seen = set()
+        for index, candidate in enumerate(candidates):
+            resolved = candidate.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if index == 0:
+                replacement_file_backups.append((resolved, resolved.read_bytes() if resolved.exists() else None))
+            elif resolved.exists():
+                replacement_file_backups.append((resolved, resolved.read_bytes()))
+
+    def _restore_financial_edit_files() -> None:
+        if financial_edit_committed:
+            return
+        for path, content in replacement_file_backups:
+            if content is None:
+                if path.exists():
+                    path.unlink()
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+
+    try:
+        pdf_path = await asyncio.to_thread(_generate_pdf_in_thread)
+        
+        is_financial = req.type in ["honoraires", "note", "devis"]
+        should_archive = (
+            should_archive_financial_document(req.type, archive, preview)
+            if is_financial
+            else archive and not preview
+        ) and not isinstance(pdf_path, dict)
+
+        if should_archive:
+            with open(pdf_path, "rb") as f: pdf_content = f.read()
+            _backup_financial_edit_files()
+            archive_service = get_archive_service(db)
+            
+            enum_map = {
+                "ordonnance": models.DocumentType.ORDONNANCE, "certificat": models.DocumentType.CERTIFICAT,
+                "devis": models.DocumentType.DEVIS, "honoraires": models.DocumentType.NOTE_HONORAIRES,
+                "note": models.DocumentType.NOTE_HONORAIRES, "libre": models.DocumentType.DOCUMENT_LIBRE,
+                "lettre": models.DocumentType.LETTRE_MEDICALE
+            }
+            
+            # Logique de statut stricte respectant l'UI (Ghost Treasury v4.6)
+            p_status = req.payment_status if req.payment_status else models.PaiementStatut.EN_ATTENTE
+            p_collected = p_status == models.PaiementStatut.PAYE
+            
+            doc, _ = archive_service.archive_document(
+                patient_id=patient.id, file_content=pdf_content, filename=os.path.basename(pdf_path),
+                doc_type=enum_map.get(req.type, models.DocumentType.AUTRE), uploaded_by_id=user_id, clinical_data=req.data,
+                is_accounted=req.is_accounted, 
+                payment_status=p_status,
+                is_collected=p_collected,
+                on_conflict=(
+                    schemas.ConflictResolution.CREATE_VERSION
+                    if force
+                    else schemas.ConflictResolution.CANCEL
+                ),
+                commit=req.type not in ["honoraires", "note"],
+            )
+            pdf_path = doc.file_path
+
+            if req.type == "ordonnance" and far_required:
+                far_source_ordonnance_document_id = int(doc.id)
+                try:
+                    far_document = archive_far_ordonnance_from_source(
+                        db,
+                        patient=patient,
+                        source_ordonnance_document=doc,
+                        ordonnance=schemas.OrdonnanceData(**req.data),
+                        uploaded_by_id=user_id,
+                    )
+                    far_status = "generated" if far_document is not None else "not_required"
+                except ValueError as far_exc:
+                    # The clinical ordonnance is already the archived source of truth.
+                    # A missing/unrepresentable FAR administrative output must be explicit
+                    # without pretending that the clinical prescription itself failed.
+                    far_status = "blocked"
+                    far_error = str(far_exc)
+                    logger.warning(
+                        "FAR ordonnance dérivée bloquée (source=%s): %s",
+                        far_source_ordonnance_document_id,
+                        far_error,
+                    )
+
+            # Le miroir historique éventuel doit évoluer dans le même lot que le
+            # PDF canonique. En cas d'échec comptable, les deux seront restaurés.
+            if req.type in ["honoraires", "note"]:
+                if doc.file_path.startswith("static/archives/") or doc.file_path.startswith("static/documents/"):
+                    canonical_after = (MEDIA_DIR / doc.file_path.replace("static/", "", 1)).resolve()
+                else:
+                    canonical_after = (BASE_DIR / doc.file_path).resolve()
+                for backup_path, _ in replacement_file_backups:
+                    if backup_path != canonical_after:
+                        backup_path.write_bytes(pdf_content)
+
+            # Étape 2 & 3 : Trésorerie Relationnelle (Ghost Treasury v4.6)
+            if req.type in ["honoraires", "note"]:
+                installments_data = req.data.get('installments', [])
+                is_global = req.data.get('is_global_note', False)
+                total_amount = sum(float(p.get('montant', 0)) for p in req.data.get('payments', []))
+
+                # P2-F: source transactionnelle unique pour Acte + encaissements liés.
+                # Un plan global reste EN_ATTENTE ; hors échéancier, PAYE crée un Payment
+                # exact par Acte avec acte_id, sans paiement global orphelin.
+                from backend.services.honoraires_persistence import persist_honoraires_lines
+                acte_default_statut = (
+                    models.PaiementStatut.EN_ATTENTE
+                    if (is_global and installments_data)
+                    else models.PaiementStatut(p_status)
+                )
+                actes, _ = persist_honoraires_lines(
+                    db,
+                    patient_id=patient.id,
+                    practitioner_id=user_id,
+                    document_archive_id=doc.id,
+                    document_created_at=doc.created_at,
+                    items=req.data.get('payments', []),
+                    payment_status=acte_default_statut,
+                    is_accounted=req.is_accounted,
+                    validated_by=f"{current_user.nom_complet or 'Utilisateur'} ({current_user.role})",
+                )
+
+                from backend.services.installment_reconciliation import reconcile_document_installments
+                if not actes or actes[0].id is None:
+                    raise ValueError("Impossible de rattacher l'échéancier à la note d'honoraires")
+                reconcile_document_installments(
+                    db,
+                    patient_id=patient.id,
+                    anchor_acte_id=actes[0].id,
+                    total_amount=total_amount,
+                    installments=installments_data if is_global else [],
+                )
+
+                # Commit unique du lot comptable Document Studio.
+                db.commit()
+                financial_edit_committed = True
+
+        # Analyse de cohérence déterministe.
+        warnings = await coherence_service.analyze_coherence(patient.id, req.type, req.data, db, doctor_id=user_id)
+        if far_error:
+            warnings = list(warnings or [])
+            warnings.append(f"FAR: {far_error}")
+
+        # Nettoyage du chemin pour le frontend
+        if isinstance(pdf_path, dict):
+            pdf_url = pdf_path["url"]
+        else:
+            pdf_url = pdf_path.replace("\\", "/")
+            
+            # Si le chemin contient MEDIA_DIR, on le rend relatif à MEDIA_DIR et on préfixe par 'static/'
+            media_path_str = str(MEDIA_DIR).replace("\\", "/")
+            if media_path_str in pdf_url:
+                pdf_url = "static" + pdf_url.split(media_path_str)[1]
+            elif "static/" in pdf_url:
+                pdf_url = pdf_url[pdf_url.find("static/"):]
+        
+        if preview and isinstance(pdf_url, str) and pdf_url.startswith("static/documents/"):
+            from backend.services.document_preview_token import create_document_preview_token
+
+            rel_preview_path = pdf_url[len("static/documents/"):]
+            preview_token = create_document_preview_token(
+                current_user.get_employer_id(),
+                rel_preview_path,
+            )
+            pdf_url = f"{pdf_url}?preview_token={preview_token}"
+
+        # Apprentissage des habitudes d'actes uniquement après archivage réel.
+        if should_learn_financial_document(req.type, bool(should_archive), preview):
+            from backend.services.accounting_service import accounting_service
+            from backend.services import cabinet_catalog_store
+            if req.type == "devis":
+                for item in req.data.get('items', []):
+                    accounting_service.record_act_usage(db, user_id, item.get('acte'), float(item.get('prix_unitaire', 0)))
+                    cabinet_catalog_store.record_catalog_act_usage(
+                        db,
+                        current_user.get_employer_id(),
+                        user_id,
+                        act_name=item.get('acte'),
+                        specialty_name=item.get('category'),
+                        catalog_act_id=item.get('catalog_act_id'),
+                    )
+            else: # honoraires/note
+                for p in req.data.get('payments', []):
+                    accounting_service.record_act_usage(db, user_id, p.get('acte'), float(p.get('montant', 0)))
+                    cabinet_catalog_store.record_catalog_act_usage(
+                        db,
+                        current_user.get_employer_id(),
+                        user_id,
+                        act_name=p.get('acte'),
+                        specialty_name=p.get('category'),
+                        catalog_act_id=p.get('catalog_act_id'),
+                    )
+
+        # Un document financier n'est pas une preuve de soin réalisé et ne doit
+        # pas inventer un délai de suivi clinique générique.
+        rdv_suggestion = None
+        if should_offer_financial_rdv_suggestion(req.type):
+            rdv_suggestion = None
+
+        # Financial documents are not a clinical indication for radiography.
+        suggest_radio = False
+
+        if not preview:
+            audit_service.log(db=db, user_id=current_user.id, employer_id=current_user.get_employer_id(), action="GENERATE", resource_type="Document", resource_id=str(req.patient_id), details=f"Type: {req.type}, Preview: {preview}, Archive: {should_archive}")
+        return {
+            "status": "success",
+            "pdf_url": pdf_url,
+            "warnings": warnings,
+            "rdv_suggestion": rdv_suggestion,
+            "suggest_radio": suggest_radio,
+            "far_required": far_required,
+            "far_status": far_status,
+            "far_document_id": int(far_document.id) if far_document is not None else None,
+            "far_pdf_url": far_document.file_path if far_document is not None else None,
+            "far_source_ordonnance_document_id": far_source_ordonnance_document_id,
+        }
+    except ValueError as e:
+        db.rollback()
+        _restore_financial_edit_files()
+        msg = str(e)
+        if msg.startswith("DOUBLE_DETECTED:"):
+            raise HTTPException(status_code=409, detail={"code": "DOUBLE_DETECTED", "message": msg[len("DOUBLE_DETECTED:"):].strip()})
+        logger.error(f"Erreur Génération (ValueError) : {e}")
+        raise HTTPException(status_code=422, detail=msg)
+    except Exception as e:
+        db.rollback()
+        _restore_financial_edit_files()
+        logger.error(f"Erreur Génération : {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+from backend.schemas.branding import BrandingPreviewPayload
+
+@router.post("/sample-preview")
+async def generate_sample_preview(
+    payload: Optional[BrandingPreviewPayload] = None,
+    db: Session = Depends(database.get_db), 
+    current_user: models.User = Depends(get_current_user)
+):
+    if not has_permission(current_user, "settings"):
+        raise HTTPException(status_code=403, detail="Accès refusé. Permission requise : settings.")
+    # Patient fictif pour l'aperçu dynamique
+    mock_patient = models.Patient(
+        nom="EL ALAMI",
+        prenom="Youssef",
+        date_naissance=datetime(1990, 5, 12),
+        sexe="M",
+        telephone="REDACTED_PHONE",
+        email="REDACTED_EMAIL",
+        employer_id=current_user.id
+    )
+    
+    # Ordonnance fictive représentative
+    mock_data = schemas.OrdonnanceData(
+        medications=[
+            schemas.MedicationItem(nom="ZAMOC (Amoxicilline)", dosage="500 mg", forme="Sachets", posologie="1 sachet 3 fois par jour après les repas", type="MEDICAMENT"),
+            schemas.MedicationItem(nom="DOLIPRANE", dosage="1000 mg", forme="Comprimés", posologie="1 comprimé toutes les 6 heures en cas de douleur", type="MEDICAMENT")
+        ],
+        doc_date=date.today()
+    )
+    
+    custom_config = None
+    if payload:
+        dump_func = getattr(payload, "model_dump", getattr(payload, "dict", None))
+        if dump_func:
+            custom_config = {k: v for k, v in dump_func().items() if v is not None}
+            
+    try:
+        pdf_path = doc_factory.create_ordonnance(mock_patient, mock_data, db, current_user.id, custom_config=custom_config)
+        
+        pdf_url = pdf_path.replace("\\", "/")
+        media_path_str = str(MEDIA_DIR).replace("\\", "/")
+        if media_path_str in pdf_url:
+            pdf_url = "static" + pdf_url.split(media_path_str)[1]
+        elif "static/" in pdf_url:
+            pdf_url = pdf_url[pdf_url.find("static/"):]
+
+        if isinstance(pdf_url, str) and pdf_url.startswith("static/documents/"):
+            from backend.services.document_preview_token import create_document_preview_token
+
+            rel_preview_path = pdf_url[len("static/documents/"):]
+            preview_token = create_document_preview_token(
+                current_user.get_employer_id(),
+                rel_preview_path,
+            )
+            pdf_url = f"{pdf_url}?preview_token={preview_token}"
+            
+        return {"pdf_url": pdf_url}
+    except Exception as e:
+        logger.error(f"Erreur Génération Aperçu Échantillon : {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/archive", response_model=schemas.DocumentArchiveResponse)
+async def archive_document(patient_id: int, doc_type: schemas.DocumentType, file: UploadFile = File(...), title: Optional[str] = None, on_conflict: schemas.ConflictResolution = schemas.ConflictResolution.CREATE_VERSION, db: Session = Depends(database.get_db), current_user: models.User = Depends(get_current_user)):
+    # P2ter++: a generic upload must never mint or overwrite an archive with
+    # official Cephalo status. That type is reserved for the identity/revision-
+    # bound generator at /api/patients/{patient_id}/pdf (archive=true).
+    # Unverified external PDFs may be attached using the AUTRE category.
+    if doc_type == schemas.DocumentType.RAPPORT_CEPHALO:
+        raise HTTPException(
+            status_code=422,
+            detail="Le bilan céphalométrique officiel exige une étude et une révision vérifiées : utilisez le générateur Céphalo.",
+        )
+    require_document_permission(doc_type.value if hasattr(doc_type, "value") else str(doc_type), current_user)
+    assert_patient_access(patient_id, current_user, db)
+    content = await file.read()
+    archive_service = get_archive_service(db)
+    try:
+        doc, is_new = archive_service.archive_document(
+            patient_id=patient_id, file_content=content, filename=file.filename,
+            doc_type=doc_type, uploaded_by_id=current_user.id, title=title, on_conflict=on_conflict,
+        )
+    except ValueError as exc:
+        # Invalid client paths and attempts to mutate official archives are
+        # safe, explicit HTTP refusals, not unhandled internal server errors.
+        detail = str(exc)
+        raise HTTPException(
+            status_code=409 if "céphalométrique officielle" in detail else 400,
+            detail=detail,
+        ) from exc
+    doc_dict = {c.key: getattr(doc, c.key) for c in doc.__table__.columns}
+    doc_dict["file_exists"] = bool(doc.file_path and os.path.exists(os.path.join(BASE_DIR, doc.file_path)))
+    doc_dict["download_url"] = f"/api/documents/{doc.id}/download"
+    audit_service.log(
+        db=db, user_id=current_user.id, employer_id=current_user.get_employer_id(),
+        action="DOCUMENT_UPLOADED", resource_type=str(doc_type), resource_id=str(doc.id),
+        severity="INFO", details=f"Document {doc_type} archivé pour le patient {patient_id} : {file.filename}",
+    )
+    return {"success": True, "message": "Archivé", "document": doc_dict}
+
+@router.get("/", response_model=schemas.DocumentListResponse)
+def list_documents(patient_id: Optional[int] = None, doc_type: Optional[schemas.DocumentType] = None, search: Optional[str] = None, page: int = 1, page_size: int = 20, db: Session = Depends(database.get_db), current_user: models.User = Depends(get_current_user)):
+    if not has_permission(current_user, "patients"):
+        raise HTTPException(status_code=403, detail="Accès refusé. Permission requise : patients.")
+    if patient_id:
+        assert_patient_access(patient_id, current_user, db)
+    if doc_type is not None:
+        require_document_permission(
+            doc_type.value if hasattr(doc_type, "value") else str(doc_type), current_user,
+        )
+    # Apply role-based type filtering in SQL BEFORE count and pagination;
+    # post-filtering the response would still leak hidden totals and titles.
+    allowed_types = [
+        kind for kind in models.DocumentType
+        if DOCUMENT_TYPE_PERMISSIONS.get(kind.value.lower()) is not None
+        and has_permission(current_user, DOCUMENT_TYPE_PERMISSIONS[kind.value.lower()])
+    ]
+
+    archive_service = get_archive_service(db)
+    docs, total = archive_service.search_documents(
+        patient_id=patient_id,
+        doc_type=doc_type,
+        search_query=search,
+        page=page,
+        page_size=page_size,
+        employer_id=current_user.get_employer_id(),
+        allowed_doc_types=allowed_types,
+    )
+
+    # Enrichir chaque doc avec file_exists pour que le frontend sache quoi afficher
+    def _resolve_abs(file_path: str) -> str:
+        if file_path.startswith("static/archives/") or file_path.startswith("static/documents/"):
+            return str(MEDIA_DIR / file_path.replace("static/", "", 1))
+        return os.path.join(BASE_DIR, file_path)
+
+    docs_out = []
+    for d in docs:
+        d_dict = {c.key: getattr(d, c.key) for c in d.__table__.columns}
+        d_dict["file_exists"] = bool(d.file_path and os.path.exists(_resolve_abs(d.file_path)))
+        d_dict["download_url"] = f"/api/documents/{d.id}/download"
+        docs_out.append(d_dict)
+
+    return {"total": total, "page": page, "page_size": page_size, "documents": docs_out}
+
+@router.get("/{document_id}/download")
+def download_document(
+    document_id: str,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    # Canonical auth dependency enforces token type, expiry, JTI revocation,
+    # account activity and mobile/access identity rules consistently.
+
+    if str(document_id).startswith("legacy:"):
+        parts = str(document_id).split(":")
+        patient_id = int(parts[1])
+        # Fichier patient generique : permission "patients" requise (S6).
+        if not has_permission(current_user, "patients"):
+            raise HTTPException(status_code=403, detail="Accès refusé. Permission requise : patients.")
+        assert_patient_access(patient_id, current_user, db)
+        patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
+        folder = f"{patient.id}_{patient.nom.upper()}_{patient.prenom.capitalize()}"
+        filename = os.path.basename(parts[2])
+        safe_root = pathlib.Path(BASE_DIR, "static", "patients", folder, "Documents").resolve()
+        file_path = (safe_root / filename).resolve()
+        if not str(file_path).startswith(str(safe_root)):
+            raise HTTPException(status_code=400, detail="Chemin de fichier invalide")
+        return FileResponse(path=str(file_path), filename=filename)
+    
+    try:
+        numeric_document_id = int(document_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Identifiant de document invalide")
+
+    doc = db.query(models.DocumentArchive).filter(models.DocumentArchive.id == numeric_document_id).first()
+    if not doc: raise HTTPException(status_code=404, detail="Introuvable")
+    # Gate de permission selon le type de document (S6) : symetrique a generate/archive.
+    # Ex : un PDF financier (devis/honoraires) exige la permission "accounting".
+    require_document_permission(
+        doc.document_type.value if hasattr(doc.document_type, "value") else str(doc.document_type),
+        current_user,
+    )
+    assert_patient_access(doc.patient_id, current_user, db)
+
+    # The official identity is not sufficient: snapshot the PDF bytes after
+    # verifying its immutable SQL provenance, stored length and SHA256.
+    if doc.document_type == models.DocumentType.RAPPORT_CEPHALO:
+        from backend.services.cephalo_document_lock import verified_official_archive_bytes
+        from fastapi.responses import Response
+        from urllib.parse import quote
+
+        verified = verified_official_archive_bytes(doc, db)
+        audit_service.log(
+            db=db, user_id=current_user.id, employer_id=current_user.get_employer_id(),
+            action="MEDIA_ACCESS_GRANTED", resource_type=str(doc.document_type), resource_id=str(doc.id),
+            severity="INFO", details=f"Téléchargement officiel vérifié {doc.id} (patient {doc.patient_id})",
+        )
+        return Response(
+            content=verified,
+            media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename*=utf-8''" + quote(doc.original_filename or doc.filename)},
+        )
+
+    # Résolution du chemin absolu
+    if doc.file_path.startswith("static/archives/") or doc.file_path.startswith("static/documents/"):
+        abs_path = str(MEDIA_DIR / doc.file_path.replace("static/", "", 1))
+    else:
+        abs_path = os.path.join(BASE_DIR, doc.file_path)
+
+    if not os.path.exists(abs_path):
+        raise HTTPException(
+            status_code=404,
+            detail="Fichier introuvable sur ce serveur. Le document existe en base mais le fichier physique est manquant (migration ou réinstallation)."
+        )
+    audit_service.log(
+        db=db, user_id=current_user.id, employer_id=current_user.get_employer_id(),
+        action="MEDIA_ACCESS_GRANTED", resource_type=str(doc.document_type), resource_id=str(doc.id),
+        severity="INFO", details=f"Téléchargement document {doc.id} (patient {doc.patient_id})",
+    )
+    return FileResponse(path=abs_path, filename=doc.original_filename)
+
+@router.post("/{document_id}/trash")
+def move_to_trash(document_id: str, db: Session = Depends(database.get_db), current_user: models.User = Depends(get_current_user)):
+    if document_id.startswith("legacy:"):
+        if not has_permission(current_user, "patients"):
+            raise HTTPException(status_code=403, detail="Accès refusé. Permission requise : patients.")
+        raise HTTPException(status_code=400, detail="Les documents legacy ne peuvent pas être mis à la corbeille via cette interface.")
+
+    if document_id.startswith("acte_"):
+        if not has_permission(current_user, ["patients", "accounting"]):
+            raise HTTPException(status_code=403, detail="Accès refusé. Permission requise : patients ou accounting.")
+        try:
+            acte_id = int(document_id.split("_", 1)[1])
+        except (ValueError, IndexError):
+            raise HTTPException(status_code=400, detail="Identifiant d'acte invalide.")
+        acte = db.query(models.Acte).filter(models.Acte.id == acte_id).first()
+        if not acte:
+            raise HTTPException(status_code=404, detail="Acte introuvable")
+        assert_patient_access(acte.patient_id, current_user, db)
+        acte.deleted_at = datetime.now()
+        db.commit()
+        return {"message": "Mis à la corbeille", "id": document_id}
+
+    if document_id.startswith("doc_"):
+        doc_id_int = int(document_id.replace("doc_", ""))
+        doc = db.query(models.DocumentArchive).filter(models.DocumentArchive.id == doc_id_int).first()
+        if not doc: raise HTTPException(status_code=404, detail="Introuvable")
+        doc_id = doc.id
+    else:
+        try:
+            doc_id = int(document_id)
+            doc = db.query(models.DocumentArchive).filter(models.DocumentArchive.id == doc_id).first()
+            if not doc: raise HTTPException(status_code=404, detail="Introuvable")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Identifiant de document invalide.")
+
+    require_document_permission(
+        doc.document_type.value if hasattr(doc.document_type, "value") else str(doc.document_type),
+        current_user,
+    )
+    assert_patient_access(doc.patient_id, current_user, db)
+
+    # Protection des Radios (seul le dentiste / proprio peut supprimer)
+    if doc.document_type in [models.DocumentType.RADIOGRAPHIE, models.DocumentType.RAPPORT_CEPHALO]:
+        if not is_superadmin_user(current_user) and (not current_user.role or current_user.role.value not in ["DENTISTE", "ADMIN"]):
+            raise HTTPException(
+                status_code=403, 
+                detail="Seul le dentiste est autorisé à supprimer une radiographie du dossier patient."
+            )
+
+    archive_service = get_archive_service(db)
+    doc = archive_service.move_to_trash(doc_id)
+    return {"message": "Mis à la corbeille", "id": doc.id}
+
+@router.post("/{document_id}/restore")
+def restore_from_trash(document_id: str, db: Session = Depends(database.get_db), current_user: models.User = Depends(get_current_user)):
+    if document_id.startswith("acte_"):
+        if not has_permission(current_user, ["patients", "accounting"]):
+            raise HTTPException(status_code=403, detail="Accès refusé. Permission requise : patients ou accounting.")
+        try:
+            acte_id = int(document_id.split("_", 1)[1])
+        except (ValueError, IndexError):
+            raise HTTPException(status_code=400, detail="Identifiant d'acte invalide.")
+        acte = db.query(models.Acte).filter(models.Acte.id == acte_id).first()
+        if not acte or acte.deleted_at is None:
+            raise HTTPException(status_code=404, detail="Acte introuvable dans la corbeille")
+        assert_patient_access(acte.patient_id, current_user, db)
+        acte.deleted_at = None
+        db.commit()
+        return {"message": "Restauré", "id": document_id}
+
+    if document_id.startswith("doc_"):
+        doc = db.query(models.DocumentArchive).filter(models.DocumentArchive.public_id == document_id).first()
+        if not doc: raise HTTPException(status_code=404, detail="Introuvable")
+        doc_id = doc.id
+    else:
+        try:
+            doc_id = int(document_id)
+            doc = db.query(models.DocumentArchive).filter(models.DocumentArchive.id == doc_id).first()
+            if not doc: raise HTTPException(status_code=404, detail="Introuvable")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Identifiant de document invalide.")
+
+    require_document_permission(
+        doc.document_type.value if hasattr(doc.document_type, "value") else str(doc.document_type),
+        current_user,
+    )
+    assert_patient_access(doc.patient_id, current_user, db)
+    
+    archive_service = get_archive_service(db)
+    try:
+        doc = archive_service.restore_from_trash(doc_id)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"message": "Restauré", "id": doc.id}
+
+@router.delete("/{document_id}")
+def permanent_delete(document_id: str, confirm: bool = False, db: Session = Depends(database.get_db), current_user: models.User = Depends(get_current_user)):
+    if not confirm: raise HTTPException(status_code=400, detail="Confirmation requise")
+    
+    if document_id.startswith("doc_"):
+        doc = db.query(models.DocumentArchive).filter(models.DocumentArchive.public_id == document_id).first()
+        if not doc: raise HTTPException(status_code=404, detail="Introuvable")
+        doc_id = doc.id
+    else:
+        try:
+            doc_id = int(document_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Identifiant de document invalide.")
+    doc = db.query(models.DocumentArchive).filter(models.DocumentArchive.id == doc_id).first()
+    if not doc: raise HTTPException(status_code=404, detail="Introuvable")
+    require_document_permission(
+        doc.document_type.value if hasattr(doc.document_type, "value") else str(doc.document_type),
+        current_user,
+    )
+    assert_patient_access(doc.patient_id, current_user, db)
+    
+    archive_service = get_archive_service(db)
+    if archive_service.permanent_delete(doc_id): return {"status": "deleted"}
+    raise HTTPException(status_code=500, detail="Erreur suppression")
+
+@router.post("/patients/{patient_id}/report")
+def generate_patient_report(
+    patient_id: int,
+    req: schemas.CephaloPDFRequest,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Legacy document route, now bound to the identical authorized source study.
+
+    No last-analysis fallback, no unversioned report and no silent archive.
+    """
+    if not has_permission(current_user, "cephalo"):
+        raise HTTPException(status_code=403, detail="Accès refusé. Permission requise : cephalo.")
+
+    from backend.routers.patients import _bound_cephalo_study
+    from copy import deepcopy
+
+    analysis, revision = _bound_cephalo_study(
+        patient_id, req.analysis_id, req.expected_revision, db, current_user
+    )
+    if req.archive:
+        raise HTTPException(
+            status_code=422,
+            detail="Archivage non pris en charge sur cette route historique",
+        )
+    patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient introuvable")
+    from backend.services.cephalo_consistency_validator import cephalo_consistency_validator
+    validation = cephalo_consistency_validator.validate(analysis.angles_data or {})
+    if not validation.is_valid:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "PDF refusé : incohérences bloquantes dans les mesures céphalo.",
+                "fatals": validation.fatals,
+                "warnings": validation.warnings,
+            },
+        )
+    results = deepcopy(analysis.angles_data or {})
+    if req.ai_diagnostic:
+        results["ai_diagnostic"] = req.ai_diagnostic
+    if req.clinical_data:
+        results["clinical_data"] = req.clinical_data.model_dump()
+    analysis_data = {
+        "id": analysis.id,
+        "image_path": analysis.image_original_path,
+        "results": results,
+        "landmarks": deepcopy(analysis.landmarks_data),
+        "_is_pre_bilan": True,
+        "_validation_warnings": validation.warnings,
+    }
+    pdf_path = doc_factory.create_cephalo_report(
+        patient, analysis_data, db=db, user_id=current_user.id
+    )
+    audit_service.log(
+        db=db, user_id=current_user.id,
+        employer_id=current_user.get_employer_id(),
+        action="CEPHALO_PDF_GENERATED",
+        resource_type="CephaloAnalysis",
+        resource_id=str(analysis.id),
+        severity="INFO",
+        details=f"PDF céphalo étude {analysis.id} révision {revision} pour patient {patient_id}",
+    )
+    return FileResponse(
+        path=pdf_path,
+        filename=os.path.basename(pdf_path),
+        media_type="application/pdf",
+        headers={
+            "X-Cephalo-Analysis-Id": str(analysis.id),
+            "X-Cephalo-Revision": str(revision),
+        },
+    )
+
+
+@router.post("/patients/{patient_id}/rvg")
+async def upload_rvg(
+    patient_id: int,
+    file: UploadFile = File(...),
+    radio_type: str = Form("rvg"),
+    tooth_number: Optional[str] = Form(None),
+    sector: Optional[str] = Form(None),
+    acquisition_date: Optional[date] = Form(None),
+    note: Optional[str] = Form(None),
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """
+    Upload une radio RVG/intra-orale pour un patient.
+    Stocke dans DocumentArchive avec document_type=RADIOGRAPHIE et tags=["rvg", "intra_orale"].
+    """
+    # Sécurité : vérifier accès patient
+    assert_patient_access(patient_id, current_user, db)
+    employer_id = current_user.get_employer_id()
+
+    # Permission check
+    if not has_permission(current_user, DOCUMENT_TYPE_PERMISSIONS.get("radiographie")):
+        raise HTTPException(status_code=403, detail="Permission refusée pour ajouter une radio.")
+
+    # MIME type validation
+    if file.content_type not in schemas.ALLOWED_MIMES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Format non autorisé. Acceptés : {', '.join(schemas.ALLOWED_MIMES)}",
+        )
+
+    # File size validation
+    file_data = await file.read()
+    if len(file_data) > schemas.MAX_RVG_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Fichier trop volumineux (max {schemas.MAX_RVG_SIZE // (1024*1024)} MB).",
+        )
+
+    # Extension validation
+    _, ext = os.path.splitext(file.filename or "file")
+    if ext.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".pdf"}:
+        raise HTTPException(status_code=422, detail="Extension non autorisée.")
+
+    # Get patient
+    patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient non trouvé.")
+
+    # Prepare clinical data
+    clinical_data = {
+        "radio_type": radio_type,
+        "tooth_number": tooth_number,
+        "sector": sector,
+        "acquisition_date": str(acquisition_date) if acquisition_date else None,
+        "note": note,
+    }
+
+    # Archive the document using archive_service
+    archive_service = get_archive_service(db)
+    from uuid import uuid4
+    unique_filename = f"{uuid4()}{ext}"
+
+    doc, _ = archive_service.archive_document(
+        patient_id=patient_id,
+        file_content=file_data,
+        filename=file.filename or unique_filename,
+        doc_type=schemas.DocumentType.RADIOGRAPHIE,
+        tags=["rvg", "intra_orale"],
+        clinical_data=clinical_data,
+        uploaded_by_id=current_user.id,
+    )
+
+    # Audit log
+    audit_service.log(
+        db=db,
+        user_id=current_user.id,
+        employer_id=employer_id,
+        action="RVG_UPLOAD",
+        resource_type="RADIOGRAPHIE",
+        resource_id=str(patient_id),
+        severity="INFO", details=f"RVG téléchargée pour le patient {patient_id} : {file.filename}",
+    )
+
+    db.commit()
+
+    return {
+        "id": doc.id,
+        "patient_id": doc.patient_id,
+        "download_url": f"/api/documents/{doc.id}/download",
+        "document_type": doc.document_type.value,
+        "original_filename": doc.original_filename,
+        "tags": doc.tags,
+        "clinical_data": doc.clinical_data,
+        "created_at": doc.created_at.isoformat(),
+    }
+
+
+@router.get("/patients/{patient_id}/rvg")
+async def list_patient_rvg(
+    patient_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """
+    Liste les radios RVG d'un patient.
+    Filtre par document_type=RADIOGRAPHIE et tags contenant "rvg".
+    """
+    # Sécurité : vérifier accès patient
+    assert_patient_access(patient_id, current_user, db)
+
+    # Permission check
+    if not has_permission(current_user, DOCUMENT_TYPE_PERMISSIONS.get("radiographie")):
+        raise HTTPException(status_code=403, detail="Permission refusée.")
+
+    # Query RVG documents (tenant isolation already enforced by assert_patient_access above)
+    documents = (
+        db.query(models.DocumentArchive)
+        .filter(
+            models.DocumentArchive.patient_id == patient_id,
+            models.DocumentArchive.document_type == schemas.DocumentType.RADIOGRAPHIE,
+            models.DocumentArchive.status == schemas.DocumentStatus.ACTIF,
+        )
+        .order_by(desc(models.DocumentArchive.created_at))
+        .all()
+    )
+
+    # Filter by tags (only RVG/intra_orale)
+    rvg_docs = [d for d in documents if d.tags and ("rvg" in d.tags or "intra_orale" in d.tags)]
+
+    return [
+        {
+            "id": d.id,
+            "patient_id": d.patient_id,
+            "document_type": d.document_type.value,
+            "original_filename": d.original_filename,
+            "download_url": f"/api/documents/{d.id}/download",
+            "tags": d.tags,
+            "clinical_data": d.clinical_data,
+            "created_at": d.created_at.isoformat(),
+            "uploaded_by_id": d.uploaded_by_id,
+        }
+        for d in rvg_docs
+    ]

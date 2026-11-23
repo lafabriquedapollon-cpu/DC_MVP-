@@ -1,0 +1,493 @@
+import { useState, useEffect, useCallback, useRef } from 'react';
+import toast from 'react-hot-toast';
+import { MobileStorage, isReplayablePocketAction, resolveMobileApiBaseUrl } from '../../../../services/zka/MobileStorage';
+import { mobileFetch } from '../../../../services/zka/mobileFetch';
+import { unlinkCurrentMobileDevice } from '../../../../services/zka/unlinkMobileDevice';
+import { CryptoService } from '../../../../services/zka/CryptoService';
+import { mobileApiJson } from '../../../../services/zka/mobileApi';
+import type { LabJob } from '../../../../types/labJob';
+import { formatLabJobMessage } from '../../../../services/whatsappService';
+import type { Tab, SyncStatus, Snapshot, Appointment, ApptStatus } from '../types';
+
+function localDateKey(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function isQueueableNetworkError(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  const name = error && typeof error === 'object' && 'name' in error
+    ? String((error as { name?: unknown }).name ?? '')
+    : '';
+  return name === 'AbortError' || name === 'TimeoutError';
+}
+
+export function useMobileDashboard() {
+  const [activeTab, setActiveTab] = useState<Tab>('today');
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [queuedActionsCount, setQueuedActionsCount] = useState(0);
+  const [selectedDate, setSelectedDate] = useState<string>(() => localDateKey());
+  const [labJobs, setLabJobs] = useState<LabJob[]>([]);
+  const [patients, setPatients] = useState<{id: number, name: string, phone: string | null}[]>([]);
+  const credsRef = useRef<{ access_token: string; api_base_url: string; masterKey: string } | null>(null);
+  const mainRef = useRef<HTMLElement>(null);
+
+  // Signature au Fauteuil states
+  const [sigPatientId, setSigPatientId] = useState<number | null>(null);
+  const [sigPatientName, setSigPatientName] = useState<string>('');
+  const [sigDocs, setSigDocs] = useState<any[]>([]);
+  const [selectedDocId, setSelectedDocId] = useState<number | null>(null);
+  const [isSigning, setIsSigning] = useState(false);
+  const [isLoadingDocs, setIsLoadingDocs] = useState(false);
+
+  // WhatsApp states
+  const [whatsappApt, setWhatsappApt] = useState<Appointment | null>(null);
+  const [customMessage, setCustomMessage] = useState<string>('');
+  const [whatsappTemplate, setWhatsappTemplate] = useState<'rappel' | 'confirmation'>('rappel');
+
+  useEffect(() => {
+    if (mainRef.current) {
+      mainRef.current.scrollTo({ top: 0, behavior: 'instant' as any });
+    }
+  }, [activeTab]);
+
+  const fetchSnapshot = useCallback(async () => {
+    try {
+      setSyncStatus('loading');
+      const creds = await MobileStorage.getCredentials();
+      if (!creds) throw new Error('Non appairé');
+      credsRef.current = creds;
+
+      const res = await mobileFetch(`${resolveMobileApiBaseUrl(creds.api_base_url)}/api/mobile/snapshot?target_date=${selectedDate}`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) {
+        const detail = (await res.json().catch(() => ({}))).detail ?? `Erreur ${res.status}`;
+        if (res.status === 401 || res.status === 403) {
+          setError('Session mobile expirée ou révoquée');
+          setSyncStatus('error');
+          return;
+        }
+        setError(detail);
+        setSyncStatus('error');
+        return;
+      }
+
+      const rawRes = await res.json();
+      const data: Snapshot = rawRes.payload 
+        ? await CryptoService.decryptPayload(rawRes.payload, creds.masterKey) 
+        : rawRes;
+
+      setSnapshot(data);
+      await MobileStorage.saveLastSnapshot(data, selectedDate);
+      setError(null);
+      setSyncStatus('success');
+    } catch (err) {
+      console.error('[MobileDashboard] fetchSnapshot failed:', err);
+      const notPaired = err instanceof Error && err.message === 'Non appairé';
+      if (notPaired) {
+        setError('Session mobile expirée ou révoquée');
+        setSyncStatus('error');
+        return;
+      }
+      if (!isQueueableNetworkError(err)) {
+        setError(err instanceof Error ? err.message : 'Erreur de synchronisation mobile');
+        setSyncStatus('error');
+        return;
+      }
+      const cached = await MobileStorage.getLastSnapshot(selectedDate);
+      if (cached) {
+        setSnapshot(cached.data);
+        setSyncStatus('error');
+        const cachedAt = new Date(cached.saved_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+        setError(`Hors réseau — données du ${cached.target_date} mises en cache à ${cachedAt}`);
+      } else {
+        setError('Impossible de joindre le cabinet');
+        setSyncStatus('error');
+      }
+    }
+  }, [selectedDate]);
+
+  const fetchPatients = useCallback(async () => {
+    try {
+      const creds = credsRef.current || await MobileStorage.getCredentials();
+      if (!creds) return;
+      const res = await mobileFetch(`${resolveMobileApiBaseUrl(creds.api_base_url)}/api/mobile/patients`, {
+        headers: { Authorization: `Bearer ${creds.access_token}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const rawRes = await res.json();
+        const data = rawRes.payload 
+          ? await CryptoService.decryptPayload(rawRes.payload, creds.masterKey)
+          : rawRes;
+        setPatients(data.data || data);
+      }
+    } catch { /* silent */ }
+  }, []);
+
+  const syncQueue = useCallback(async () => {
+    if (!navigator.onLine) return;
+    const creds = await MobileStorage.getCredentials();
+    if (!creds) return;
+    
+    const queue = await MobileStorage.getActionQueue();
+    if (queue.length === 0) {
+      setQueuedActionsCount(0);
+      return;
+    }
+
+    setSyncStatus('loading');
+    let hasError = false;
+
+    for (const action of queue) {
+      // Defense in depth: never replay legacy destructive or foreign-origin actions.
+      if (!isReplayablePocketAction(action, creds.api_base_url)) {
+        await MobileStorage.removeActionFromQueue(action.id);
+        toast.error('Action hors ligne non autorisée annulée.');
+        continue;
+      }
+      try {
+        const res = await mobileFetch(action.url, {
+          method: action.method,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Mobile-Action-Id': action.id,
+          },
+          body: action.body ? JSON.stringify(action.body) : undefined,
+        });
+        if (!res.ok) {
+          hasError = true;
+          toast.error(`Synchronisation refusée (${res.status})`);
+          break;
+        }
+        await MobileStorage.removeActionFromQueue(action.id);
+      } catch {
+        hasError = true;
+        break;
+      }
+    }
+
+    const remaining = await MobileStorage.getActionQueue();
+    setQueuedActionsCount(remaining.length);
+    if (!hasError) {
+      toast.success('Données synchronisées');
+      fetchSnapshot();
+    }
+  }, [fetchSnapshot]);
+
+  useEffect(() => {
+    MobileStorage.getActionQueue().then(q => setQueuedActionsCount(q.length));
+    const on = () => { setIsOnline(true); syncQueue(); };
+    const off = () => setIsOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
+  }, [syncQueue]);
+
+  useEffect(() => {
+    let cancelled = false;
+    MobileStorage.getLastSnapshot(selectedDate).then(cached => {
+      if (!cancelled && cached) {
+        setSnapshot(cached.data);
+        setSyncStatus('loading');
+        const cachedAt = new Date(cached.saved_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+        setError(`Données du ${cached.target_date} en cache (${cachedAt}) — synchronisation en cours`);
+      }
+    });
+    void fetchSnapshot();
+    void fetchPatients();
+    return () => { cancelled = true; };
+  }, [fetchSnapshot, fetchPatients, selectedDate]);
+
+  const labRoleAllowed = snapshot?.role === 'DENTISTE' || snapshot?.role === 'ADMIN';
+
+  useEffect(() => {
+    if (activeTab !== 'lab' || !labRoleAllowed) return;
+    let cancelled = false;
+    mobileApiJson<LabJob[]>('/lab-jobs')
+      .then(items => { if (!cancelled) setLabJobs(Array.isArray(items) ? items : []); })
+      .catch(err => { if (!cancelled) console.error('[MobileDashboard] lab jobs failed:', err); });
+    return () => { cancelled = true; };
+  }, [activeTab, labRoleAllowed]);
+
+  const handleStatusChange = async (id: number, status: ApptStatus) => {
+    const creds = credsRef.current || await MobileStorage.getCredentials();
+    if (!creds) return;
+    const actionId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${id}-status`;
+    try {
+      const res = await mobileFetch(`${resolveMobileApiBaseUrl(creds.api_base_url)}/api/mobile/appointments/${id}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'X-Mobile-Action-Id': actionId },
+        body: JSON.stringify({ status }),
+      });
+      if (!res.ok) {
+        toast.error(`Mise à jour refusée (${res.status})`);
+        return;
+      }
+      setSnapshot(prev => prev ? {
+        ...prev,
+        appointments: prev.appointments.map(a => a.id === id ? { ...a, status } : a),
+      } : prev);
+    } catch (err) {
+      if (!isQueueableNetworkError(err)) {
+        toast.error(err instanceof Error && err.message === 'Non appairé'
+          ? 'Session mobile expirée ou révoquée'
+          : 'Erreur lors de la mise à jour');
+        return;
+      }
+      await MobileStorage.enqueueAction(`${resolveMobileApiBaseUrl(creds.api_base_url)}/api/mobile/appointments/${id}/status`, 'PATCH', { status }, actionId);
+      setQueuedActionsCount((await MobileStorage.getActionQueue()).length);
+      toast('Mise à jour mise en attente (hors ligne)', { icon: '🔄' });
+      setSnapshot(prev => prev ? {
+        ...prev,
+        appointments: prev.appointments.map(a => a.id === id ? { ...a, status } : a),
+      } : prev);
+    }
+  };
+
+  const handleDeleteAppt = async (id: number) => {
+    // A destructive action must be confirmed by the cabinet now, never replayed later.
+    if (!navigator.onLine) {
+      toast.error('Suppression impossible hors ligne. Reconnectez-vous au cabinet.');
+      return;
+    }
+    if (!window.confirm("Supprimer ce rendez-vous ?")) return;
+    const creds = credsRef.current || await MobileStorage.getCredentials();
+    if (!creds) {
+      toast.error('Session mobile expirée ou révoquée');
+      return;
+    }
+    const actionId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${id}-delete`;
+    try {
+      const res = await mobileFetch(`${resolveMobileApiBaseUrl(creds.api_base_url)}/api/mobile/appointments/${id}`, {
+        method: 'DELETE',
+        headers: { 'X-Mobile-Action-Id': actionId },
+      });
+      if (!res.ok) {
+        toast.error(`Suppression refusée (${res.status})`);
+        return;
+      }
+      void fetchSnapshot();
+      toast.success("Rendez-vous supprimé");
+    } catch (err) {
+      toast.error(err instanceof Error && err.message === 'Non appairé'
+        ? 'Session mobile expirée ou révoquée'
+        : 'Suppression non confirmée par le cabinet. Réessayez en ligne.');
+    }
+  };
+
+  const handleRescheduleAppt = async (id: number, newDate: string, newTime: string) => {
+    const creds = credsRef.current || await MobileStorage.getCredentials();
+    if (!creds) return;
+    try {
+      const res = await mobileFetch(`${resolveMobileApiBaseUrl(creds.api_base_url)}/api/mobile/appointments/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ datetime_start: `${newDate}T${newTime}:00` }),
+      });
+      if (!res.ok) {
+        toast.error('Déplacement mobile indisponible — utilisez l’agenda principal.');
+        return;
+      }
+      fetchSnapshot();
+      toast.success("Rendez-vous déplacé");
+    } catch {
+      // La route de déplacement mobile n'est pas encore canonique (M6.3) :
+      // ne jamais mettre en queue une opération que le serveur ne sait pas rejouer.
+      toast.error('Déplacement impossible hors ligne.');
+    }
+  };
+
+  const openWhatsApp = (phone: string | null, msg: string) => {
+    if (!phone) return;
+    window.open(`https://wa.me/${phone.replace(/\D/g, '')}?text=${encodeURIComponent(msg)}`, '_blank');
+  };
+
+  const openApptWhatsApp = (apt: Appointment) => {
+    setWhatsappApt(apt);
+    setWhatsappTemplate('rappel');
+  };
+
+  useEffect(() => {
+    if (!whatsappApt) return;
+    // The externally shared default intentionally avoids patient identity,
+    // treatment details and assumptions such as "tomorrow" for an arbitrary RDV.
+    if (whatsappTemplate === 'rappel') {
+      setCustomMessage('Bonjour, ceci est un rappel de votre rendez-vous au cabinet. Merci de nous contacter pour toute question.');
+    } else {
+      setCustomMessage('Bonjour, votre rendez-vous au cabinet est confirmé. Contactez-nous si vous souhaitez le modifier.');
+    }
+  }, [whatsappApt, whatsappTemplate]);
+
+  const handleSendWhatsApp = () => {
+    if (!whatsappApt || !whatsappApt.phone) return;
+    const phoneClean = whatsappApt.phone.replace(/\D/g, '');
+    window.open(`https://wa.me/${phoneClean}?text=${encodeURIComponent(customMessage)}`, '_blank');
+    setWhatsappApt(null);
+  };
+
+  const handleWhatsAppSend = async (job: LabJob) => {
+    // Preparing a draft is not evidence that the lab received it. The status
+    // must never flip to SENT merely because WhatsApp/clipboard was opened.
+    if (!navigator.onLine) {
+      toast.error('Connexion cabinet requise avant de préparer un envoi Labo.');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(formatLabJobMessage(job));
+      toast.success('Brouillon Labo copié. Vérifiez le destinataire avant tout envoi.');
+    } catch (error) {
+      console.warn('[MobileDashboard] lab clipboard unavailable', error);
+      toast.error('Copie impossible. Aucun statut Labo modifié.');
+    }
+  };
+
+  const fetchSignatureDocs = useCallback(async (patientId: number) => {
+    setIsLoadingDocs(true);
+    try {
+      const creds = credsRef.current || await MobileStorage.getCredentials();
+      if (!creds) return;
+      const res = await mobileFetch(`${resolveMobileApiBaseUrl(creds.api_base_url)}/api/mobile/patients/${patientId}/documents`, {
+        headers: { Authorization: `Bearer ${creds.access_token}` },
+      });
+      if (res.ok) {
+        const rawRes = await res.json();
+        const data = rawRes.payload 
+          ? await CryptoService.decryptPayload(rawRes.payload, creds.masterKey)
+          : rawRes;
+        const docs = data.data || data;
+        setSigDocs(docs);
+        if (docs.length > 0) {
+          const unsigned = docs.find((d: any) => !d.signed);
+          setSelectedDocId(unsigned ? unsigned.id : docs[0].id);
+        } else {
+          setSelectedDocId(null);
+        }
+      }
+    } catch (e) {
+      toast.error("Erreur lors du chargement des documents");
+    } finally {
+      setIsLoadingDocs(false);
+    }
+  }, []);
+
+  const handleOpenSignature = (patientId: number, patientName: string) => {
+    setSigPatientId(patientId);
+    setSigPatientName(patientName);
+    setSigDocs([]);
+    setSelectedDocId(null);
+    setIsSigning(false);
+    fetchSignatureDocs(patientId);
+  };
+
+  const handleSaveSignature = async (dataUrl: string) => {
+    if (!selectedDocId) return toast.error("Veuillez sélectionner un document.");
+    setIsSigning(true);
+    try {
+      const creds = credsRef.current || await MobileStorage.getCredentials();
+      if (!creds) return;
+      const res = await mobileFetch(`${resolveMobileApiBaseUrl(creds.api_base_url)}/api/mobile/documents/${selectedDocId}/sign`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${creds.access_token}`
+        },
+        body: JSON.stringify({ signature_base64: dataUrl })
+      });
+      if (res.ok) {
+        toast.success("Document signé et PDF régénéré !");
+        fetchSignatureDocs(sigPatientId!);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail ?? "Erreur lors de la signature");
+      }
+    } catch (e: any) {
+      toast.error(`Erreur : ${e.message}`);
+    } finally {
+      setIsSigning(false);
+    }
+  };
+
+  const handleExportPDF = async () => {
+    const creds = credsRef.current || await MobileStorage.getCredentials();
+    if (!creds) return;
+    try {
+      const date = new Date(selectedDate);
+      const res = await mobileFetch(`${resolveMobileApiBaseUrl(creds.api_base_url)}/api/mobile/accounting/export-pdf?year=${date.getFullYear()}&month=${date.getMonth() + 1}`);
+      if (!res.ok) throw new Error(`export ${res.status}`);
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `Compta_${date.getFullYear()}_${date.getMonth() + 1}.pdf`;
+      anchor.click();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('[MobileDashboard] accounting export failed:', error);
+      toast.error("Erreur lors de l'export PDF");
+    }
+  };
+
+  const handleLogout = async () => {
+    const remotelyRevoked = await unlinkCurrentMobileDevice();
+    // A LAN outage must never strand local patient data on a departing phone.
+    // A failed remote attempt is explicitly reported, not called "revoked".
+    window.location.replace(remotelyRevoked
+      ? '/mobile/onboarding'
+      : '/mobile/onboarding?revocation=pending');
+  };
+
+  return {
+    state: {
+      activeTab,
+      syncStatus,
+      snapshot,
+      error,
+      isOnline,
+      selectedDate,
+      labJobs,
+      patients,
+      sigPatientId,
+      sigPatientName,
+      sigDocs,
+      selectedDocId,
+      isSigning,
+      isLoadingDocs,
+      whatsappApt,
+      customMessage,
+      whatsappTemplate,
+      queuedActionsCount,
+    },
+    actions: {
+      setActiveTab,
+      setSelectedDate,
+      fetchSnapshot,
+      fetchPatients,
+      handleStatusChange,
+      handleDeleteAppt,
+      handleRescheduleAppt,
+      openWhatsApp,
+      openApptWhatsApp,
+      handleSendWhatsApp,
+      handleWhatsAppSend,
+      handleOpenSignature,
+      handleSaveSignature,
+      handleLogout,
+      handleExportPDF,
+      setSigPatientId,
+      setSelectedDocId,
+      setWhatsappApt,
+      setWhatsappTemplate,
+      setCustomMessage,
+    },
+    refs: {
+      mainRef,
+    }
+  };
+}

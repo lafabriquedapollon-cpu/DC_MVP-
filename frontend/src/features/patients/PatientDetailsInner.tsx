@@ -1,0 +1,585 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import {
+  Activity,
+  FileText,
+  ArrowLeft,
+  Calendar,
+  Phone,
+  FileDigit,
+  Target,
+  Stethoscope,
+  Mail,
+  AlertTriangle,
+  RefreshCcw,
+  Plus,
+  History,
+  Banknote,
+  Image,
+  Images,
+  Smartphone,
+} from 'lucide-react';
+import { api } from '../../services/api';
+import { cn } from '../../utils/cn';
+import toast from 'react-hot-toast';
+import { parseMotifs, findMotifById } from '../../data/motifsDictionary';
+
+type CabinetMotifSummary = {
+  id: string;
+  label: string;
+  urgency: 'urgence' | 'normal' | 'planifié';
+  is_active: boolean;
+};
+
+import { CephaloWorkspace } from '../ortho/CephaloWorkspace';
+import { OrthoLongitudinalComparePanel } from '../ortho/OrthoLongitudinalComparePanel';
+import { OrthoCockpitPanel } from '../ortho/OrthoCockpitPanel';
+import { PanoramicStudio } from '../panoramic/PanoramicStudio';
+import { DocumentHub } from '../admin/DocumentHub';
+import { PatientDocuments } from './PatientDocuments';
+import { ClinicalHub } from './components/ClinicalHub';
+import { PatientJourney } from './components/PatientJourney';
+import { PatientFinances } from './components/PatientFinances';
+import { PatientRvgPanel } from './components/PatientRvgPanel';
+import { PatientMediaTimeline } from './components/PatientMediaTimeline';
+import { CabinetMultiViewLab, isCabinetMultiViewLabEnabled, isR3SplitLabEnabled } from '../multiview/CabinetMultiViewLab';
+import './PatientRadiologyPolish.css';
+import { QuickPayModal } from './components/QuickPayModal';
+import { PatientCompanionPanel } from './components/PatientCompanionPanel';
+import { usePatientStore } from '../../stores/usePatientStore';
+import { useAuthStore } from '../../stores/useAuthStore';
+import { EliteGhostLoader } from '../../components/EliteGhostLoader';
+import { AssuranceBadge } from '../../components/AssuranceBadge';
+import { useFlowHandoff } from '../../hooks/useFlowHandoff';
+import { PatientAvatar } from './components/PatientAvatar';
+
+interface Patient {
+  id: number;
+  numero_dossier: string;
+  nom: string;
+  prenom: string;
+  date_naissance: string;
+  telephone: string;
+  telephone_2?: string;
+  telephone_3?: string;
+  email?: string;
+  adresse?: string;
+  assurance: string;
+  assurance_privee_nom?: string;
+  assurance_complementaire?: boolean;
+  assurance_complementaire_nom?: string;
+  antecedents_medicaux?: string;
+  motif_consultation?: string;
+  photo_url?: string | null;
+  dossier?: {
+    is_ortho_active: boolean;
+  };
+}
+
+type TabType = 'tracking' | 'clinical' | 'radiology' | 'admin' | 'archives' | 'finances' | 'companion';
+type RadioTab = 'media' | 'rvg' | 'panoramic' | 'cephalo';
+
+const userRoleValue = (role: unknown): string => {
+  if (!role) return '';
+  if (typeof role === 'string') return role;
+  if (typeof role === 'object' && role !== null && 'value' in role) {
+    return String((role as { value?: unknown }).value || '');
+  }
+  return '';
+};
+
+export const PatientDetails = () => {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = (searchParams.get('tab') as TabType) || 'tracking';
+
+  const user = useAuthStore(state => state.user);
+  const role = userRoleValue(user?.role);
+  const userPermissions = user?.permissions || {};
+  const hasExplicitPermissions = Object.keys(userPermissions).length > 0;
+  const ownerOrAdmin = Boolean(user && (role === 'ADMIN' || (role === 'DENTISTE' && !user.employer_id)));
+  const canClinical = ownerOrAdmin || Boolean(userPermissions.clinical === true);
+  const legacyDentistEmployee = Boolean(user?.employer_id && role === 'DENTISTE' && !hasExplicitPermissions);
+  const canPanoramic = ownerOrAdmin || legacyDentistEmployee || Boolean(hasExplicitPermissions && userPermissions.panoramic === true);
+  const canCephalo = ownerOrAdmin || legacyDentistEmployee || Boolean(hasExplicitPermissions && userPermissions.cephalo === true);
+  const canFinance = Boolean(
+    ownerOrAdmin ||
+    (hasExplicitPermissions && (userPermissions.accounting === true || userPermissions.payments === true))
+  );
+  const availableRadioTabs: RadioTab[] = [
+    'media',
+    'rvg',
+    ...(canPanoramic ? ['panoramic' as const] : []),
+    ...(canCephalo ? ['cephalo' as const] : []),
+  ];
+
+  const requestedRadioTab = (searchParams.get('radioTab') as RadioTab | null) || 'rvg';
+  const radioTab: RadioTab = availableRadioTabs.includes(requestedRadioTab) ? requestedRadioTab : 'rvg';
+  const handleRadioTabChange = (value: RadioTab) => {
+    if (!availableRadioTabs.includes(value)) return;
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      next.set('radioTab', value);
+      return next;
+    });
+  };
+
+  const { editingDoc, patientsCache, setEditingDoc } = usePatientStore();
+  const cachedPatient = patientsCache.find(p => String(p.id) === id);
+  const [patient, setPatient] = useState<Patient | null>(cachedPatient ? { ...cachedPatient, assurance: cachedPatient.assurance } : null);
+  const [loading, setLoading] = useState(!cachedPatient);
+  const [fetchError, setFetchError] = useState(false);
+  const [isPayModalOpen, setIsPayModalOpen] = useState(false);
+  // Read-only contextual advice lives in the radiology layout rather than
+  // over clinical data. Key by patient to prevent A→B transient disclosure.
+  const [radiologyAdvice, setRadiologyAdvice] = useState<{
+    patientId: string; title: string; message: string; action?: string;
+  } | null>(null);
+  const [adviceExpanded, setAdviceExpanded] = useState(false);
+  const [dismissedAdvicePatient, setDismissedAdvicePatient] = useState<string | null>(null);
+  const [cabinetMotifs, setCabinetMotifs] = useState<CabinetMotifSummary[]>([]);
+  const lastEditingDoc = useRef(null);
+  const flowContentRef = useRef<HTMLElement>(null);
+  const tabRailRef = useRef<HTMLDivElement>(null);
+  const [hasOverflowingPatientTabs, setHasOverflowingPatientTabs] = useState(false);
+  // Invalidate responses from previous patient routes and retried requests.
+  const patientLoadEpochRef = useRef(0);
+  const flowHandoff = useFlowHandoff();
+  const initialFlowSurface = useRef(true);
+
+  // Real overflow detection: never render an inert "more tabs" button for
+  // restricted user roles whose three permitted tabs already fit on mobile.
+  useEffect(() => {
+    if (activeTab !== 'radiology' || loading || fetchError) {
+      setHasOverflowingPatientTabs(false);
+      return;
+    }
+    const rail = tabRailRef.current;
+    if (!rail) return;
+    const refresh = () => setHasOverflowingPatientTabs(rail.scrollWidth > rail.clientWidth + 8);
+    refresh();
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(refresh) : null;
+    if (observer) {
+      observer.observe(rail);
+      Array.from(rail.children).forEach(child => observer.observe(child));
+    }
+    window.addEventListener('resize', refresh);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', refresh);
+    };
+  }, [activeTab, loading, fetchError, canClinical, canFinance, ownerOrAdmin]);
+
+  useEffect(() => {
+    if (requestedRadioTab !== radioTab && activeTab === 'radiology') {
+      setSearchParams(prev => {
+        const next = new URLSearchParams(prev);
+        next.set('radioTab', radioTab);
+        return next;
+      }, { replace: true });
+    }
+  }, [requestedRadioTab, radioTab, activeTab, setSearchParams]);
+
+  useEffect(() => {
+    if (editingDoc && editingDoc !== lastEditingDoc.current) {
+      setSearchParams(prev => {
+        const next = new URLSearchParams(prev);
+        next.set('tab', 'admin');
+        return next;
+      });
+    }
+    lastEditingDoc.current = editingDoc;
+  }, [editingDoc, setSearchParams]);
+
+  useEffect(() => {
+    const handlePrescription = () => {
+      setEditingDoc(null);
+      setSearchParams({ tab: 'admin' });
+    };
+    window.addEventListener('perio-create-prescription', handlePrescription);
+    return () => window.removeEventListener('perio-create-prescription', handlePrescription);
+  }, [setEditingDoc, setSearchParams]);
+
+  useEffect(() => {
+    if (initialFlowSurface.current) {
+      initialFlowSurface.current = false;
+      return;
+    }
+    flowHandoff(flowContentRef.current);
+  }, [activeTab, flowHandoff]);
+
+  const fetchPatient = useCallback(async () => {
+    if (!id) return;
+    const epoch = ++patientLoadEpochRef.current;
+    try {
+      setFetchError(false);
+      if (!cachedPatient) setLoading(true);
+      const response = await api.get(`/patients/${id}`);
+      // An old A response must NEVER replace B after a SPA route change.
+      if (patientLoadEpochRef.current !== epoch) return;
+      if (String(response.data?.id) !== id) throw new Error('Patient response does not match active route');
+      setPatient(response.data);
+    } catch (error) {
+      if (patientLoadEpochRef.current !== epoch) return;
+      console.error('❌ Erreur chargement patient:', error);
+      setFetchError(true);
+    } finally {
+      if (patientLoadEpochRef.current === epoch) setLoading(false);
+    }
+  }, [id, cachedPatient]);
+
+  useEffect(() => {
+    void fetchPatient();
+    return () => { patientLoadEpochRef.current += 1; };
+  }, [fetchPatient]);
+
+  useEffect(() => {
+    if (!patient?.motif_consultation) {
+      setCabinetMotifs([]);
+      return;
+    }
+    let cancelled = false;
+    api.get('/motifs/', { params: { include_inactive: true } })
+      .then(response => {
+        if (!cancelled && Array.isArray(response.data)) setCabinetMotifs(response.data);
+      })
+      .catch(() => {
+        if (!cancelled) setCabinetMotifs([]);
+      });
+    return () => { cancelled = true; };
+  }, [patient?.motif_consultation]);
+
+  useEffect(() => {
+    // Informational advice is not an emergency. In radiology it is presented
+    // in-flow and collapsible so it never covers actions, patient or media.
+    if (!id || activeTab === 'companion') return;
+    let cancelled = false;
+    setAdviceExpanded(false);
+    if (activeTab === 'radiology') setRadiologyAdvice(null);
+    const timer = setTimeout(() => {
+      api.get(`/intelligence/patient/${id}/nba`).then(res => {
+        if (cancelled || !res.data?.nba) return;
+        const tip = res.data.nba;
+        const title = typeof tip.title === 'string' ? tip.title : 'Conseil contextuel';
+        const message = typeof tip.message === 'string' ? tip.message : '';
+        const action = typeof tip.action === 'string' ? tip.action : undefined;
+        if (activeTab === 'radiology') {
+          setRadiologyAdvice({ patientId: id, title, message, action });
+          return;
+        }
+        toast(`💡 ${title} — ${message}${action ? ` · Action : ${action}` : ''}`, {
+          id: `patient-nba-${id}`, duration: 7000,
+        });
+      }).catch(() => {});
+    }, 1500);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [id, activeTab]);
+
+  useEffect(() => {
+    if (!canClinical && activeTab === 'clinical') {
+      setSearchParams({ tab: 'tracking' }, { replace: true });
+    }
+  }, [canClinical, activeTab, setSearchParams]);
+
+  useEffect(() => {
+    if (!canFinance && activeTab === 'finances') {
+      setIsPayModalOpen(false);
+      setSearchParams({ tab: 'tracking' }, { replace: true });
+    }
+  }, [canFinance, activeTab, setSearchParams]);
+
+  useEffect(() => {
+    if (!ownerOrAdmin && activeTab === 'companion') {
+      setSearchParams({ tab: 'tracking' }, { replace: true });
+    }
+  }, [ownerOrAdmin, activeTab, setSearchParams]);
+
+  const activateOrtho = async () => {
+    try {
+      setLoading(true);
+      await api.patch(`/patients/${id}/ortho`, { is_ortho_active: true });
+      setPatient(prev => prev ? { ...prev, dossier: { ...prev.dossier, is_ortho_active: true } } : null);
+      toast.success('Suivi orthodontique activé');
+    } catch {
+      toast.error("Erreur lors de l'activation");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleTabChange = (tab: TabType) => setSearchParams({ tab });
+  const handleDocumentCreate = () => {
+    setEditingDoc(null);
+    setSearchParams({ tab: 'admin' });
+  };
+
+  if (loading) return <EliteGhostLoader text="Ouverture du dossier clinique..." size="medium" />;
+
+  if (fetchError) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-card rounded-[2rem] shadow-xl border border-border-main p-8 text-center space-y-6">
+          <div className="w-20 h-20 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto"><AlertTriangle size={40} /></div>
+          <div>
+            <h1 className="text-2xl font-black text-text-main mb-2">Impossible de charger le dossier</h1>
+            <p className="text-text-muted font-medium text-sm">Erreur réseau ou patient introuvable. Vérifiez votre connexion et réessayez.</p>
+          </div>
+          <div className="flex gap-3">
+            <button onClick={() => navigate('/patients')} className="flex-1 px-4 py-2.5 text-sm font-bold text-text-muted bg-input-field hover:bg-input-field rounded-lg transition-all">Retour</button>
+            <button onClick={() => fetchPatient()} className="flex-1 px-4 py-2.5 text-sm font-bold text-white bg-primary hover:bg-primary/90 rounded-lg transition-all flex items-center justify-center gap-2"><RefreshCcw size={16} /> Réessayer</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Never present a stale patient A while the route has already switched to B.
+  // This is a guard on real Cabinet, independent of the experimental MultiView flag.
+  if (patient && String(patient.id) !== id) {
+    return <EliteGhostLoader text="Ouverture du dossier clinique..." size="medium" />;
+  }
+  if (!patient) return null;
+
+  const fullName = `${patient.nom.toUpperCase()} ${patient.prenom}`;
+  const isDocuments = activeTab === 'admin' || activeTab === 'archives';
+  const isRadiology = activeTab === 'radiology';
+  const documentView = activeTab === 'archives' ? 'history' : 'create';
+  // DEV R3 only: the tall sticky patient header must never cover the workspace.
+  // Outside this exact opted-in media route, retain the certified R2/header behavior.
+  const r3ReviewActive = isRadiology && radioTab === 'media' &&
+    isCabinetMultiViewLabEnabled(import.meta.env.DEV, import.meta.env.VITE_V15_07_1_MULTIVIEW_LAB) &&
+    isR3SplitLabEnabled(import.meta.env.DEV, import.meta.env.VITE_V15_07_1_R3_SPLIT_LAB);
+  const birthDate = new Date(patient.date_naissance);
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const birthdayPending = today.getMonth() < birthDate.getMonth() || (today.getMonth() === birthDate.getMonth() && today.getDate() < birthDate.getDate());
+  if (birthdayPending) age -= 1;
+  const birthLabel = Number.isNaN(birthDate.getTime()) ? patient.date_naissance : birthDate.toLocaleDateString('fr-FR');
+
+  return (
+    <div data-dc-patient-radiology={isRadiology ? 'true' : undefined}
+      className={cn('flex flex-col bg-transparent', isDocuments ? 'h-screen overflow-hidden' : 'min-h-screen')}>
+      <header data-r3-1-patient-header={r3ReviewActive ? 'nonsticky' : undefined}
+        className={cn('bg-card-bg/90 backdrop-blur-xl border-b border-border-main shadow-elite',
+          r3ReviewActive ? 'relative z-0' : 'lg:sticky lg:top-0 z-[300]')}>
+        <div className={cn('max-w-[1600px] mx-auto md:px-8', isRadiology ? 'px-2.5 pt-1.5' : 'px-3 pt-2 sm:px-4 sm:pt-3')}>
+          <div className={cn('flex flex-col xl:flex-row xl:items-center xl:justify-between', isRadiology ? 'gap-1.5 mb-1.5' : 'gap-2 mb-2 sm:gap-3 sm:mb-3')}>
+            <div className={cn('flex items-start sm:items-center min-w-0', isRadiology ? 'gap-2' : 'gap-3')}>
+              <button onClick={() => navigate('/patients')} className={cn('shrink-0 bg-card-bg border border-border-main flex items-center justify-center rounded-xl shadow-sm active:scale-95 transition-all', isRadiology ? 'w-8 h-8 rounded-lg' : 'w-9 h-9 sm:w-10 sm:h-10')} style={{ color: 'var(--primary)' }} aria-label="Retourner à la liste des patients"><ArrowLeft size={isRadiology ? 16 : 20} strokeWidth={2.5} /></button>
+              <PatientAvatar
+                patientId={patient.id}
+                firstName={patient.prenom}
+                lastName={patient.nom}
+                photoUrl={patient.photo_url}
+                className={cn('rounded-xl border border-primary/15 shadow-sm', isRadiology ? 'w-8 h-8 text-xs' : 'w-10 h-10 sm:w-12 sm:h-12 text-sm')}
+              />
+              <div className="min-w-0">
+                <div className={cn('flex flex-wrap items-center', isRadiology ? 'gap-1.5' : 'gap-2')}>
+                  <h1 className={cn('font-black tracking-tight truncate', isRadiology ? 'text-base md:text-lg' : 'text-lg sm:text-xl md:text-2xl')} style={{ color: 'var(--primary)' }}>{fullName}</h1>
+                  <AssuranceBadge assurance={patient.assurance} size="full" hideWhenNone />
+                  {patient.antecedents_medicaux && <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-danger-surface border border-danger-border text-danger text-[10px] font-black uppercase tracking-wide"><AlertTriangle size={12} /> Alerte médicale</span>}
+                  <button onClick={() => navigate(`/patients/${id}/edit`)} className={cn('font-black uppercase rounded-lg border border-primary/15 bg-primary/5 hover:bg-primary/10 transition-colors', isRadiology ? 'px-2 py-0.5 text-[9px] tracking-wide' : 'px-2.5 py-1 text-[10px] tracking-widest')} style={{ color: 'var(--primary)' }}>Modifier</button>
+                </div>
+                <div className={cn('flex flex-wrap items-center font-bold text-text-muted', isRadiology ? 'mt-0.5 gap-x-2 gap-y-0.5 text-[10px]' : 'mt-1 gap-x-2 gap-y-0.5 text-[11px] sm:mt-1.5 sm:gap-x-3 sm:gap-y-1 sm:text-xs')}>
+                  <span className="inline-flex items-center gap-1.5"><FileDigit size={12} style={{ color: 'var(--primary)' }} /><span className="font-mono" style={{ color: 'var(--primary)' }}>{patient.numero_dossier || `ID-${patient.id}`}</span></span>
+                  <span>{age >= 0 && age < 130 ? `${age} ans · ` : ''}{birthLabel}</span>
+                  <span className={cn('items-center gap-1.5', isRadiology ? 'hidden md:inline-flex' : 'hidden sm:inline-flex')}><Phone size={12} />{patient.telephone}</span>
+                  {patient.email && <span className="hidden lg:inline-flex items-center gap-1.5"><Mail size={12} />{patient.email}</span>}
+                </div>
+              </div>
+            </div>
+
+            <div className={cn('hidden sm:grid gap-2 w-full xl:w-auto', canFinance ? 'grid-cols-4' : 'grid-cols-3', isRadiology && 'sm:hidden lg:grid')} aria-label="Actions rapides patient">
+              <QuickAction icon={<Calendar size={18} />} label="RDV" onClick={() => navigate('/agenda', { state: { prefillPatientId: patient.id, prefillPatientNom: patient.nom, prefillPatientPrenom: patient.prenom } })} />
+              <QuickAction icon={<Stethoscope size={18} />} label={canClinical ? 'Examen' : 'Suivi'} onClick={() => handleTabChange(canClinical ? 'clinical' : 'tracking')} />
+              <QuickAction icon={<FileText size={18} />} label="Document" onClick={handleDocumentCreate} />
+              {canFinance && <QuickAction icon={<Banknote size={18} />} label="Encaisser" onClick={() => setIsPayModalOpen(true)} accent="emerald" />}
+            </div>
+          </div>
+
+          <div id="dc-radiology-patient-tabs" ref={tabRailRef} data-tour="patient-tabs"
+            aria-describedby={isRadiology && hasOverflowingPatientTabs ? 'dc-radiology-tab-scroll-hint' : undefined}
+            style={isRadiology ? {
+              display: 'flex', flexDirection: 'row', flexWrap: 'nowrap',
+              minWidth: 0, maxWidth: '100%', overflowX: 'auto', overflowY: 'hidden',
+              whiteSpace: 'nowrap', alignItems: 'center',
+            } : undefined}
+            className={cn('flex overflow-x-auto border-b border-transparent -mb-[1px] scrollbar-none', isRadiology ? 'gap-0.5 sm:gap-1.5' : 'gap-1 sm:gap-3')}>
+            <TabButton compact={isRadiology} active={activeTab === 'tracking'} onClick={() => handleTabChange('tracking')} icon={<Calendar size={17} />} label="Vue d’ensemble" mobileLabel="Suivi" />
+            {canClinical && <TabButton compact={isRadiology} active={activeTab === 'clinical'} onClick={() => handleTabChange('clinical')} icon={<Stethoscope size={17} />} label="Clinique" mobileLabel="Clinique" />}
+            <TabButton compact={isRadiology} active={activeTab === 'radiology'} onClick={() => handleTabChange('radiology')} icon={<Activity size={17} />} label="Imagerie" mobileLabel="Image" />
+            <TabButton compact={isRadiology} active={isDocuments} onClick={handleDocumentCreate} icon={<FileText size={17} />} label="Documents" mobileLabel="Docs" ariaLabel="Document" />
+            {ownerOrAdmin && <TabButton compact={isRadiology} active={activeTab === 'companion'} onClick={() => handleTabChange('companion')} icon={<Smartphone size={17} />} label="Companion" mobileLabel="Companion" />}
+            {canFinance && <TabButton compact={isRadiology} active={activeTab === 'finances'} onClick={() => handleTabChange('finances')} icon={<Banknote size={17} />} label="Finances" mobileLabel="Finance" />}
+          </div>
+          {isRadiology && hasOverflowingPatientTabs && (
+            <div id="dc-radiology-tab-scroll-hint" className="dc-radiology-tab-scroll-hint md:hidden">
+              <button type="button" className="dc-radiology-tabs-next"
+                aria-label="Afficher les autres onglets"
+                onClick={() => {
+                  const rail = tabRailRef.current;
+                  if (!rail) return;
+                  const maxScroll = Math.max(0, rail.scrollWidth - rail.clientWidth);
+                  if (maxScroll < 8) return;
+                  rail.scrollTo({
+                    left: rail.scrollLeft >= maxScroll - 8 ? 0 : Math.min(maxScroll, rail.scrollLeft + Math.max(180, rail.clientWidth * 0.65)),
+                    behavior: 'auto',
+                  });
+                }}>
+                Autres onglets <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          )}
+        </div>
+      </header>
+
+      <main ref={flowContentRef} data-flow-patient-surface={activeTab} className={cn('max-w-[1600px] mx-auto w-full transition-all duration-500', isDocuments ? 'flex-1 min-h-0 px-3 py-3 md:px-6 md:py-4' : isRadiology ? 'flex-1 px-2 py-2 sm:px-3 sm:py-2.5 md:px-4 md:py-3 space-y-2' : 'flex-1 px-3 py-3 sm:px-4 sm:py-6 md:px-8 md:py-8 space-y-4 sm:space-y-6')}>
+        {!isDocuments && (patient.antecedents_medicaux || patient.motif_consultation) && (
+          <div className={cn('flex flex-col animate-in fade-in slide-in-from-top-4 duration-500', isRadiology ? 'gap-2' : 'gap-3')}>
+            {patient.antecedents_medicaux && <div className={cn('bg-danger-surface border border-danger-border flex items-start text-danger shadow-sm', isRadiology ? 'p-2.5 rounded-xl gap-2' : 'p-4 rounded-2xl gap-3')}><AlertTriangle className={cn('shrink-0 mt-0.5', isRadiology ? 'w-4 h-4' : 'w-5 h-5')} /><div><h4 className={cn('font-black uppercase tracking-widest', isRadiology ? 'text-[10px] mb-0.5' : 'text-sm mb-1')}>Antécédents Médicaux</h4><p className={cn('font-medium whitespace-pre-wrap', isRadiology ? 'text-xs line-clamp-2' : 'text-sm')}>{patient.antecedents_medicaux}</p></div></div>}
+            {patient.motif_consultation && (
+              <div className={cn('bg-info-surface border border-info-border flex items-start text-info shadow-sm', isRadiology ? 'p-2.5 rounded-xl gap-2' : 'p-4 rounded-2xl gap-3')}>
+                <Activity className={cn('shrink-0 mt-0.5', isRadiology ? 'w-4 h-4' : 'w-5 h-5')} />
+                <div className="flex-1">
+                  <h4 className={cn('font-black uppercase tracking-widest', isRadiology ? 'text-[10px] mb-1' : 'text-sm mb-2')}>Motif de Consultation Initial</h4>
+                  <div className={cn('flex flex-wrap', isRadiology ? 'gap-1' : 'gap-2')}>
+                    {parseMotifs(patient.motif_consultation).map(motifId => {
+                      const systemMotif = findMotifById(motifId);
+                      const cabinetMotif = cabinetMotifs.find(item => item.id === motifId);
+                      const motif = systemMotif || cabinetMotif;
+                      if (!motif) {
+                        return <div key={motifId} className={cn('inline-flex items-center rounded-lg font-bold tracking-wider bg-input-field text-text-muted border border-border-main', isRadiology ? 'gap-1.5 px-2 py-1 text-[10px]' : 'gap-2 px-3 py-1.5 text-xs')}>{motifId}<span className="text-[9px] uppercase tracking-wider text-text-muted">Historique</span></div>;
+                      }
+                      const isUrgent = motif.urgency === 'urgence';
+                      return <div key={motifId} className={cn('inline-flex items-center rounded-lg font-bold tracking-wider', isRadiology ? 'gap-1.5 px-2 py-1 text-[10px]' : 'gap-2 px-3 py-1.5 text-xs', isUrgent ? 'bg-danger-surface text-danger border border-danger-border' : 'bg-info-surface text-info border border-info-border')}>{motif.label}{cabinetMotif && <span className="text-[9px] uppercase tracking-wider opacity-60">{cabinetMotif.is_active ? 'Cabinet' : 'Historique'}</span>}{isUrgent && <span className="inline-block w-1.5 h-1.5 rounded-full bg-danger animate-pulse" />}</div>;
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className={cn('animate-in fade-in slide-in-from-bottom-8 duration-700 h-full', !isDocuments && 'delay-150')}>
+          {activeTab === 'radiology' && (
+            <div className="space-y-2">
+              {radiologyAdvice !== null && radiologyAdvice.patientId === id && dismissedAdvicePatient !== id && (
+                <aside data-testid="patient-radiology-advice" aria-label="Conseil contextuel du dossier"
+                  className="dc-radiology-advice rounded-xl border border-border-main bg-card px-3 py-2.5 shadow-sm">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span aria-hidden="true" className="shrink-0 text-lg">💡</span>
+                    <span className="min-w-0 flex-1 truncate text-sm font-semibold text-text-main">
+                      {radiologyAdvice?.title}
+                    </span>
+                    <button type="button" aria-expanded={adviceExpanded}
+                      onClick={() => setAdviceExpanded(value => !value)}
+                      className="shrink-0 rounded-lg border border-border-main px-2.5 py-1.5 text-xs font-semibold text-primary">
+                      {adviceExpanded ? 'Réduire' : 'Détails'}
+                    </button>
+                    <button type="button" aria-label="Masquer ce conseil"
+                      onClick={() => setDismissedAdvicePatient(id ?? null)}
+                      className="shrink-0 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-text-muted">
+                      Fermer
+                    </button>
+                  </div>
+                  {adviceExpanded && (
+                    <div className="mt-2 border-t border-border-main pt-2 text-sm leading-relaxed text-text-main">
+                      <p>{radiologyAdvice?.message}</p>
+                      {radiologyAdvice?.action && <p className="mt-1 font-semibold">Action suggérée : {radiologyAdvice.action}</p>}
+                    </div>
+                  )}
+                </aside>
+              )}
+              <div className="flex min-w-0 justify-center">
+                <div className="inline-flex w-full max-w-full flex-nowrap justify-start overflow-x-auto bg-card-bg/50 p-0.5 rounded-lg border border-border-main shadow-inner scrollbar-none sm:w-auto sm:p-1 sm:rounded-xl" id="dc-radiology-modalities" aria-label="Modalités d’imagerie"
+                  style={{
+                    display: 'flex', flexDirection: 'row', flexWrap: 'nowrap',
+                    minWidth: 0, maxWidth: '100%', overflowX: 'auto',
+                    overflowY: 'hidden', whiteSpace: 'nowrap',
+                    alignItems: 'center',
+                  }}>
+                  <ImagingButton active={radioTab === 'media'} onClick={() => handleRadioTabChange('media')} icon={<Images size={14} />} label="Médiathèque" />
+                  <ImagingButton active={radioTab === 'rvg'} onClick={() => handleRadioTabChange('rvg')} icon={<Image size={14} />} label="RVG" />
+                  {canPanoramic && <ImagingButton active={radioTab === 'panoramic'} onClick={() => handleRadioTabChange('panoramic')} icon={<Target size={14} />} label="Panoramique" />}
+                  {canCephalo && <ImagingButton active={radioTab === 'cephalo'} onClick={() => handleRadioTabChange('cephalo')} icon={<Activity size={14} />} label="Céphalométrie" />}
+                </div>
+              </div>
+
+              <div className="bg-card-bg rounded-[1.25rem] sm:rounded-[1.75rem] shadow-elite border border-border-main overflow-hidden min-h-[60vh] p-1.5 sm:p-2.5 md:p-3 min-w-0">
+                {radioTab === 'media' && (isCabinetMultiViewLabEnabled(import.meta.env.DEV, import.meta.env.VITE_V15_07_1_MULTIVIEW_LAB)
+                  ? <CabinetMultiViewLab key={String(user?.id ?? '') + ':' + String(user?.employer_id ?? '') + ':' + String(patient.id)}
+                      patient={patient} routePatientId={id} user={user}
+                      enableR3Split={isR3SplitLabEnabled(import.meta.env.DEV, import.meta.env.VITE_V15_07_1_R3_SPLIT_LAB)} />
+                  : <PatientMediaTimeline patientId={Number(id)} />)}
+                {radioTab === 'rvg' && <PatientRvgPanel patientId={Number(id)} />}
+                {radioTab === 'panoramic' && canPanoramic && <PanoramicStudio patientId={Number(id)} patientName={fullName} />}
+                {radioTab === 'cephalo' && canCephalo && (
+                  patient?.dossier?.is_ortho_active ? (
+                    <CephaloWorkspace patientId={Number(id)} patientName={fullName} />
+                  ) : (
+                    <div className="flex flex-col items-center justify-center h-[60vh] text-center p-6 sm:p-10">
+                      <div className="w-24 h-24 bg-input-field rounded-full flex items-center justify-center mb-6"><Activity className="w-12 h-12 text-text-muted" /></div>
+                      <h3 className="text-2xl font-black text-text-main mb-2">Module Céphalométrique Verrouillé</h3>
+                      <p className="text-text-muted mb-8 max-w-md">Ce module nécessite que le suivi orthodontique soit actif pour ce patient afin de permettre les tracés céphalométriques.</p>
+                      <button onClick={activateOrtho} className="px-8 py-4 bg-[#003380] text-white font-bold rounded-2xl hover:bg-[#002266] transition-all shadow-lg flex items-center gap-3"><Target className="w-5 h-5" /> Activer le Suivi Orthodontique</button>
+                    </div>
+                  )
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'tracking' && (
+            <>
+              <OrthoCockpitPanel patientId={Number(id)} />
+              <OrthoLongitudinalComparePanel patientId={Number(id)} />
+              <PatientJourney patientId={Number(id)} />
+            </>
+          )}
+          {activeTab === 'clinical' && <ClinicalHub patientId={Number(id)} />}
+
+          {isDocuments && (
+            <div className="h-full min-h-0 flex flex-col gap-3">
+              <div className="shrink-0 flex items-center justify-center">
+                <div className="inline-flex p-1 rounded-xl bg-card-bg border border-border-main shadow-sm">
+                  <button onClick={handleDocumentCreate} className={cn('px-4 py-2 rounded-lg text-xs font-black flex items-center gap-2 transition-all', documentView === 'create' ? 'bg-primary text-white shadow-sm' : 'text-text-muted hover:text-main')}><Plus size={15} /> Créer</button>
+                  <button onClick={() => handleTabChange('archives')} className={cn('px-4 py-2 rounded-lg text-xs font-black flex items-center gap-2 transition-all', documentView === 'history' ? 'bg-primary text-white shadow-sm' : 'text-text-muted hover:text-main')}><History size={15} /> Historique</button>
+                </div>
+              </div>
+              <div className="flex-1 min-h-0">
+                {documentView === 'create' ? <DocumentHub patientId={id!} patientName={fullName} editData={editingDoc} /> : <PatientDocuments />}
+              </div>
+            </div>
+          )}
+
+          {ownerOrAdmin && activeTab === 'companion' && <PatientCompanionPanel patientId={Number(id)} patientEmail={patient.email} />}
+
+          {canFinance && activeTab === 'finances' && <PatientFinances patientId={Number(id)} />}
+        </div>
+      </main>
+
+      {canFinance && (
+        <QuickPayModal isOpen={isPayModalOpen} onClose={() => setIsPayModalOpen(false)} patientId={Number(id)} />
+      )}
+    </div>
+  );
+};
+
+const QuickAction = ({ icon, label, onClick, accent = 'primary' }: any) => (
+  <button onClick={onClick} aria-label={label} className={cn('h-11 sm:h-10 min-w-0 px-1 sm:px-3 rounded-xl border border-border-main bg-card-bg shadow-sm transition-all flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-2 active:scale-95', accent === 'emerald' ? 'text-text-muted hover:text-success hover:border-success-border hover:bg-success-surface' : 'text-text-muted hover:text-primary hover:border-primary/30 hover:bg-primary/5')}>
+    {icon}<span className="inline text-[8px] sm:text-[10px] leading-none font-black uppercase tracking-[0.04em] sm:tracking-widest whitespace-nowrap">{label}</span>
+  </button>
+);
+
+const TabButton = ({ active, onClick, icon, label, mobileLabel, ariaLabel, compact = false }: any) => (
+  <button onClick={onClick} aria-current={active ? 'page' : undefined} aria-label={ariaLabel || label} className={cn('shrink-0 flex items-center font-black uppercase transition-all border-b-[3px] whitespace-nowrap', compact ? 'gap-1 pb-1.5 px-1 text-[9px] tracking-[0.04em] md:gap-1.5 md:px-2 md:text-[11px] md:tracking-[0.06em]' : 'gap-1 pb-1.5 px-1 text-[9px] tracking-[0.04em] sm:gap-2 sm:pb-2 sm:px-1.5 sm:text-[10px] sm:tracking-[0.06em] md:px-3 md:text-[12px] md:tracking-[0.08em]', active ? 'text-primary' : 'border-transparent text-text-muted hover:text-main hover:border-border-main')} style={active ? { borderColor: 'var(--primary)', color: 'var(--primary)' } : {}}>
+    {icon}<span data-patient-tab-mobile-label className="sm:hidden text-[8px] leading-none tracking-[0.02em]">{mobileLabel || label}</span><span data-patient-tab-desktop-label className="hidden sm:inline">{label}</span>
+  </button>
+);
+
+const ImagingButton = ({ active, onClick, icon, label }: any) => (
+  <button onClick={onClick} aria-pressed={active} className={cn('shrink-0 px-2 py-1.5 text-[9px] sm:px-3 sm:py-2 sm:text-[10px] md:px-4 md:text-[11px] font-black uppercase tracking-[0.06em] sm:tracking-[0.08em] rounded-lg transition-all duration-300 flex items-center gap-1.5 whitespace-nowrap', active ? 'bg-card-bg text-primary shadow-elite' : 'text-text-muted hover:text-main')}>
+    {icon} {label}
+  </button>
+);

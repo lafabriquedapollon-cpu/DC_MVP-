@@ -1,0 +1,563 @@
+/**
+ * TreatmentSelector.tsx
+ * Modal de sélection des traitements - Elite Data Table Edition
+ * Design Premium Onyx & Ghost Intelligence
+ */
+import React, { useState, useMemo, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { motion } from 'framer-motion';
+import { X, Check, Clock, Search, Plus, Star } from 'lucide-react';
+import type { ToothNumberFDI, PediatricToothNumber, ToothTreatment, ToothSurface } from './types';
+import { TOOTH_NAMES, PEDIATRIC_TOOTH_NAMES } from './types';
+import { PriceBrain, type ActHistory } from './PriceBrain';
+import { cn } from '../../utils/cn';
+import { useCatalogStore } from '../../features/admin/Settings/hooks/useCatalogStore';
+import { resolveDevisTreatmentPrice } from '../../features/admin/DocumentStudio/AccountingTreatmentPricePolicy';
+import { dentitionForTooth, searchableCatalogActs, suggestedCatalogActs, toothTypeForTooth } from '../../features/admin/DocumentStudio/AccountingActApplicabilityPolicy';
+
+interface TreatmentSelectorProps {
+  toothNumber: number;
+  currentTreatments: ToothTreatment[];
+  onConfirm: (treatments: ToothTreatment[], surfaces: ToothSurface[], notes: string) => void;
+  onCancel: () => void;
+  embedded?: boolean;
+  allowEmptyConfirm?: boolean;
+}
+
+type TreatmentTemplate = Omit<ToothTreatment, 'price'> & {
+  catalogPrice?: number;
+  isCatalogAct?: boolean;
+  catalogActId?: number;
+  isFavorite?: boolean;
+  lastUsedAt?: string | null;
+  usageCount?: number;
+};
+
+const CATEGORY_COLORS: Record<string, { bg: string; border: string; text: string; dot: string }> = {
+  CONSERVATRICE: { bg: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-700', dot: 'bg-blue-500' },
+  ENDODONTIE: { bg: 'bg-indigo-50', border: 'border-indigo-200', text: 'text-indigo-700', dot: 'bg-indigo-500' },
+  CHIRURGIE: { bg: 'bg-rose-50', border: 'border-rose-200', text: 'text-rose-700', dot: 'bg-rose-500' },
+  PROTHESE: { bg: 'bg-emerald-50', border: 'border-emerald-200', text: 'text-emerald-700', dot: 'bg-emerald-500' },
+  PREVENTION: { bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-700', dot: 'bg-amber-500' },
+  PARODONTOLOGIE: { bg: 'bg-teal-50', border: 'border-teal-200', text: 'text-teal-700', dot: 'bg-teal-500' },
+  ESTHETIQUE: { bg: 'bg-purple-50', border: 'border-purple-200', text: 'text-purple-700', dot: 'bg-purple-500' },
+  ORTHODONTIE: { bg: 'bg-sky-50', border: 'border-sky-200', text: 'text-sky-700', dot: 'bg-sky-500' },
+  PEDODONTIE: { bg: 'bg-pink-50', border: 'border-pink-200', text: 'text-pink-700', dot: 'bg-pink-500' },
+};
+
+export const TreatmentSelector: React.FC<TreatmentSelectorProps> = ({
+  toothNumber,
+  currentTreatments,
+  onConfirm,
+  onCancel,
+  embedded = false,
+  allowEmptyConfirm = false,
+}) => {
+  const [selectedTreatments, setSelectedTreatments] = useState<ToothTreatment[]>(currentTreatments);
+  const [treatmentPrices, setTreatmentPrices] = useState<Record<string, number>>({});
+  const [selectedSurfaces] = useState<ToothSurface[]>([]);
+  const [activeCategory, setActiveCategory] = useState<string>('SUGGESTED');
+  const [notes, setNotes] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [mounted, setMounted] = useState(false);
+  const [showAddAct, setShowAddAct] = useState(false);
+  const [newActName, setNewActName] = useState('');
+  const [newActPrice, setNewActPrice] = useState('');
+  const [newActSpecialtyId, setNewActSpecialtyId] = useState<number | ''>('');
+  const [addingAct, setAddingAct] = useState(false);
+  const { specialties, fetchCatalog, createAct, setActFavorite } = useCatalogStore();
+
+  const CATEGORY_LABELS = useMemo(() => {
+    const labels: Record<string, string> = {};
+    specialties.forEach(s => {
+      labels[s.name] = s.name;
+    });
+    return labels;
+  }, [specialties]);
+
+  const catalogContext = useMemo(
+    () => ({ selectedTeeth: [toothNumber], selectionMode: 'INDIVIDUAL' as const }),
+    [toothNumber],
+  );
+
+  const applicableCatalogActs = useMemo(
+    () => searchableCatalogActs(specialties, catalogContext),
+    [catalogContext, specialties],
+  );
+
+  const suggestedActs = useMemo(
+    () => suggestedCatalogActs(specialties, catalogContext, 7),
+    [catalogContext, specialties],
+  );
+
+  const TREATMENTS_BY_CATEGORY = useMemo(() => {
+    const treatments: Record<string, TreatmentTemplate[]> = {};
+    applicableCatalogActs.forEach(({ act, specialty }) => {
+      if (!treatments[specialty]) treatments[specialty] = [];
+      treatments[specialty].push({
+        id: `act_${act.id}`,
+        name: act.name,
+        category: specialty as ToothTreatment['category'],
+        scope: 'UNITAIRE',
+        code: act.code,
+        catalogPrice: Number(act.base_price) || 0,
+        isCatalogAct: true,
+        catalogActId: act.id,
+        isFavorite: Boolean(act.is_favorite),
+        lastUsedAt: act.last_used_at,
+        usageCount: Number(act.usage_count) || 0,
+      });
+    });
+    return treatments;
+  }, [applicableCatalogActs]);
+
+  const TREATMENT_TEMPLATES = useMemo(() => {
+    return Object.values(TREATMENTS_BY_CATEGORY).flat();
+  }, [TREATMENTS_BY_CATEGORY]);
+
+  useEffect(() => {
+    if (specialties.length === 0) {
+      fetchCatalog();
+    }
+  }, [fetchCatalog, specialties.length]);
+
+  useEffect(() => {
+    setMounted(true);
+    if (!embedded) {
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = 'unset';
+      };
+    }
+  }, [embedded]);
+
+  const toothName = toothNumber >= 50
+    ? PEDIATRIC_TOOTH_NAMES[toothNumber as PediatricToothNumber]
+    : TOOTH_NAMES[toothNumber as ToothNumberFDI];
+
+  const toTemplate = React.useCallback(({ act, specialty }: (typeof applicableCatalogActs)[number]): TreatmentTemplate => ({
+    id: `act_${act.id}`,
+    name: act.name,
+    category: specialty,
+    scope: 'UNITAIRE',
+    code: act.code,
+    catalogPrice: Number(act.base_price) || 0,
+    isCatalogAct: true,
+    catalogActId: act.id,
+    isFavorite: Boolean(act.is_favorite),
+    lastUsedAt: act.last_used_at,
+    usageCount: Number(act.usage_count) || 0,
+  }), []);
+
+  const favoriteActs = useMemo<TreatmentTemplate[]>(
+    () => applicableCatalogActs.filter(({ act }) => act.is_favorite).map(toTemplate),
+    [applicableCatalogActs, toTemplate],
+  );
+
+  const recentActs = useMemo<TreatmentTemplate[]>(
+    () => applicableCatalogActs
+      .filter(({ act }) => Boolean(act.last_used_at))
+      .sort((a, b) => Date.parse(b.act.last_used_at || '') - Date.parse(a.act.last_used_at || ''))
+      .slice(0, 10)
+      .map(toTemplate),
+    [applicableCatalogActs, toTemplate],
+  );
+
+  const suggestedTemplates = useMemo<TreatmentTemplate[]>(
+    () => (suggestedActs.length > 0 ? suggestedActs : applicableCatalogActs.slice(0, 7)).map(toTemplate),
+    [applicableCatalogActs, suggestedActs, toTemplate],
+  );
+
+  const resolveInitialPrice = (template: TreatmentTemplate | ActHistory, id: string): number => {
+    const isCatalogAct = 'isCatalogAct' in template && template.isCatalogAct === true;
+    return resolveDevisTreatmentPrice({
+      isCatalogAct,
+      catalogPrice: isCatalogAct && 'catalogPrice' in template ? template.catalogPrice : undefined,
+      practitionerPrice: treatmentPrices[id],
+      rememberedPrice: isCatalogAct ? undefined : PriceBrain.suggestPrice(template.name),
+    }).price;
+  };
+
+  const toggleTreatment = (template: TreatmentTemplate | ActHistory) => {
+    const id = template.id || `brain_${template.name}`;
+    const exists = selectedTreatments.find(t => (t.id === id) || (t.name === template.name));
+
+    if (exists) {
+      setSelectedTreatments(prev => prev.filter(t => (t.id !== id) && (t.name !== template.name)));
+    } else {
+      const price = resolveInitialPrice(template, id);
+      setSelectedTreatments(prev => [...prev, { ...template, id, price } as ToothTreatment]);
+    }
+  };
+
+  const updateTreatmentPrice = (id: string, price: number) => {
+    const treatment = selectedTreatments.find(t => t.id === id);
+    setTreatmentPrices(prev => ({ ...prev, [id]: price }));
+    setSelectedTreatments(prev => prev.map(t => t.id === id ? { ...t, price } : t));
+    if (treatment) PriceBrain.recordAct(treatment.name, price, treatment.category, id);
+  };
+
+  const totalPrice = useMemo(() =>
+    selectedTreatments.reduce((sum, t) => sum + (t.price || 0), 0)
+  , [selectedTreatments]);
+
+  const containerClasses = embedded
+    ? "w-full h-full flex flex-col overflow-hidden bg-slate-900"
+    : "fixed inset-0 z-[100000] flex items-center justify-center p-4 md:p-10 bg-slate-800/40 backdrop-blur-md";
+
+  const modalClasses = embedded
+    ? "w-full h-full flex flex-col overflow-hidden"
+    : "bg-card/95 backdrop-blur-3xl rounded-[2.5rem] shadow-[0_32px_128px_rgba(0,0,0,0.3)] w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden border border-white/50";
+
+  const content = (
+    <div className={containerClasses}>
+      <motion.div
+        initial={embedded ? { opacity: 0, x: 20 } : { opacity: 0, scale: 0.9, y: 40 }}
+        animate={{ opacity: 1, scale: 1, y: 0, x: 0 }}
+        exit={embedded ? { opacity: 0, x: 20 } : { opacity: 0, scale: 0.9, y: 40 }}
+        className={modalClasses}
+      >
+        <div className="bg-slate-900 px-8 py-6 flex items-center justify-between shrink-0 relative overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-r from-primary/10 to-transparent pointer-events-none" />
+          <div className="flex items-center gap-6 relative z-10">
+            <div className="w-12 h-12 bg-white/10 rounded-xl flex items-center justify-center text-2xl font-black text-white border border-white/10 shadow-2xl">
+              {toothNumber}
+            </div>
+            <div>
+              <h2 className="text-xl font-black text-white tracking-tighter">Dent {toothNumber}</h2>
+              <p className="text-text-muted font-bold flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
+                {toothName} • Sélection d'actes
+              </p>
+            </div>
+          </div>
+          <button onClick={onCancel} className="p-4 bg-white/5 hover:bg-white/10 rounded-2xl transition-all border border-white/10 group relative z-10">
+            <X className="w-6 h-6 text-white/60 group-hover:text-white transition-colors" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-hidden flex flex-col lg:flex-row">
+          <div className={cn("flex-1 flex flex-col min-w-0", embedded ? "bg-white/5" : "bg-background/30")}>
+            <div className="p-6 pb-0 shrink-0 flex flex-col gap-4 mb-4">
+              <div className="relative w-full group">
+                <Search className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-text-muted group-focus-within:text-primary transition-colors" />
+                <input
+                  type="text"
+                  placeholder="Rechercher un acte (Composite, Extraction, Couronne...)"
+                  value={searchQuery}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    if (e.target.value.length > 0) setActiveCategory('SEARCH');
+                    else setActiveCategory('SUGGESTED');
+                  }}
+                  className={cn(
+                    "w-full pl-14 pr-6 py-4 border rounded-2xl text-sm font-bold focus:ring-4 focus:ring-primary/10 transition-all shadow-sm",
+                    embedded ? "bg-white/10 border-white/10 text-white placeholder:text-white/20" : "bg-card border-border-main text-text-main"
+                  )}
+                />
+              </div>
+
+              <div className="flex flex-wrap bg-input-field/50 p-1.5 rounded-2xl gap-1">
+                <button
+                  onClick={() => { setActiveCategory('FAVORITES'); setSearchQuery(''); }}
+                  className={cn(
+                    "px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                    activeCategory === 'FAVORITES' ? "bg-card text-text-main shadow-sm" : "text-text-muted hover:text-text-main"
+                  )}
+                >Favoris</button>
+                <button
+                  onClick={() => { setActiveCategory('RECENT'); setSearchQuery(''); }}
+                  className={cn(
+                    "px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                    activeCategory === 'RECENT' ? "bg-card text-text-main shadow-sm" : "text-text-muted hover:text-text-main"
+                  )}
+                >Récents</button>
+                <button
+                  onClick={() => { setActiveCategory('SUGGESTED'); setSearchQuery(''); }}
+                  className={cn(
+                    "px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                    activeCategory === 'SUGGESTED' ? "bg-card text-text-main shadow-sm" : "text-text-muted hover:text-text-main"
+                  )}
+                >Suggestions</button>
+                <button
+                  onClick={() => { setActiveCategory('ALL'); setSearchQuery(''); }}
+                  className={cn(
+                    "px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                    activeCategory === 'ALL' ? "bg-card text-text-main shadow-sm" : "text-text-muted hover:text-text-main"
+                  )}
+                >Tous les actes</button>
+                {Object.keys(TREATMENTS_BY_CATEGORY).map(cat => (
+                  <button
+                    key={cat}
+                    onClick={() => { setActiveCategory(cat); setSearchQuery(''); }}
+                    className={cn(
+                      "px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                      activeCategory === cat ? "bg-card text-text-main shadow-sm" : "text-text-muted hover:text-text-main"
+                    )}
+                  >{CATEGORY_LABELS[cat]}</button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-8 pb-8 custom-scrollbar">
+              <div className={cn("rounded-3xl border shadow-sm overflow-hidden", embedded ? "bg-white/5 border-white/5" : "bg-card border-border-main")}>
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-background border-b border-border-main">
+                      <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest w-12 text-center">État</th>
+                      <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest w-auto">Acte</th>
+                      <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest w-24 text-center">Durée</th>
+                      <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest w-32 text-right">Prix</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border-main">
+                    {(() => {
+                      let items: Array<TreatmentTemplate | ActHistory> = [];
+                      if (activeCategory === 'SEARCH') items = TREATMENT_TEMPLATES.filter(t => t.name.toLowerCase().includes(searchQuery.toLowerCase()));
+                      else if (activeCategory === 'FAVORITES') items = favoriteActs;
+                      else if (activeCategory === 'RECENT') items = recentActs;
+                      else if (activeCategory === 'SUGGESTED') items = suggestedTemplates;
+                      else if (activeCategory === 'ALL') items = TREATMENT_TEMPLATES;
+                      else items = TREATMENTS_BY_CATEGORY[activeCategory] || [];
+
+                      return items.map(template => {
+                        const id = template.id || `brain_${template.name}`;
+                        const selectedTreatment = selectedTreatments.find(t => t.id === id || t.name === template.name);
+                        const isSelected = Boolean(selectedTreatment);
+                        const initialPrice = resolveInitialPrice(template, id);
+                        const currentPrice = selectedTreatment?.price ?? initialPrice;
+                        const colors = CATEGORY_COLORS[template.category] || CATEGORY_COLORS.CONSERVATRICE;
+
+                        return (
+                          <tr
+                            key={id}
+                            onClick={() => toggleTreatment(template)}
+                            className={cn(
+                              "group cursor-pointer transition-colors",
+                              isSelected ? (embedded ? "bg-primary/20" : `${colors.bg}/40`) : (embedded ? "hover:bg-white/10" : "hover:bg-background/80")
+                            )}
+                          >
+                            <td className="px-6 py-3.5 text-center">
+                              <div className={cn(
+                                "w-6 h-6 rounded-lg border-2 flex items-center justify-center transition-all mx-auto",
+                                isSelected ? "bg-primary border-primary text-white scale-110 shadow-lg shadow-primary/20" : "border-border-main bg-card"
+                              )} style={isSelected ? { backgroundColor: 'var(--primary)', borderColor: 'var(--primary)' } : {}}>
+                                {isSelected && <Check size={14} strokeWidth={4} />}
+                              </div>
+                            </td>
+                            <td className="px-6 py-3.5">
+                              <div className="flex items-center gap-3">
+                                <span className={cn("w-2 h-2 rounded-full shrink-0", colors.dot)} />
+                                <div>
+                                  <p className={cn("font-bold text-sm leading-tight", embedded ? "text-white" : "text-text-main")}>{template.name}</p>
+                                  <p className="text-[10px] font-medium text-text-muted uppercase tracking-tighter mt-0.5">
+                                    {CATEGORY_LABELS[template.category] || template.category}
+                                  </p>
+                                </div>
+                                {'catalogActId' in template && template.catalogActId && (
+                                  <button
+                                    type="button"
+                                    aria-label={template.isFavorite ? `Retirer ${template.name} des favoris` : `Ajouter ${template.name} aux favoris`}
+                                    title={template.isFavorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      void setActFavorite(template.catalogActId!, !template.isFavorite);
+                                    }}
+                                    className="rounded-lg p-1 transition hover:bg-primary/10"
+                                  >
+                                    <Star
+                                      size={14}
+                                      className={cn(
+                                        'transition-colors',
+                                        template.isFavorite ? 'fill-primary text-primary' : 'text-text-muted hover:text-primary',
+                                      )}
+                                    />
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-6 py-3.5">
+                              {template.duration ? (
+                                <div className={cn("flex items-center gap-1.5 text-xs font-bold", embedded ? "text-white/40" : "text-text-muted")}>
+                                  <Clock size={12} className={embedded ? "text-white/20" : "text-text-muted"} />
+                                  {template.duration} min
+                                </div>
+                              ) : <span className="text-text-muted">-</span>}
+                            </td>
+                            <td className="px-6 py-3.5 text-right">
+                              {isSelected ? (
+                                <div className="flex items-center justify-end gap-2" onClick={e => e.stopPropagation()}>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    value={currentPrice || ''}
+                                    onChange={(e) => updateTreatmentPrice(id, Number(e.target.value))}
+                                    className="w-24 px-3 py-2 bg-card border-2 border-primary/20 rounded-xl text-right font-black text-primary text-sm outline-none focus:border-primary transition-all"
+                                    style={{ color: 'var(--primary)' }}
+                                    autoFocus
+                                  />
+                                </div>
+                              ) : (
+                                <span className="font-bold text-text-muted text-sm">{currentPrice > 0 ? `${currentPrice} MAD` : "---"}</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })()}
+                  </tbody>
+                </table>
+                {activeCategory === 'SEARCH' && searchQuery.length > 2 && (
+                  <div className="p-6 bg-background/50 border-t border-border-main flex justify-center">
+                    <button
+                      onClick={() => {
+                        setNewActName(searchQuery);
+                        setNewActPrice('');
+                        setNewActSpecialtyId('');
+                        setShowAddAct(true);
+                      }}
+                      className="flex items-center gap-2 px-6 py-3 bg-card border border-border-main rounded-2xl text-xs font-black text-text-muted hover:text-primary hover:border-primary transition-all shadow-sm group"
+                    >
+                      <Plus size={16} className="group-hover:rotate-90 transition-transform" />
+                      Créer l'acte "{searchQuery}"
+                    </button>
+                  </div>
+                )}
+
+                <div className="p-4 bg-background/50 border-t border-border-main">
+                  {!showAddAct ? (
+                    <button
+                      onClick={() => {
+                        setShowAddAct(true);
+                        setNewActName('');
+                        setNewActPrice('');
+                        setNewActSpecialtyId(specialties.find(spec => spec.name === activeCategory)?.id || '');
+                      }}
+                      className="w-full flex items-center justify-center gap-2 py-3 bg-card border border-dashed border-border-main rounded-2xl text-xs font-black text-text-muted hover:text-primary hover:border-primary transition-all group"
+                    >
+                      <Plus size={14} className="group-hover:rotate-90 transition-transform" />
+                      Ajouter un acte au catalogue
+                    </button>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-[11rem_1fr_7rem_auto_auto]">
+                      <select
+                        aria-label="Spécialité du nouvel acte"
+                        value={newActSpecialtyId}
+                        onChange={event => setNewActSpecialtyId(event.target.value ? Number(event.target.value) : '')}
+                        className="min-w-0 rounded-xl border border-border-main bg-card px-3 py-2.5 text-xs font-bold text-text-main outline-none focus:border-primary"
+                      >
+                        <option value="">Spécialité…</option>
+                        {specialties.map(spec => (
+                          <option key={spec.id} value={spec.id}>{spec.name}</option>
+                        ))}
+                      </select>
+                      <input
+                        autoFocus
+                        type="text"
+                        placeholder="Nom de l'acte..."
+                        value={newActName}
+                        onChange={event => setNewActName(event.target.value)}
+                        className="min-w-0 rounded-xl border border-border-main bg-card px-4 py-2.5 text-xs font-bold text-text-main outline-none focus:border-primary"
+                      />
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="Tarif"
+                        value={newActPrice}
+                        onChange={event => setNewActPrice(event.target.value)}
+                        className="w-full rounded-xl border border-border-main bg-card px-3 py-2.5 text-xs font-bold text-right text-text-main outline-none focus:border-primary"
+                      />
+                      <button
+                        disabled={!newActName.trim() || !newActSpecialtyId || addingAct}
+                        onClick={async () => {
+                          if (!newActName.trim() || !newActSpecialtyId) return;
+                          setAddingAct(true);
+                          const ok = await createAct(Number(newActSpecialtyId), {
+                            name: newActName.trim(),
+                            base_price: Number(newActPrice) || 0,
+                            applicability: {
+                              dentitions: [dentitionForTooth(toothNumber)],
+                              tooth_types: [toothTypeForTooth(toothNumber)],
+                              treatment_areas: ['TOOTH', 'SURFACE'],
+                              selection_modes: ['INDIVIDUAL'],
+                              requires_present_tooth: false,
+                              requires_missing_tooth: false,
+                              min_selected_teeth: 1,
+                              max_selected_teeth: 1,
+                              suggestion_priority: 50,
+                              searchable_when_not_suggested: true,
+                            },
+                          });
+                          if (ok) {
+                            setShowAddAct(false);
+                            setNewActName('');
+                            setNewActPrice('');
+                            setNewActSpecialtyId('');
+                          }
+                          setAddingAct(false);
+                        }}
+                        className="rounded-xl bg-primary px-4 py-2.5 text-xs font-black text-white disabled:opacity-40 transition-all hover:scale-105 active:scale-95 shadow-md shadow-primary/20"
+                      >
+                        {addingAct ? '...' : 'Ajouter'}
+                      </button>
+                      <button
+                        onClick={() => setShowAddAct(false)}
+                        className="rounded-xl bg-input-field px-3 py-2.5 text-xs font-black text-text-muted hover:bg-input-field transition-all"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className={cn("w-full lg:w-[18rem] border-l p-8 flex flex-col shrink-0 overflow-y-auto custom-scrollbar", embedded ? "bg-white/5 border-white/5" : "bg-card border-border-main")}>
+            <div className="mb-10 flex-1">
+              <h3 className="text-[11px] font-black text-text-muted uppercase tracking-[0.3em] mb-4">Notes Cliniques</h3>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                className={cn(
+                  "w-full h-48 p-6 border-none rounded-3xl text-sm font-bold focus:ring-4 focus:ring-primary/5 transition-all outline-none resize-none shadow-inner",
+                  embedded ? "bg-white/5 text-white placeholder:text-white/20" : "bg-background text-text-main shadow-inner"
+                )}
+              />
+            </div>
+
+            <div className="pt-8 border-t border-border-main">
+              <div className="flex items-center justify-between mb-8">
+                <span className="text-[11px] font-black text-text-muted uppercase tracking-[0.3em]">Total Devis</span>
+                <div className="text-right">
+                  <span className={cn("text-3xl font-black tracking-tighter", embedded ? "text-white" : "text-text-main")}>{totalPrice}</span>
+                  <span className="text-xs font-black text-text-muted ml-2">MAD</span>
+                </div>
+              </div>
+
+              <button
+                onClick={() => onConfirm(selectedTreatments, selectedSurfaces, notes)}
+                disabled={selectedTreatments.length === 0 && !allowEmptyConfirm}
+                className={cn(
+                  "w-full py-6 rounded-3xl font-black uppercase tracking-[0.2em] text-xs transition-all shadow-2xl flex items-center justify-center gap-3",
+                  selectedTreatments.length > 0
+                    ? "bg-primary text-white hover:-translate-y-1 hover:shadow-primary/40 active:scale-95"
+                    : "bg-input-field text-text-muted cursor-not-allowed"
+                )}
+                style={selectedTreatments.length > 0 ? { backgroundColor: 'var(--primary)' } : {}}
+              >
+                <Check size={20} strokeWidth={3} /> Valider la Sélection
+              </button>
+            </div>
+          </div>
+        </div>
+      </motion.div>
+    </div>
+  );
+
+  if (!mounted) return null;
+  if (embedded) return content;
+  return createPortal(content, document.body);
+};
+
+export default TreatmentSelector;

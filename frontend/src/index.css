@@ -1,0 +1,453 @@
+@import "tailwindcss";
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Outfit:wght@400;500;600;700;800;900&family=Playfair+Display:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;500;600;700;800&family=Lora:ital,wght@0,400..700;1,400..700&family=Amiri:ital,wght@0,400;0,700;1,400;1,700&display=swap');
+
+@theme {
+  /* Palette Médicale Pro - Pilotée par Variables CSS */
+  --color-medical-dark: #070e1d;
+  --color-medical-pearl: var(--bg-medical-pearl);
+  
+  /* VARIABLES DYNAMIQUES */
+  --color-primary: var(--primary);
+  --color-primary-ink: var(--primary-ink);
+  --color-secondary: var(--secondary);
+  --color-accent: var(--accent);
+  --color-on-primary: var(--text-on-primary);
+  --color-success: var(--status-success);
+  --color-success-surface: var(--status-success-surface);
+  --color-success-border: var(--status-success-border);
+  --color-danger: var(--status-danger);
+  --color-danger-surface: var(--status-danger-surface);
+  --color-danger-border: var(--status-danger-border);
+  --color-warning: var(--status-warning);
+  --color-warning-surface: var(--status-warning-surface);
+  --color-warning-border: var(--status-warning-border);
+  --color-info: var(--status-info);
+  --color-info-surface: var(--status-info-surface);
+  --color-info-border: var(--status-info-border);
+  
+  /* TOKENS ELITE (Arrondis & Ombres) */
+  --radius-elite: 24px;
+  --radius-elite-sm: 16px;
+  --radius-elite-lg: 32px;
+  
+  --shadow-elite: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -4px rgba(0, 0, 0, 0.05), 0 0 0 1px rgba(0, 0, 0, 0.02);
+  --shadow-elite-hover: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.08);
+  --shadow-glass: 0 8px 32px 0 rgba(31, 38, 135, 0.07);
+  
+  /* Glassmorphism Premium */
+  --color-glass-bg: var(--glass-bg);
+  --color-glass-border: var(--glass-border);
+  --blur-glass-md: 12px;
+  --blur-glass-xl: 24px;
+  
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-outfit: "Outfit", sans-serif;
+  --font-serif: "Playfair Display", serif;
+  --font-arabic: "Amiri", serif;
+
+  /* Mappings Sémantiques */
+  --color-card: var(--card-bg);
+  --color-sidebar: var(--sidebar-bg);
+  --color-text-main: var(--text-main);
+  --color-text-muted: var(--text-muted);
+  --color-border-main: var(--border-color);
+  --color-border-hover: var(--border-hover);
+  --color-input-field: var(--input-bg);
+  --color-background: var(--bg-medical-pearl);
+}
+
+@custom-variant dark (&:is([data-theme='dark'] *, [data-theme='prestige'] *));
+
+:root {
+  /* GHOST ELITE (Structure) */
+  --bg-medical-pearl: #f8fafc;
+  --bg-gradient-start: #f8fafc;
+  --bg-gradient-end: #eff6ff;
+  --glass-bg: rgba(255, 255, 255, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.6);
+  --card-bg: white;
+  --sidebar-bg: white;
+  --text-main: #0f172a;
+  --text-muted: #475569;
+  --border-color: #e2e8f0;
+  --border-hover: #cbd5e1;
+  --input-bg: #f1f5f9;
+
+  /* Couleurs par défaut (Elite Blue) */
+  --primary: #003380;
+  --primary-ink: var(--primary);
+  --secondary: #1e40af;
+  --accent: #60a5fa;
+  --text-on-primary: #ffffff;
+
+  /* Semantic status tokens: UI code consumes meaning, never palette names. */
+  --status-success: #047857;
+  --status-success-surface: #ecfdf5;
+  --status-success-border: #a7f3d0;
+  --status-danger: #be123c;
+  --status-danger-surface: #fff1f2;
+  --status-danger-border: #fecdd3;
+  --status-warning: #b45309;
+  --status-warning-surface: #fffbeb;
+  --status-warning-border: #fde68a;
+  --status-info: #1d4ed8;
+  --status-info-surface: #eff6ff;
+  --status-info-border: #bfdbfe;
+
+  /* Transitions Globales */
+  --transition-elite: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+body, .bg-white, .text-slate-800, .bg-primary, .border-slate-200 {
+  transition: background-color 0.4s ease, border-color 0.4s ease, color 0.4s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body, .bg-white, .text-slate-800, .bg-primary, .border-slate-200 {
+    transition: none;
+  }
+}
+
+
+[data-theme='emerald'] {
+  /* ESCALE ZEN */
+  --bg-medical-pearl: #f0fdf4;
+  --bg-gradient-start: #f0fdf4;
+  --bg-gradient-end: #dcfce7;
+  --glass-bg: rgba(240, 253, 244, 0.9);
+  --glass-border: rgba(5, 150, 105, 0.1);
+  --card-bg: #fcfdfd;
+  --sidebar-bg: #ecfdf5;
+  --text-main: #064e3b;
+  --text-muted: #047857;
+  --border-color: #d1fae5;
+  --border-hover: #a7f3d0;
+  --input-bg: #f0fdf4;
+  
+  --primary: #059669;
+  --text-on-primary: #020617;
+  --secondary: #065f46;
+  --accent: #10b981;
+}
+
+[data-theme='rose'] {
+  /* ROSE PRESTIGE */
+  --bg-medical-pearl: #fff1f2;
+  --bg-gradient-start: #fff1f2;
+  --bg-gradient-end: #ffe4e6;
+  --glass-bg: rgba(255, 241, 242, 0.9);
+  --glass-border: rgba(219, 39, 119, 0.1);
+  --card-bg: #fffbfb;
+  --sidebar-bg: #fff1f2;
+  --text-main: #831843;
+  --text-muted: #be185d;
+  --border-color: #fecdd3;
+  --border-hover: #fda4af;
+  --input-bg: #fff1f2;
+
+  --primary: #db2777;
+  --secondary: #9d174d;
+  --accent: #f472b6;
+}
+
+[data-theme='prestige'] {
+  /* NUIT INTENSE (Sombre Médical) */
+  --bg-medical-pearl: #0f172a;
+  --bg-gradient-start: #0f172a;
+  --bg-gradient-end: #1e293b;
+  --glass-bg: rgba(30, 41, 59, 0.8);
+  --glass-border: rgba(255, 255, 255, 0.05);
+  --card-bg: #1e293b;
+  --sidebar-bg: #0f172a;
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --border-color: #334155;
+  --border-hover: #475569;
+  --input-bg: #1e293b;
+
+  --primary: #3b82f6;
+  --text-on-primary: #020617;
+  --secondary: #2563eb;
+  --accent: #60a5fa;
+}
+
+[data-theme='ocean'] {
+  /* OCÉAN PROFOND */
+  --bg-medical-pearl: #f0f9ff;
+  --bg-gradient-start: #f0f9ff;
+  --bg-gradient-end: #e0f2fe;
+  --glass-bg: rgba(240, 249, 255, 0.9);
+  --glass-border: rgba(2, 132, 199, 0.1);
+  --card-bg: #ffffff;
+  --sidebar-bg: #f0f9ff;
+  --text-main: #0c4a6e;
+  --text-muted: #0369a1;
+  --border-color: #bae6fd;
+  --border-hover: #7dd3fc;
+  --input-bg: #f0f9ff;
+
+  --primary: #0284c7;
+  --text-on-primary: #020617;
+  --secondary: #0369a1;
+  --accent: #38bdf8;
+}
+
+[data-theme='graphite'] {
+  /* GRAPHITE ZEN */
+  --bg-medical-pearl: #f1f5f9;
+  --bg-gradient-start: #f1f5f9;
+  --bg-gradient-end: #e2e8f0;
+  --glass-bg: rgba(241, 245, 249, 0.9);
+  --glass-border: rgba(51, 65, 85, 0.1);
+  --card-bg: #ffffff;
+  --sidebar-bg: #f8fafc;
+  --text-main: #0f172a;
+  --text-muted: #475569;
+  --border-color: #e2e8f0;
+  --border-hover: #cbd5e1;
+  --input-bg: #f1f5f9;
+
+  --primary: #475569;
+  --secondary: #334155;
+  --accent: #94a3b8;
+}
+
+[data-theme='dark'] {
+  /* ONYX ELITE (Dark Mode Absolu) */
+  --bg-medical-pearl: #020617;
+  --bg-gradient-start: #020617;
+  --bg-gradient-end: #000000;
+  --glass-bg: rgba(15, 23, 42, 0.9);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --card-bg: #0f172a;
+  --sidebar-bg: #020617;
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --border-color: #1e293b;
+  --border-hover: #334155;
+  --input-bg: #020617;
+
+  --primary: #4f46e5; /* Indigo Saphir (Désaturé) */
+  --secondary: #3730a3;
+  --accent: #6366f1;
+}
+
+/* Pocket semantic states retain a readable contrast on selected dark themes.
+   Components consume role/meaning tokens, never their own fixed palettes. */
+[data-theme='dark'], [data-theme='prestige'] {
+  --status-success: #6ee7b7;
+  --status-success-surface: #064e3b;
+  --status-success-border: #047857;
+  --status-warning: #fde68a;
+  --status-warning-surface: #451a03;
+  --status-warning-border: #92400e;
+  --status-danger: #fda4af;
+  --status-danger-surface: #4c0519;
+  --status-danger-border: #9f1239;
+  --status-info: #93c5fd;
+  --status-info-surface: #172554;
+  --status-info-border: #1d4ed8;
+}
+
+[data-theme='high-contrast'] {
+  /* HAUT CONTRASTE CLINIQUE */
+  --status-success: #000000;
+  --status-success-surface: #ffffff;
+  --status-success-border: #000000;
+  --status-warning: #000000;
+  --status-warning-surface: #ffffff;
+  --status-warning-border: #000000;
+  --status-danger: #000000;
+  --status-danger-surface: #ffffff;
+  --status-danger-border: #000000;
+  --status-info: #000000;
+  --status-info-surface: #ffffff;
+  --status-info-border: #000000;
+  --bg-medical-pearl: #ffffff;
+  --bg-gradient-start: #ffffff;
+  --bg-gradient-end: #ffffff;
+  --glass-bg: rgba(255, 255, 255, 1);
+  --glass-border: rgba(0, 0, 0, 1);
+  --card-bg: #ffffff;
+  --sidebar-bg: #ffffff;
+  --text-main: #000000;
+  --text-muted: #111111;
+  --border-color: #000000;
+  --border-hover: #000000;
+  --input-bg: #ffffff;
+
+  --primary: #000000;
+  --secondary: #000000;
+  --accent: #000000;
+}
+
+/* Forçage Prioritaire Sidebar Onyx */
+[data-theme='dark'] aside.bg-sidebar,
+[data-theme='prestige'] aside.bg-sidebar {
+  background-color: var(--sidebar-bg) !important;
+  background-image: linear-gradient(180deg, var(--sidebar-bg), #000) !important;
+  border-right-color: var(--border-color) !important;
+}
+
+/* FORÇAGE GLOBAL DES CLASSES TAILWIND POUR LES THÈMES SOMBRES */
+[data-theme='dark'], [data-theme='prestige'] {
+  color: var(--text-main);
+  color-scheme: dark;
+}
+
+/* Forçage Textes : Tous les gris et couleurs de texte secondaires */
+[data-theme='dark'] :is(.text-slate-300, .text-slate-400, .text-slate-500, .text-slate-600, .text-slate-700, .text-slate-800, .text-slate-900, .text-gray-500, .text-indigo-900, .text-indigo-800, .text-blue-900),
+[data-theme='prestige'] :is(.text-slate-300, .text-slate-400, .text-slate-500, .text-slate-600, .text-slate-700, .text-slate-800, .text-slate-900, .text-gray-500, .text-indigo-900, .text-indigo-800, .text-blue-900) {
+  color: var(--text-main) !important;
+}
+
+/* Forçage Backgrounds : Neutralisation des fonds clairs opaques ou très denses */
+[data-theme='dark'] :is(.bg-white, .bg-slate-50, .bg-slate-100, .bg-blue-50, .bg-indigo-50, .bg-emerald-50, .bg-rose-50, .bg-slate-200),
+[data-theme='prestige'] :is(.bg-white, .bg-slate-50, .bg-slate-100, .bg-blue-50, .bg-indigo-50, .bg-emerald-50, .bg-rose-50, .bg-slate-200),
+[data-theme='dark'] :is([class*="bg-white/9"], [class*="bg-white/8"], [class*="bg-white/7"], [class*="bg-white/6"], [class*="bg-white/50"], [class*="bg-white/40"]),
+[data-theme='prestige'] :is([class*="bg-white/9"], [class*="bg-white/8"], [class*="bg-white/7"], [class*="bg-white/6"], [class*="bg-white/50"], [class*="bg-white/40"]) {
+  background-color: var(--card-bg) !important;
+}
+
+/* On laisse passer les opacités faibles (0-20%) pour les reflets, ou on les rend plus sombres */
+[data-theme='dark'] :is(.bg-white\/5, .bg-white\/10, .bg-white\/20, .bg-slate-50\/10, .bg-slate-100\/10),
+[data-theme='prestige'] :is(.bg-white\/5, .bg-white\/10, .bg-white\/20, .bg-slate-50\/10, .bg-slate-100\/10) {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Forçage Bordures : Neutralisation des bordures claires */
+[data-theme='dark'] :is(.border-slate-100, .border-slate-200, .border-slate-300, .border-blue-100, .border-indigo-100, .border-white),
+[data-theme='prestige'] :is(.border-slate-100, .border-slate-200, .border-slate-300, .border-blue-100, .border-indigo-100, .border-white),
+[data-theme='dark'] :is([class*="border-slate-100/"], [class*="border-slate-200/"], [class*="border-blue-100/"], [class*="border-indigo-100/"]),
+[data-theme='prestige'] :is([class*="border-slate-100/"], [class*="border-slate-200/"], [class*="border-blue-100/"], [class*="border-indigo-100/"]) {
+  border-color: var(--border-color) !important;
+}
+
+/* Neutralisation des Hover/Active qui "blanchissent" l'interface */
+[data-theme='dark'] :is(.hover\:bg-slate-50:hover, .hover\:bg-slate-100:hover, .hover\:bg-white:hover, .hover\:bg-blue-50:hover, .hover\:bg-indigo-50:hover),
+[data-theme='prestige'] :is(.hover\:bg-slate-50:hover, .hover\:bg-slate-100:hover, .hover\:bg-white:hover, .hover\:bg-blue-50:hover, .hover\:bg-indigo-50:hover) {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Cas particuliers pour le Glassmorphism */
+[data-theme='dark'] :is(.bg-white\/80, .bg-card-bg\/80, .bg-white\/60, .bg-white\/40), 
+[data-theme='prestige'] :is(.bg-white\/80, .bg-card-bg\/80, .bg-white\/60, .bg-white\/40) {
+  background-color: var(--glass-bg);
+  backdrop-filter: blur(20px);
+}
+
+/* Forçage spécifique PatientScoreBadge et Menus Flottants */
+[data-theme='dark'] :is(.bg-white, [class*="bg-white/95"], .bg-\[\#FFF9E6\], .bg-rose-50),
+[data-theme='prestige'] :is(.bg-white, [class*="bg-white/95"], .bg-\[\#FFF9E6\], .bg-rose-50) {
+  background-color: var(--card-bg);
+  backdrop-filter: blur(12px);
+}
+
+
+[data-theme='dark'] :is(.text-slate-800, .text-\[\#B48A05\], .text-rose-600),
+[data-theme='prestige'] :is(.text-slate-800, .text-\[\#B48A05\], .text-rose-600) {
+  color: var(--text-main) !important;
+}
+
+[data-theme='dark'] :is(.border-slate-100, .border-slate-200, .border-\[\#F3E2B4\], .border-rose-100, .border-white),
+[data-theme='prestige'] :is(.border-slate-100, .border-slate-200, .border-\[\#F3E2B4\], .border-rose-100, .border-white) {
+  border-color: var(--border-main) !important;
+}
+
+[data-theme='dark'] .shadow-\[0_25px_50px_-12px_rgba\(0\,0\,0\,0\.25\)\] {
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6) !important;
+}
+
+/* Adoucissement des Rouges (Alertes) en mode Onyx */
+[data-theme='dark'] :is(.text-red-500, .text-red-600, .text-rose-500),
+[data-theme='prestige'] :is(.text-red-500, .text-red-600, .text-rose-500) {
+  color: #fb7185 !important; /* Rose-400 (Rubis adouci) */
+}
+
+[data-theme='dark'] :is(.bg-red-500, .bg-red-600, .bg-rose-500),
+[data-theme='prestige'] :is(.bg-red-500, .bg-red-600, .bg-rose-500) {
+  background-color: #e11d48 !important; /* Rose-600 (Plus profond) */
+}
+
+body {
+  background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
+  color: var(--text-main);
+  @apply antialiased min-h-screen transition-colors duration-500;
+}
+
+@layer components {
+  .document-watermark { position: relative; overflow: hidden; }
+  .document-watermark::before {
+    content: "DIGITAL CROWN";
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%) rotate(-30deg);
+    font-size: 8rem; font-weight: 900;
+    color: var(--text-main);
+    opacity: 0.02;
+    pointer-events: none; white-space: nowrap; z-index: 0;
+  }
+}
+
+.font-arabic { font-family: "Amiri", serif; }
+.font-outfit { font-family: "Outfit", sans-serif; }
+.font-playfair { font-family: "Playfair Display", serif; }
+.font-mono { font-family: "JetBrains Mono", monospace; }
+.font-serif { font-family: "Lora", serif; }
+
+/* Scrollbar Premium */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.1); border-radius: 10px; }
+[data-theme='prestige'] ::-webkit-scrollbar-thumb, 
+[data-theme='dark'] ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); }
+
+.custom-scrollbar-white::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15) !important; }
+.custom-scrollbar-white::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.25) !important; }
+
+/* Mode Performance : Neutralisation de toutes les animations pour les configs modestes */
+.performance-mode * {
+  transition: none !important;
+  animation: none !important;
+  scroll-behavior: auto !important;
+}
+
+/* Animations d'arrière-plan (Premium Ghost) */
+@keyframes drift-slow {
+  0% { transform: translate(0px, 0px) scale(1); }
+  33% { transform: translate(30px, -50px) scale(1.05); }
+  66% { transform: translate(-20px, 20px) scale(0.95); }
+  100% { transform: translate(0px, 0px) scale(1); }
+}
+
+@keyframes drift-reverse {
+  0% { transform: translate(0px, 0px) scale(1); }
+  33% { transform: translate(-30px, 50px) scale(0.95); }
+  66% { transform: translate(20px, -20px) scale(1.05); }
+  100% { transform: translate(0px, 0px) scale(1); }
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 0.8; }
+  50% { opacity: 0.4; }
+}
+
+/* Keep Patient Documents action menus inside narrow mobile viewports. */
+@media (max-width: 639px) {
+  [data-document-action-menu] {
+    right: auto !important;
+    left: 50% !important;
+    transform: translateX(-50%);
+    max-width: calc(100vw - 2rem);
+  }
+}
+
+/* Anchor Patient Documents action menus below their trigger on larger screens.
+   A scrollable max-height on the menu handles long action lists without top clipping. */
+@media (min-width: 640px) {
+  [data-document-action-menu] {
+    top: 100% !important;
+    bottom: auto !important;
+  }
+}

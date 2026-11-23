@@ -1,0 +1,327 @@
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from jose import JWTError, jwt
+from pydantic import BaseModel
+from typing import Optional
+from datetime import datetime
+import asyncio
+
+from backend import database, models
+from backend.routers.auth import get_current_user, has_permission, require_permission, require_elite_license
+from backend.security import SECRET_KEY, ALGORITHM, token_blacklist
+
+router = APIRouter(
+    tags=["Ghost Hub Feedback"]
+)
+
+
+class AIFeedbackCreate(BaseModel):
+    patient_id: int
+    insight_type: str
+    insight_content: str
+    action: str  # accept | reject | edit | resolved
+    corrected_text: Optional[str] = None
+
+
+def _ghost_stream_user_authorized(
+    user: Optional[models.User],
+    db: Session,
+    *,
+    employer_id: int | None = None,
+) -> bool:
+    if user is None or not user.is_active:
+        return False
+
+    if employer_id is not None and (user.employer_id or user.id) != employer_id:
+        return False
+
+    approval = getattr(user, "approval_status", "approved") or "approved"
+    if getattr(user, "employer_id", None) is not None and approval != "approved":
+        return False
+    if not has_permission(user, "patients"):
+        return False
+    try:
+        require_elite_license(current_user=user, db=db)
+    except HTTPException:
+        return False
+    return True
+
+
+def _websocket_access_session_valid(
+    websocket: WebSocket,
+    db: Session,
+    *,
+    expected_jti: str | None,
+) -> bool:
+    token = websocket.cookies.get("access_token") or websocket.query_params.get("token")
+    if token and token.lower().startswith("bearer "):
+        token = token.split(" ", 1)[1]
+    if not token or not expected_jti:
+        return False
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return False
+    jti = payload.get("jti")
+    return bool(
+        payload.get("type") == "access"
+        and jti
+        and str(jti) == str(expected_jti)
+        and not token_blacklist.is_revoked(str(jti), db)
+    )
+
+
+def _get_websocket_identity(websocket: WebSocket, db: Session) -> tuple[Optional[models.User], Optional[str]]:
+    token = websocket.cookies.get("access_token") or websocket.query_params.get("token")
+    if token and token.lower().startswith("bearer "):
+        token = token.split(" ", 1)[1]
+    if not token:
+        return None, None
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        token_type: str = payload.get("type")
+        jti: str = payload.get("jti")
+
+        # Ghost insights is a Cabinet desktop channel. Pocket/mobile JWTs have
+        # their own device-bound trust boundary and must never authenticate it.
+        if token_type != "access" or not jti:
+            return None, None
+        if token_blacklist.is_revoked(jti, db):
+            return None, None
+
+        email: str = payload.get("sub")
+        if email is None:
+            return None, None
+        user = db.query(models.User).filter(models.User.email == email).first()
+    except (JWTError, ValueError, KeyError):
+        return None, None
+
+    if not _ghost_stream_user_authorized(user, db):
+        return None, None
+    return user, jti
+
+
+@router.post("/feedback", dependencies=[Depends(require_elite_license)])
+def submit_feedback(
+    payload: AIFeedbackCreate,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(require_permission("patients")),
+):
+    """Record a practitioner's reaction to an AI insight."""
+    if payload.action not in ("accept", "reject", "edit", "resolved"):
+        raise HTTPException(status_code=422, detail="action must be accept, reject, edit, or resolved")
+
+    fb = models.AIFeedback(
+        patient_id=payload.patient_id,
+        insight_type=payload.insight_type,
+        insight_content=payload.insight_content,
+        action=payload.action,
+        corrected_text=payload.corrected_text,
+        employer_id=current_user.employer_id or current_user.id,
+    )
+    db.add(fb)
+    db.commit()
+    return {"status": "recorded", "id": fb.id}
+
+
+@router.get("/feedback/stats", dependencies=[Depends(require_elite_license)])
+def get_feedback_stats(
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(require_permission("patients")),
+):
+    """Return accept/reject rates per insight type for the current employer."""
+    emp_id = current_user.employer_id or current_user.id
+    rows = (
+        db.query(
+            models.AIFeedback.insight_type,
+            models.AIFeedback.action,
+            func.count(models.AIFeedback.id).label("count"),
+        )
+        .filter(models.AIFeedback.employer_id == emp_id)
+        .group_by(models.AIFeedback.insight_type, models.AIFeedback.action)
+        .all()
+    )
+
+    stats: dict = {}
+    for insight_type, action, count in rows:
+        if insight_type not in stats:
+            stats[insight_type] = {}
+        stats[insight_type][action] = count
+
+    return {"stats": stats}
+
+# --- GHOST BRAIN V2 - MEMORY ENDPOINTS ---
+from backend.services.ghost_memory_service import ghost_memory
+
+@router.get("/ghost-insights", dependencies=[Depends(require_elite_license)])
+def get_ghost_insights(
+    limit: int = 10,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(require_permission("patients")),
+):
+    """
+    Récupère les déductions proactives récentes générées par le Ghost Brain V2.
+    Affiche une bulle de notification dans l'UI.
+    """
+    emp_id = current_user.employer_id or current_user.id
+    logs = db.query(models.GhostMemoryLog).filter(
+        models.GhostMemoryLog.employer_id == emp_id,
+        models.GhostMemoryLog.is_read == False
+    ).order_by(models.GhostMemoryLog.created_at.desc()).limit(limit).all()
+    
+    return {
+        "unread_count": ghost_memory.get_unread_count(db, emp_id),
+        "insights": [
+            {
+                "id": log.id,
+                "patient_id": log.patient_id,
+                "insight_type": log.insight_type,
+                "content": log.content,
+                "created_at": log.created_at
+            }
+            for log in logs
+        ]
+    }
+
+@router.post("/ghost-insights/{log_id}/read", dependencies=[Depends(require_elite_license)])
+def mark_ghost_insight_read(
+    log_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(require_permission("patients")),
+):
+    """Marque un insight comme lu par le praticien."""
+    emp_id = current_user.employer_id or current_user.id
+    log = db.query(models.GhostMemoryLog).filter(
+        models.GhostMemoryLog.id == log_id,
+        models.GhostMemoryLog.employer_id == emp_id,
+    ).first()
+    if not log:
+        raise HTTPException(status_code=404, detail="Insight introuvable")
+    log.is_read = True
+    db.commit()
+    return {"status": "read"}
+
+
+def _ghost_snapshot_if_changed(logs, unread_count: int, previous_signature):
+    """Return an unread snapshot only when its visible content or count changes.
+
+    Cardinality alone is insufficient: old alert A can be acknowledged as
+    alert B appears, leaving the total unchanged while the UI must update.
+    This function is deliberately pure so the equal-count transition is tested.
+    """
+    signature = (
+        unread_count,
+        tuple((log.id, log.patient_id, log.insight_type, log.content, log.created_at)
+              for log in logs),
+    )
+    if signature == previous_signature:
+        return None, previous_signature
+    return {
+        "unread_count": unread_count,
+        "insights": [
+            {
+                "id": log.id,
+                "patient_id": log.patient_id,
+                "insight_type": log.insight_type,
+                "content": log.content,
+                "created_at": log.created_at.isoformat(),
+            } for log in logs
+        ],
+    }, signature
+
+
+@router.websocket("/ws/ghost-insights/{employer_id}")
+async def websocket_ghost_insights(websocket: WebSocket, employer_id: int):
+    """
+    Flux WebSocket temps réel pour les insights du Ghost Brain.
+
+    IMPORTANT : on n'injecte PAS `Depends(get_db)` ici. Une connexion WebSocket
+    vit des heures ; une session injectée resterait ouverte tout ce temps et
+    monopoliserait une connexion du pool par onglet (→ épuisement du pool).
+    On ouvre donc une session COURTE (auth, puis par tick) qui est libérée
+    immédiatement après chaque requête.
+    """
+    # 1. Authentification + workstation authority via une session courte.
+    # The same authority is re-evaluated on every tick so a socket opened in
+    # Cabinet cannot keep streaming clinical content after Cabinet -> Station.
+    with database.SessionLocal() as auth_db:
+        current_user, session_jti = _get_websocket_identity(websocket, auth_db)
+        authorized = (
+            current_user is not None
+            and (current_user.employer_id or current_user.id) == employer_id
+        )
+        if authorized:
+            from backend.routers.workstation_mode import enforce_workstation_access_from_values
+            try:
+                enforce_workstation_access_from_values(
+                    db=auth_db,
+                    user=current_user,
+                    workstation_cookie=websocket.cookies.get("dc_workstation"),
+                    escape_cookie=websocket.cookies.get("dc_station_escape"),
+                    session_jti=session_jti,
+                )
+            except HTTPException:
+                authorized = False
+
+    if not authorized:
+        await websocket.accept()
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    await websocket.accept()
+    last_signature = None
+    try:
+        while True:
+            # 2. Session courte par tick : revalide Station avant toute lecture
+            # clinique puis libère la connexion DB avant le sleep.
+            payload = None
+            with database.SessionLocal() as db:
+                if not _websocket_access_session_valid(
+                    websocket,
+                    db,
+                    expected_jti=session_jti,
+                ):
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                    return
+
+                refreshed_user = db.query(models.User).filter(models.User.id == current_user.id).first()
+                if not _ghost_stream_user_authorized(
+                    refreshed_user,
+                    db,
+                    employer_id=employer_id,
+                ):
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                    return
+                try:
+                    enforce_workstation_access_from_values(
+                        db=db,
+                        user=refreshed_user,
+                        workstation_cookie=websocket.cookies.get("dc_workstation"),
+                        escape_cookie=websocket.cookies.get("dc_station_escape"),
+                        session_jti=session_jti,
+                    )
+                except HTTPException:
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                    return
+
+                unread_count = ghost_memory.get_unread_count(db, employer_id)
+                logs = db.query(models.GhostMemoryLog).filter(
+                    models.GhostMemoryLog.employer_id == employer_id,
+                    models.GhostMemoryLog.is_read == False,
+                ).order_by(
+                    models.GhostMemoryLog.created_at.desc(),
+                    models.GhostMemoryLog.id.desc(),
+                ).limit(10).all()
+                payload, next_signature = _ghost_snapshot_if_changed(
+                    logs, unread_count, last_signature,
+                )
+            # The DB is closed before network I/O. Do not advance the
+            # fingerprint unless the snapshot was actually sent.
+            if payload is not None:
+                await websocket.send_json(payload)
+                last_signature = next_signature
+            await asyncio.sleep(5)  # Latence max ~5 s pour un insight proactif
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass

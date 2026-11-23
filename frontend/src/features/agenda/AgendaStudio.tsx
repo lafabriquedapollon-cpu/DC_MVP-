@@ -1,0 +1,353 @@
+import { formatAgendaWallClock } from '../../utils/agendaWallClock';
+import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
+import { Calendar, ChevronLeft, ChevronRight, LayoutGrid, CalendarDays, ListFilter, UploadCloud, Users, CalendarClock, AlertCircle } from 'lucide-react';
+import { cn } from '../../utils/cn';
+import { DailyView } from './DailyView';
+import { WeeklyView } from './WeeklyView';
+import { MonthlyView } from './MonthlyView';
+import { GoogleImportModal } from './GoogleImportModal';
+import { FrontdeskModal } from './FrontdeskModal';
+import { AgendaModal } from './AgendaModal';
+import { PendingRequestCard } from './PendingRequestCard';
+import { MultiPractitionerTimelineView } from './MultiPractitionerTimelineView';
+import { api } from '../../services/api';
+import { usePractitionerContextStore } from '../clinic/practitionerContext';
+
+export type AgendaViewMode = 'day' | 'week' | 'month' | 'multi';
+
+export const AgendaStudio: React.FC = () => {
+  const location = useLocation();
+  const selectedPractitionerId = usePractitionerContextStore((state) => state.selectedPractitionerId);
+  const [viewMode, setViewMode] = useState<AgendaViewMode>('week');
+  const [selectedDate, setSelectedDate] = useState<Date>(new Date());
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [isFrontdeskModalOpen, setIsFrontdeskModalOpen] = useState(false);
+  const [showPendingOnly, setShowPendingOnly] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [upcomingHolidays, setUpcomingHolidays] = useState<any[]>([]);
+  const [settings, setSettings] = useState<any>(null);
+  const [exceptions, setExceptions] = useState<any[]>([]);
+  const [multiData, setMultiData] = useState<any>(null);
+  const [loadingMulti, setLoadingMulti] = useState(false);
+  const [pendingRequests, setPendingRequests] = useState<any[]>([]);
+
+  // Préremplissage patient (CTA "Prendre RDV" depuis le dossier patient) — modale
+  // dédiée, indépendante de celles montées dans DailyView/WeeklyView/MonthlyView.
+  const [prefillOpen, setPrefillOpen] = useState(false);
+  const [prefillPatient, setPrefillPatient] = useState<{ id: number; nom: string; prenom: string } | null>(null);
+
+  useEffect(() => {
+    const state = location.state as { prefillPatientId?: number; prefillPatientNom?: string; prefillPatientPrenom?: string } | null;
+    if (state?.prefillPatientId) {
+      setPrefillPatient({ id: state.prefillPatientId, nom: state.prefillPatientNom || '', prenom: state.prefillPatientPrenom || '' });
+      setPrefillOpen(true);
+      // Nettoie le state de navigation pour qu'un retour arrière ne rouvre pas la modale.
+      window.history.replaceState({}, '', location.pathname);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const fetchPendingRequests = async () => {
+    try {
+      const res = await api.get('/appointments/pending');
+      setPendingRequests(res.data);
+      setPendingCount(res.data.length);
+    } catch (err) {
+      console.error('Error fetching pending requests:', err);
+    }
+  };
+
+  useEffect(() => {
+    api.get('/agenda/upcoming-holidays').then(res => setUpcomingHolidays(res.data)).catch(console.error);
+    api.get('/agenda/settings').then(res => setSettings(res.data)).catch(console.error);
+    api.get('/agenda/exceptions').then(res => setExceptions(Array.isArray(res.data) ? res.data : [])).catch(console.error);
+    fetchPendingRequests();
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(fetchPendingRequests, 30000); // Refresh every 30s
+    return () => clearInterval(interval);
+  }, []);
+
+  const handlePrev = () => {
+    const newDate = new Date(selectedDate);
+    if (viewMode === 'day' || viewMode === 'multi') newDate.setDate(newDate.getDate() - 1);
+    else if (viewMode === 'week') newDate.setDate(newDate.getDate() - 7);
+    else if (viewMode === 'month') newDate.setMonth(newDate.getMonth() - 1);
+    setSelectedDate(newDate);
+  };
+
+  const handleNext = () => {
+    const newDate = new Date(selectedDate);
+    if (viewMode === 'day' || viewMode === 'multi') newDate.setDate(newDate.getDate() + 1);
+    else if (viewMode === 'week') newDate.setDate(newDate.getDate() + 7);
+    else if (viewMode === 'month') newDate.setMonth(newDate.getMonth() + 1);
+    setSelectedDate(newDate);
+  };
+
+  const handleToday = () => {
+    setSelectedDate(new Date());
+  };
+
+  const fetchMulti = async () => {
+    setLoadingMulti(true);
+    try {
+      const start = new Date(selectedDate);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(selectedDate);
+      end.setHours(23, 59, 59, 999);
+      const res = await api.get('/appointments/multi-practitioner', {
+        params: { start_date: formatAgendaWallClock(start), end_date: formatAgendaWallClock(end) }
+      });
+      setMultiData(res.data);
+    } catch (err: any) {
+      if (err?.response?.status === 403) {
+        setMultiData({ error: 'PREMIUM' });
+      }
+    } finally {
+      setLoadingMulti(false);
+    }
+  };
+
+  useEffect(() => {
+    if (viewMode === 'multi') fetchMulti();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode, selectedDate]);
+
+  const practitionerViewKey = selectedPractitionerId ?? 'unscoped';
+  const renderView = () => {
+    switch (viewMode) {
+      case 'day': return <DailyView key={`day-${refreshKey}-${practitionerViewKey}`} selectedDate={selectedDate} agendaSettings={settings} exceptions={exceptions} />;
+      case 'week': return <WeeklyView key={`week-${refreshKey}-${practitionerViewKey}`} selectedDate={selectedDate} agendaSettings={settings} exceptions={exceptions} />;
+      case 'month': return <MonthlyView key={`month-${refreshKey}-${practitionerViewKey}`} selectedDate={selectedDate} />;
+      case 'multi': return (
+        <MultiPractitionerTimelineView
+          data={multiData}
+          loading={loadingMulti}
+          selectedDate={selectedDate}
+          agendaSettings={settings}
+          exceptions={exceptions}
+          onSaved={fetchMulti}
+        />
+      );
+      default: return <WeeklyView key={`week-${refreshKey}-${practitionerViewKey}`} selectedDate={selectedDate} agendaSettings={settings} exceptions={exceptions} />;
+    }
+  };
+
+  const handleBlockHoliday = async () => {
+    if (upcomingHolidays.length === 0) return;
+    const hol = upcomingHolidays[0];
+    try {
+      await api.post('/agenda/exceptions', {
+        start_date: hol.date,
+        end_date: hol.date,
+        reason: hol.name,
+        is_recurring: false
+      });
+      // Optionally reload or show a success message
+      setUpcomingHolidays(prev => prev.slice(1));
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  return (
+    <div className="w-full max-w-7xl mx-auto space-y-6 min-w-0 overflow-x-clip">
+      
+      {/* JOUR FÉRIÉ À VENIR */}
+      {upcomingHolidays.length > 0 && (
+        <div className="bg-primary text-white p-4 rounded-2xl shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-in fade-in slide-in-from-top-4">
+          <div className="flex items-center gap-4">
+            <div className="p-2 bg-white/20 rounded-xl">
+              <CalendarClock size={24} />
+            </div>
+            <div>
+              <h3 className="font-black text-lg">Jour férié à venir</h3>
+              <p className="text-white/80 text-sm">
+                Prochain jour férié : <strong>{upcomingHolidays[0].name}</strong> le {new Date(upcomingHolidays[0].date).toLocaleDateString('fr-FR')}
+              </p>
+            </div>
+          </div>
+          <button 
+            onClick={handleBlockHoliday}
+            className="bg-card text-primary px-4 py-2 rounded-xl font-bold text-sm hover:bg-input-field transition-colors"
+          >
+            Bloquer l'agenda
+          </button>
+        </div>
+      )}
+
+      {/* GLOBAL CONTROLS HEADER */}
+      <div data-tour="agenda-header" className="flex flex-col lg:flex-row justify-between items-stretch lg:items-center gap-4 sm:gap-6 bg-card/40 backdrop-blur-2xl border border-white/60 p-4 sm:p-6 rounded-[2rem] sm:rounded-[2.5rem] shadow-2xl min-w-0">
+        
+        {/* Left: Branding & Date Navigation */}
+        <div className="flex items-center gap-3 sm:gap-6 min-w-0">
+          <div className="w-14 h-14 bg-primary text-white rounded-2xl flex items-center justify-center shadow-lg shadow-primary/20 transform hover:scale-105 transition-transform">
+            <Calendar size={28} />
+          </div>
+          
+          <div className="space-y-1">
+            <h1 className="text-2xl sm:text-3xl font-black text-primary tracking-tight whitespace-nowrap">Agenda</h1>
+            <div className="flex items-center gap-3">
+              <button onClick={handlePrev} className="p-1.5 hover:bg-card/60 rounded-full transition-colors text-primary">
+                <ChevronLeft size={20} />
+              </button>
+              <span className="text-sm font-black text-text-muted min-w-[140px] text-center uppercase tracking-wider">
+                {viewMode === 'month' 
+                  ? selectedDate.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })
+                  : selectedDate.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' })}
+              </span>
+              <button onClick={handleNext} className="p-1.5 hover:bg-card/60 rounded-full transition-colors text-primary">
+                <ChevronRight size={20} />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Right: View Switching & Actions */}
+        <div data-tour="agenda-view-switcher" className="w-full lg:w-auto min-w-0 flex flex-wrap items-center justify-center lg:justify-end gap-1 sm:gap-2 bg-input-field/50 p-1.5 rounded-2xl border border-border-main/50 backdrop-blur-md">
+          <button
+            onClick={() => setIsFrontdeskModalOpen(true)}
+            className="flex items-center gap-2 px-4 py-2.5 text-warning hover:bg-warning-surface font-bold text-sm rounded-xl transition-all relative"
+            title="Nouvelle demande de rendez-vous"
+          >
+            <AlertCircle size={18} />
+            <span className="hidden xl:inline">Demande RDV</span>
+            {pendingCount > 0 && <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs font-black w-5 h-5 rounded-full flex items-center justify-center">{pendingCount}</span>}
+          </button>
+
+          <button
+            onClick={() => setIsImportModalOpen(true)}
+            className="flex items-center gap-2 px-4 py-2.5 text-primary hover:brightness-110 hover:bg-primary/10 font-bold text-sm rounded-xl transition-all"
+            title="Importer depuis Google Agenda"
+          >
+            <UploadCloud size={18} />
+            <span className="hidden xl:inline">Importer</span>
+          </button>
+          
+          <div className="hidden sm:block w-px h-6 bg-input-field mx-1" />
+
+          <button 
+            onClick={() => setViewMode('day')}
+            className={cn(
+              "flex items-center gap-2 px-3 sm:px-4 py-2.5 rounded-xl font-bold text-sm transition-all",
+              viewMode === 'day' ? "bg-card text-primary shadow-sm" : "text-text-muted hover:text-primary hover:bg-card/40"
+            )}
+          >
+            <CalendarDays size={18} /> Jour
+          </button>
+          <button 
+            onClick={() => setViewMode('week')}
+            className={cn(
+              "flex items-center gap-2 px-3 sm:px-4 py-2.5 rounded-xl font-bold text-sm transition-all",
+              viewMode === 'week' ? "bg-card text-primary shadow-sm" : "text-text-muted hover:text-primary hover:bg-card/40"
+            )}
+          >
+            <ListFilter size={18} /> Semaine
+          </button>
+          <button 
+            onClick={() => setViewMode('month')}
+            className={cn(
+              "flex items-center gap-2 px-3 sm:px-4 py-2.5 rounded-xl font-bold text-sm transition-all",
+              viewMode === 'month' ? "bg-card text-primary shadow-sm" : "text-text-muted hover:text-primary hover:bg-card/40"
+            )}
+          >
+            <LayoutGrid size={18} /> Mois
+          </button>
+          <button
+            onClick={() => setViewMode('multi')}
+            className={cn(
+              "flex items-center gap-2 px-3 sm:px-4 py-2.5 rounded-xl font-bold text-sm transition-all",
+              viewMode === 'multi' ? "bg-card text-indigo-600 shadow-sm" : "text-text-muted hover:text-indigo-600 hover:bg-card/40"
+            )}
+            title="Vue multi-praticien (PREMIUM/ELITE)"
+          >
+            <Users size={18} /> Multi
+          </button>
+          <div className="hidden sm:block w-px h-6 bg-input-field mx-1" />
+          <button
+            onClick={handleToday}
+            className="px-5 py-2.5 bg-card text-text-main font-bold text-sm rounded-xl hover:bg-background transition-all border border-border-main shadow-sm"
+          >
+            Aujourd'hui
+          </button>
+        </div>
+      </div>
+
+      {/* PENDING REQUESTS SECTION */}
+      {pendingCount > 0 && (
+        <div className="space-y-3 bg-warning-surface border-2 border-warning-border rounded-2xl p-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-black text-warning flex items-center gap-2">
+              <AlertCircle size={20} /> Demandes en attente ({pendingCount})
+            </h2>
+            <button
+              onClick={() => setShowPendingOnly(!showPendingOnly)}
+              className="text-xs px-3 py-1.5 bg-orange-200 text-warning rounded-lg hover:bg-orange-300 font-bold"
+            >
+              {showPendingOnly ? 'Afficher tout' : 'Afficher seulement'}
+            </button>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {pendingRequests.map(req => (
+              <PendingRequestCard
+                key={req.id}
+                request={req}
+                onAction={() => {
+                  fetchPendingRequests();
+                  setRefreshKey(prev => prev + 1);
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* RENDER ACTIVE VIEW */}
+      {!showPendingOnly && (
+        <div data-testid="agenda-active-view" className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+          {renderView()}
+        </div>
+      )}
+
+      <FrontdeskModal
+        open={isFrontdeskModalOpen}
+        onClose={() => setIsFrontdeskModalOpen(false)}
+        onSuccess={() => {
+          fetchPendingRequests();
+          setRefreshKey(prev => prev + 1);
+          setIsFrontdeskModalOpen(false);
+        }}
+        selectedDate={selectedDate}
+      />
+
+      <GoogleImportModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        onSuccess={() => {
+          // Force le rafraichissement de la vue active
+          setRefreshKey(prev => prev + 1);
+        }}
+      />
+
+      {prefillPatient && (
+        <AgendaModal
+          isOpen={prefillOpen}
+          onClose={() => { setPrefillOpen(false); setPrefillPatient(null); }}
+          onSaved={() => {
+            setRefreshKey(prev => prev + 1);
+            setPrefillOpen(false);
+            setPrefillPatient(null);
+          }}
+          selectedDate={selectedDate}
+          initialPatientId={prefillPatient.id}
+          initialPatientNom={prefillPatient.nom}
+          initialPatientPrenom={prefillPatient.prenom}
+        />
+      )}
+
+    </div>
+  );
+};

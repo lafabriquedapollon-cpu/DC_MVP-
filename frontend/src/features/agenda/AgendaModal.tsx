@@ -1,0 +1,868 @@
+import { formatAgendaWallClock } from '../../utils/agendaWallClock';
+import React, { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { X, Clock, User, FileText, Search, Plus, Check, MessageCircle, Calendar, Sparkles, AlertCircle, ArrowRight, Trash2, Ghost } from 'lucide-react';
+import toast from 'react-hot-toast';
+import { api } from '../../services/api';
+import type { AppointmentStatus } from './DailyView';
+import { cn } from '../../utils/cn';
+export type SchedulingType = 'EXACT_TIME' | 'MORNING' | 'AFTERNOON' | 'FULL_DAY';
+
+import { useClinicalRef } from '../clinical-ref/useClinicalRef';
+import { ClinicalRefSidebar } from '../clinical-ref/ClinicalRefSidebar';
+import { useEliteStore } from '../../stores/useEliteStore';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
+
+interface Patient {
+  id: number;
+  nom: string;
+  prenom: string;
+  numero_dossier?: string;
+}
+
+interface ClinicalAct {
+  id: number;
+  name: string;
+  base_price: number;
+}
+
+interface AgendaModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+  selectedDate: Date | null;
+  initialTime?: string;
+  editingAppointment?: any;
+  // Préremplissage du patient à l'ouverture (ex. CTA "Prendre RDV" depuis le
+  // dossier patient) — 3 props distinctes plutôt qu'une chaîne concaténée, pour
+  // ne jamais avoir à re-splitter un nom composé.
+  initialPatientId?: number;
+  initialPatientNom?: string;
+  initialPatientPrenom?: string;
+}
+
+export const AgendaModal: React.FC<AgendaModalProps> = ({ isOpen, onClose, onSaved, selectedDate, initialTime, editingAppointment, initialPatientId, initialPatientNom, initialPatientPrenom }) => {
+  const navigate = useNavigate();
+  const { fetchPatientIntelligence, fetchSuggestedAppointment, suggestedAppointment, isLoading: isLoadingSuggested } = useEliteStore();
+  const [patientSearch, setPatientSearch] = useState('');
+  const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
+  const [patientsList, setPatientsList] = useState<Patient[]>([]);
+  const [showPatientResults, setShowPatientResults] = useState(false);
+
+  
+  const [actSearch, setActSearch] = useState('');
+  const [selectedAct, setSelectedAct] = useState<ClinicalAct | null>(null);
+  const [actsList, setActsList] = useState<ClinicalAct[]>([]);
+  const [showActResults, setShowActResults] = useState(false);
+  // Ajout d'un acte absent au catalogue (nom + tarif + catégorie)
+  const [showAddActForm, setShowAddActForm] = useState(false);
+  const [newActPrice, setNewActPrice] = useState('');
+  const [newActCategory, setNewActCategory] = useState('');
+  const [specialties, setSpecialties] = useState<{ id: number; name: string }[]>([]);
+
+  const [motif, setMotif] = useState('');
+  const [time, setTime] = useState(initialTime || '09:00');
+  const [duration, setDuration] = useState(30);
+  const [status, setStatus] = useState<AppointmentStatus>('PRÉVU');
+  const [schedulingType, setSchedulingType] = useState<SchedulingType>('EXACT_TIME');
+  const [loading, setLoading] = useState(false);
+  const [dateValue, setDateValue] = useState('');
+  const [conflicts, setConflicts] = useState<any[]>([]);
+  const [smartIntel, setSmartIntel] = useState<any>(null);
+  const [loadingIntel, setLoadingIntel] = useState(false);
+  const [showGhostPanel, setShowGhostPanel] = useState(false);
+  const initializedFormKeyRef = useRef<string | null>(null);
+  
+  const protocol = useClinicalRef(selectedAct?.name || actSearch);
+  const [showClinicalRef, setShowClinicalRef] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) setShowGhostPanel(false);
+  }, [isOpen]);
+
+  useEscapeKey(isOpen, onClose);
+
+  useEffect(() => {
+    if (protocol) {
+      setShowClinicalRef(true);
+    } else {
+      setShowClinicalRef(false);
+    }
+  }, [protocol]);
+
+
+  useEffect(() => {
+    if (!isOpen) {
+      initializedFormKeyRef.current = null;
+      return;
+    }
+
+    const formKey = editingAppointment ? `edit:${editingAppointment.id}` : 'create';
+    if (initializedFormKeyRef.current === formKey) return;
+    initializedFormKeyRef.current = formKey;
+
+    if (editingAppointment) {
+        const d = new Date(editingAppointment.datetime_start);
+        setDateValue(formatAgendaWallClock(d).slice(0, 10));
+        setTime(`${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`);
+        setDuration(editingAppointment.duration_minutes);
+        setMotif(editingAppointment.motif || '');
+        setActSearch(editingAppointment.motif || '');
+        setSelectedAct(null);
+        setStatus(editingAppointment.status);
+        if (editingAppointment.patient_id) {
+          setSelectedPatient({ id: editingAppointment.patient_id, nom: editingAppointment.patient_name?.split(' ')[0] || '', prenom: editingAppointment.patient_name?.split(' ')[1] || '' });
+          setPatientSearch('');
+        } else {
+          setSelectedPatient(null);
+          setPatientSearch(editingAppointment.patient_name || '');
+        }
+      } else {
+        setDateValue(selectedDate ? formatAgendaWallClock(selectedDate).slice(0, 10) : formatAgendaWallClock(new Date()).slice(0, 10));
+        setTime(initialTime || '09:00');
+        setDuration(30);
+        setMotif('');
+        setActSearch('');
+        setSelectedAct(null);
+        setStatus('PRÉVU');
+        setSchedulingType('EXACT_TIME');
+        if (initialPatientId) {
+          setSelectedPatient({ id: initialPatientId, nom: initialPatientNom || '', prenom: initialPatientPrenom || '' });
+          setPatientSearch(`${initialPatientPrenom || ''} ${initialPatientNom || ''}`.trim());
+        } else {
+          setSelectedPatient(null);
+          setPatientSearch('');
+        }
+      }
+  }, [isOpen, editingAppointment, initialTime, selectedDate, initialPatientId, initialPatientNom, initialPatientPrenom]);
+
+
+  const patientRef = useRef<HTMLDivElement>(null);
+  const actRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (patientSearch.length > 1 && !selectedPatient) {
+      const fetchPatients = async () => {
+        try {
+          const res = await api.get('/patients/', { params: { limit: 10, search: patientSearch } });
+          const filtered = res.data.filter((p: Patient) => 
+            `${p.nom} ${p.prenom}`.toLowerCase().includes(patientSearch.toLowerCase()) ||
+            p.numero_dossier?.toLowerCase().includes(patientSearch.toLowerCase())
+          );
+          setPatientsList(filtered.length > 0 ? filtered : res.data);
+          setShowPatientResults(true);
+        } catch (e) {
+          console.error(e);
+        }
+      };
+      fetchPatients();
+    } else {
+      setShowPatientResults(false);
+    }
+  }, [patientSearch, selectedPatient]);
+
+  useEffect(() => {
+    if (selectedPatient && showGhostPanel) {
+      setLoadingIntel(true);
+      api.get(`/patients/${selectedPatient.id}/appointment-intel`)
+        .then(res => setSmartIntel(res.data))
+        .catch(e => console.error(e))
+        .finally(() => setLoadingIntel(false));
+      fetchPatientIntelligence(selectedPatient.id).catch(e => console.error(e));
+      fetchSuggestedAppointment(selectedPatient.id).catch(e => console.error(e));
+    } else if (!selectedPatient) {
+      setSmartIntel(null);
+      setShowGhostPanel(false);
+    }
+  }, [selectedPatient, showGhostPanel, fetchPatientIntelligence, fetchSuggestedAppointment]);
+
+  const applySmartIntel = () => {
+    if (smartIntel) {
+      setMotif(smartIntel.suggestion);
+      setDuration(smartIntel.duration);
+      if (!selectedAct) {
+          setActSearch(smartIntel.suggestion);
+      }
+    }
+  };
+
+  const applyClinicalSuggestion = () => {
+    if (suggestedAppointment) {
+      setMotif(suggestedAppointment.motif || '');
+      setDuration(suggestedAppointment.duration_minutes || 30);
+      setActSearch(suggestedAppointment.motif || '');
+      if (suggestedAppointment.motif) {
+        api.get('/actes/catalog/search', { params: { q: suggestedAppointment.motif } })
+          .then(res => {
+            if (res.data && res.data.length > 0) {
+              const exactMatch = res.data.find((a: any) => a.name.toLowerCase() === suggestedAppointment.motif.toLowerCase());
+              if (exactMatch) {
+                setSelectedAct(exactMatch);
+              }
+            }
+          })
+          .catch(e => console.error(e));
+      }
+    }
+  };
+
+  const openWhatsApp = () => {
+    if (!selectedPatient) return;
+    const dateStr = selectedDate?.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+    const msg = `Bonjour ${selectedPatient.prenom}, votre rendez-vous pour ${motif || actSearch || 'votre soin'} est confirmé pour le ${dateStr} à ${time}. À bientôt !`;
+    window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
+  };
+
+
+  useEffect(() => {
+    const fetchActs = async () => {
+      try {
+        const res = await api.get('/actes/catalog/search', { params: { q: actSearch } });
+        setActsList(res.data);
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    if (isOpen && !selectedAct) {
+      fetchActs();
+    }
+  }, [actSearch, selectedAct, isOpen]);
+
+  // Charge les catégories (spécialités) du catalogue pour le sélecteur d'ajout
+  useEffect(() => {
+    if (!isOpen) return;
+    api.get('/catalog/specialties').then(r => setSpecialties(r.data || [])).catch(() => {});
+  }, [isOpen]);
+
+  // Liste des catégories proposées (spécialités existantes + DIVERS)
+  const categoryOptions = (() => {
+    const names = specialties.map(s => s.name);
+    return names.includes('DIVERS') ? names : [...names, 'DIVERS'];
+  })();
+
+  const openAddActForm = () => {
+    setNewActPrice('');
+    setNewActCategory(specialties[0]?.name || 'DIVERS');
+    setShowAddActForm(true);
+  };
+
+  // Ajoute au catalogue un acte saisi mais absent (avec catégorie), puis le sélectionne
+  const handleAddActToCatalog = async () => {
+    const name = actSearch.trim();
+    if (!name) return;
+    const base_price = parseFloat((newActPrice || '0').replace(',', '.')) || 0;
+    try {
+      const res = await api.post('/actes/catalog/quick-add', { name, base_price, category: newActCategory });
+      setSelectedAct({ id: res.data.id, name: res.data.name, base_price: res.data.base_price });
+      setShowAddActForm(false);
+      setShowActResults(false);
+      toast.success(`« ${res.data.name} » ajouté (${res.data.category})`);
+    } catch (e) {
+      toast.error("Erreur lors de l'ajout de l'acte");
+    }
+  };
+
+  useEffect(() => {
+    const actName = selectedAct ? selectedAct.name : actSearch;
+    if (actName && actName.trim().length > 1) {
+      const fetchRecommendedDuration = async () => {
+        try {
+          const res = await api.get('/actes/duration', { params: { q: actName } });
+          if (res.data && res.data.duration) {
+            setDuration(res.data.duration);
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      };
+      const timer = setTimeout(() => {
+        fetchRecommendedDuration();
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [selectedAct, actSearch]);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (patientRef.current && !patientRef.current.contains(event.target as Node)) setShowPatientResults(false);
+      if (actRef.current && !actRef.current.contains(event.target as Node)) setShowActResults(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Détection de chevauchements en temps réel
+  useEffect(() => {
+    if (!isOpen || !dateValue || !time || schedulingType !== 'EXACT_TIME') { setConflicts([]); return; }
+    const timer = setTimeout(async () => {
+      try {
+        const [h, m] = time.split(':').map(Number);
+        const dt = new Date(`${dateValue}T00:00:00`);
+        dt.setHours(h, m, 0, 0);
+        const res = await api.get('/appointments/check-conflicts', {
+          params: {
+            datetime_start: formatAgendaWallClock(dt),
+            duration_minutes: duration,
+            ...(editingAppointment ? { exclude_id: editingAppointment.id } : {}),
+          }
+        });
+        setConflicts(res.data.conflicts || []);
+      } catch { setConflicts([]); }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [dateValue, time, duration, schedulingType, isOpen, editingAppointment]);
+
+  if (!isOpen) return null;
+
+  const handleDelete = async () => {
+    if (!editingAppointment) return;
+    if (!window.confirm('Supprimer ce rendez-vous ?')) return;
+    try {
+      await api.delete(`/appointments/${editingAppointment.id}`);
+      onSaved();
+      onClose();
+    } catch (err) {
+      alert('Erreur lors de la suppression.');
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!dateValue) return;
+    
+    setLoading(true);
+    try {
+      const [hours, minutes] = time.split(':').map(Number);
+      const startDateTime = new Date(`${dateValue}T00:00:00`);
+      startDateTime.setHours(hours, minutes, 0, 0);
+
+      const payload = {
+        patient_id: selectedPatient?.id || null,
+        patient_name: selectedPatient ? `${selectedPatient.nom} ${selectedPatient.prenom}` : patientSearch,
+        motif: selectedAct ? selectedAct.name : (actSearch || motif),
+        datetime_start: formatAgendaWallClock(startDateTime),
+        duration_minutes: duration,
+        status: status,
+        scheduling_type: schedulingType
+      };
+
+      if (editingAppointment) {
+          await api.put(`/appointments/${editingAppointment.id}`, payload);
+      } else {
+          await api.post('/appointments/', payload);
+      }
+
+      toast.success(editingAppointment ? 'Rendez-vous modifié.' : 'Rendez-vous créé.');
+      onSaved();
+      onClose();
+      setPatientSearch('');
+      setSelectedPatient(null);
+      setActSearch('');
+      setSelectedAct(null);
+      setMotif('');
+      setTime('09:00');
+      setDuration(30);
+      setStatus('PRÉVU');
+      setSchedulingType('EXACT_TIME');
+    } catch (err: any) {
+      console.error("Erreur saving appt", err);
+      // The real appointment API returns 409.detail as {message, conflicts}.
+      // Never pass that object directly into toast (React child/render error).
+      const detail = err?.response?.data?.detail;
+      const errorText = typeof detail === 'string'
+        ? detail
+        : detail && typeof detail.message === 'string'
+          ? detail.message
+          : 'Erreur lors de la sauvegarde du rendez-vous.';
+      toast.error(err?.response?.status === 409
+        ? `${errorText} Choisissez un autre créneau avant de réessayer.`
+        : errorText);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label={editingAppointment ? "Modifier le Rendez-vous" : "Nouveau Rendez-vous"} className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[100] flex items-center justify-center p-4 sm:p-4 animate-in fade-in duration-300">
+      <div className="bg-card/90 backdrop-blur-2xl rounded-[1.5rem] sm:rounded-[2.5rem] shadow-2xl w-full max-w-xl overflow-hidden animate-in zoom-in-95 duration-300 border border-white flex flex-col max-h-[95vh]">
+
+        <div className="flex justify-between items-center p-4 sm:p-8 border-b border-border-main bg-background/50">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 bg-blue-500 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-blue-500/20">
+              {editingAppointment ? <Clock size={24} /> : <Plus size={24} />}
+            </div>
+            <div>
+              <h2 className="text-2xl font-black text-[#003380] tracking-tight">
+                  {editingAppointment ? "Modifier le Rendez-vous" : "Nouveau Rendez-vous"}
+              </h2>
+              <p className="text-text-muted text-sm font-bold">Planification clinique</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-3 bg-card text-text-muted hover:text-danger rounded-full shadow-sm border border-border-main transition-all hover:rotate-90" aria-label="Fermer">
+            <X size={20} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-4 sm:p-8 space-y-6 sm:space-y-8 flex-1 overflow-y-auto custom-scrollbar">
+          <div className="space-y-6">
+            
+            {/* PATIENT SEARCH */}
+            <div className="relative" ref={patientRef}>
+              <label className="text-[10px] font-black text-text-muted uppercase tracking-widest block mb-3 ml-1">Patient</label>
+              <div className="relative group">
+                {selectedPatient ? (
+                  <div className="w-full flex items-center justify-between pl-12 pr-4 py-4 bg-blue-50/50 border-2 border-blue-500 rounded-2xl text-sm font-black text-[#003380]">
+                    <div className="flex items-center gap-2">
+                      <User className="absolute left-4 text-blue-500" size={20} />
+                      <span>{selectedPatient.nom} {selectedPatient.prenom}</span>
+                      <span className="text-[10px] bg-blue-200 px-1.5 py-0.5 rounded text-blue-700">{selectedPatient.numero_dossier}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button type="button" onClick={() => { onClose(); navigate(`/patients/${selectedPatient.id}/edit`); }} className="text-[9px] font-black text-blue-400 hover:text-blue-600 uppercase tracking-widest transition-colors">Modifier</button>
+                      <button type="button" onClick={() => setSelectedPatient(null)} className="text-blue-400 hover:text-danger transition-colors">
+                        <X size={18} />
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted group-focus-within:text-blue-500 transition-colors" size={18} />
+                    <input 
+                      type="text" 
+                      required
+                      placeholder="Rechercher ou saisir un nom..."
+                      value={patientSearch}
+                      onChange={e => setPatientSearch(e.target.value)}
+                      className="w-full pl-12 pr-4 py-4 bg-background border border-border-main rounded-2xl text-sm font-bold text-text-main outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 focus:bg-card transition-all"
+                    />
+                  </>
+                )}
+              </div>
+              
+              {showPatientResults && (
+                <div className="absolute top-full left-0 right-0 mt-2 bg-card rounded-2xl shadow-2xl border border-border-main z-[110] max-h-60 overflow-y-auto animate-in slide-in-from-top-2 duration-200">
+                  {patientsList.length > 0 ? patientsList.map(p => (
+                    <button 
+                      key={p.id}
+                      type="button"
+                      onClick={() => { setSelectedPatient(p); setShowPatientResults(false); }}
+                      className="w-full flex items-center gap-4 px-6 py-4 hover:bg-background transition-colors border-b border-border-main last:border-0"
+                    >
+                      <div className="w-10 h-10 bg-input-field rounded-xl flex items-center justify-center text-text-muted font-black">{p.nom[0]}</div>
+                      <div className="text-left">
+                        <div className="text-sm font-black text-text-main">{p.nom} {p.prenom}</div>
+                        <div className="text-[10px] font-bold text-text-muted">Dossier: {p.numero_dossier}</div>
+                      </div>
+                      <Check className="ml-auto text-success opacity-0 group-hover:opacity-100" size={18} />
+                    </button>
+                  )) : (
+                    <div className="p-6 text-center">
+                      <p className="text-sm text-text-muted font-bold mb-2">Aucun patient trouvé</p>
+                      <button type="button" onClick={() => { setShowPatientResults(false); onClose(); navigate('/patients/new'); }} className="text-xs text-blue-500 font-black uppercase tracking-widest">Créer Patient Externe</button>
+                    </div>
+                  )}
+                </div>
+              )}
+              {/* BOUTON GHOST INTELLIGENCE - ON DEMAND */}
+              {selectedPatient && !showGhostPanel && (
+                <button
+                  type="button"
+                  onClick={() => setShowGhostPanel(true)}
+                  className="mt-3 flex items-center gap-2 px-3 py-1.5 text-text-muted hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-all text-[10px] font-black uppercase tracking-widest"
+                >
+                  <Ghost size={13} /> Suggestions
+                </button>
+              )}
+
+              {/* SMART INTEL CARD (GHOST ELITE INTELLIGENCE HUB) */}
+              {(selectedPatient && showGhostPanel && (smartIntel || suggestedAppointment || loadingIntel || isLoadingSuggested)) && (
+                <div className="mt-6 p-5 bg-gradient-to-br from-slate-50 to-blue-50/20 border border-border-main rounded-[2rem] shadow-sm animate-in slide-in-from-top-4 duration-300">
+                  <div className="flex justify-between items-center mb-4 pb-3 border-b border-border-main">
+                    <div className="flex items-center gap-2 text-[#003380]">
+                      <div className="w-7 h-7 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-md shadow-blue-500/10">
+                        <Sparkles size={14} className={cn((loadingIntel || isLoadingSuggested) && "animate-pulse")} />
+                      </div>
+                      <span className="text-[10px] font-black uppercase tracking-widest">
+                        {(loadingIntel || isLoadingSuggested) ? "Analyse en cours..." : "Suggestions"}
+                      </span>
+                    </div>
+                    {smartIntel?.solde_attente > 0 && (
+                      <span className="flex items-center gap-1.5 bg-danger-surface border border-danger-border text-danger px-3 py-1 rounded-xl text-[10px] font-black tracking-tight">
+                        <AlertCircle size={12} />
+                        RESTE À PAYER : {smartIntel.solde_attente} MAD
+                      </span>
+                    )}
+                  </div>
+                  
+                  {(loadingIntel || isLoadingSuggested) ? (
+                    <div className="py-6 flex items-center justify-center">
+                        <div className="flex gap-1.5">
+                            <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce"></div>
+                            <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+                            <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+                        </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-3 animate-in fade-in duration-200">
+                      
+                      {/* OPTION CLINIQUE - SMART BOOKING (PLAN DE TRAITEMENT) */}
+                      {suggestedAppointment && (
+                        <div className="bg-card/80 border border-border-main rounded-2xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 hover:border-blue-200 transition-all group">
+                          <div className="space-y-1">
+                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg bg-blue-50 border border-blue-100 text-blue-700 text-[9px] font-black uppercase tracking-wider">
+                              Plan Clinique Actif
+                            </span>
+                            <p className="text-sm font-black text-text-main tracking-tight group-hover:text-blue-900 transition-colors">
+                              {suggestedAppointment.motif}
+                            </p>
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-muted font-bold">
+                              <span className="flex items-center gap-1 text-text-muted">
+                                <Clock size={12} className="text-blue-500" />
+                                {suggestedAppointment.duration_minutes} min
+                              </span>
+                              {suggestedAppointment.notes && (
+                                <span className="text-text-muted italic">
+                                  — {suggestedAppointment.notes}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <button 
+                            type="button"
+                            onClick={applyClinicalSuggestion}
+                            className="w-full sm:w-auto px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black rounded-xl transition-all shadow-sm flex items-center justify-center gap-1 hover:scale-[1.02] active:scale-[0.98]"
+                          >
+                            Planifier <ArrowRight size={12} />
+                          </button>
+                        </div>
+                      )}
+
+                      {/* OPTION ADMINISTRATIVE (DEVIS / OPPORTUNITÉ LOCALE) */}
+                      {smartIntel && smartIntel.suggestion && (!suggestedAppointment || smartIntel.suggestion !== suggestedAppointment.motif) && (
+                        <div className="bg-card/80 border border-border-main rounded-2xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 hover:border-success-border transition-all group">
+                          <div className="space-y-1">
+                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg bg-success-surface border border-success-border text-success text-[9px] font-black uppercase tracking-wider">
+                              Proposition Devis
+                            </span>
+                            <p className="text-sm font-black text-text-main tracking-tight group-hover:text-success transition-colors">
+                              {smartIntel.suggestion}
+                            </p>
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-muted font-bold">
+                              <span className="flex items-center gap-1 text-text-muted">
+                                <Clock size={12} className="text-success" />
+                                {smartIntel.duration} min
+                              </span>
+                              <span className="text-text-muted">
+                                — Basé sur l'historique administratif
+                              </span>
+                            </div>
+                          </div>
+                          <button 
+                            type="button"
+                            onClick={applySmartIntel}
+                            className="w-full sm:w-auto px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-black rounded-xl transition-all shadow-sm flex items-center justify-center gap-1 hover:scale-[1.02] active:scale-[0.98]"
+                          >
+                            Appliquer <ArrowRight size={12} />
+                          </button>
+                        </div>
+                      )}
+
+                    </div>
+                  )}
+                </div>
+              )}
+
+            </div>
+
+
+            {/* ACT / MOTIF SEARCH */}
+            <div className="relative" ref={actRef}>
+              <label className="text-[10px] font-black text-text-muted uppercase tracking-widest block mb-3 ml-1">Acte / Motif</label>
+              <div className="relative group">
+                {selectedAct ? (
+                  <div className="w-full flex items-center justify-between pl-12 pr-4 py-4 bg-success-surface/50 border-2 border-emerald-500 rounded-2xl text-sm font-black text-success">
+                    <div className="flex items-center gap-2">
+                      <FileText className="absolute left-4 text-success" size={20} />
+                      <span>{selectedAct.name}</span>
+                    </div>
+                    <button type="button" onClick={() => setSelectedAct(null)} className="text-success hover:text-danger transition-colors">
+                      <X size={18} />
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <FileText className="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted group-focus-within:text-blue-500 transition-colors" size={18} />
+                    <input 
+                      type="text" 
+                      required
+                      placeholder="Saisir l'acte ou rechercher dans le catalogue..."
+                      value={actSearch}
+                      onChange={e => setActSearch(e.target.value)}
+                      onFocus={() => setShowActResults(true)}
+                      className="w-full pl-12 pr-4 py-4 bg-background border border-border-main rounded-2xl text-sm font-bold text-text-main outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 focus:bg-card transition-all"
+                    />
+                  </>
+                )}
+              </div>
+              
+              {showActResults && (
+                <div className="absolute top-full left-0 right-0 mt-2 bg-card rounded-2xl shadow-2xl border border-border-main z-[110] max-h-60 overflow-y-auto animate-in slide-in-from-top-2 duration-200">
+                  {actsList.map(act => (
+                    <button
+                      key={act.id}
+                      type="button"
+                      onClick={() => { setSelectedAct(act); setShowActResults(false); }}
+                      className="w-full flex items-center justify-between px-6 py-4 hover:bg-background transition-colors border-b border-border-main last:border-0"
+                    >
+                      <div className="text-left">
+                        <div className="text-sm font-black text-text-main">{act.name}</div>
+                      </div>
+                    </button>
+                  ))}
+
+                  {/* Acte absent du catalogue → proposer de l'ajouter */}
+                  {actSearch.trim().length >= 2 &&
+                    !actsList.some(a => a.name.toLowerCase() === actSearch.trim().toLowerCase()) &&
+                    !showAddActForm && (
+                    <button
+                      type="button"
+                      onClick={openAddActForm}
+                      className="w-full flex items-center gap-3 px-6 py-4 bg-blue-50/60 hover:bg-blue-100 transition-colors text-left border-t border-border-main"
+                    >
+                      <Plus size={18} className="text-blue-600 shrink-0" />
+                      <span className="text-sm font-black text-blue-700">
+                        Ajouter « {actSearch.trim()} » aux actes
+                      </span>
+                    </button>
+                  )}
+
+                  {/* Panneau d'ajout : tarif + catégorie */}
+                  {showAddActForm && (
+                    <div className="p-4 space-y-3 border-t border-border-main bg-background/60">
+                      <div className="text-sm font-black text-text-main">Ajouter « {actSearch.trim()} »</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label htmlFor="agenda-quick-act-price" className="text-[9px] font-black text-text-muted uppercase tracking-widest block mb-1">Tarif (DHS)</label>
+                          <input
+                            id="agenda-quick-act-price"
+                            type="number" min={0} value={newActPrice}
+                            onChange={e => setNewActPrice(e.target.value)}
+                            placeholder="0"
+                            className="w-full px-3 py-2 bg-card border border-border-main rounded-xl text-sm font-bold outline-none focus:border-blue-500"
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor="agenda-quick-act-category" className="text-[9px] font-black text-text-muted uppercase tracking-widest block mb-1">Catégorie</label>
+                          <select
+                            id="agenda-quick-act-category"
+                            value={newActCategory}
+                            onChange={e => setNewActCategory(e.target.value)}
+                            className="w-full px-3 py-2 bg-card border border-border-main rounded-xl text-sm font-bold outline-none focus:border-blue-500"
+                          >
+                            {categoryOptions.map(c => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          type="button" onClick={handleAddActToCatalog}
+                          className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-black rounded-xl transition-colors"
+                        >
+                          Ajouter au catalogue
+                        </button>
+                        <button
+                          type="button" onClick={() => setShowAddActForm(false)}
+                          className="px-4 py-2 bg-input-field hover:bg-slate-300 text-text-main text-xs font-bold rounded-xl transition-colors"
+                        >
+                          Annuler
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
+              <div>
+                <label className="text-[10px] font-black text-text-muted uppercase tracking-widest block mb-3 ml-1">Date</label>
+                <div className="relative">
+                  <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted" size={18} />
+                  <input 
+                    type="date" 
+                    required
+                    value={dateValue}
+                    onChange={e => setDateValue(e.target.value)}
+                    className="w-full pl-12 pr-4 py-4 bg-background border border-border-main rounded-2xl text-sm font-black text-[#003380] outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all font-mono"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label className="text-[10px] font-black text-text-muted uppercase tracking-widest block mb-3 ml-1">Type de Planification</label>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {(['EXACT_TIME', 'MORNING', 'AFTERNOON', 'FULL_DAY'] as SchedulingType[]).map(t => {
+                  const labels: Record<string, string> = {
+                    'EXACT_TIME': '🕒 Heure Précise', 'MORNING': '🌅 Matin', 'AFTERNOON': '🌆 Après-Midi', 'FULL_DAY': '📅 Toute la journée'
+                  };
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setSchedulingType(t)}
+                      className={cn(
+                        "py-3 px-2 rounded-xl text-[10px] font-black tracking-tight transition-all border flex items-center justify-center gap-1.5",
+                        schedulingType === t
+                          ? "bg-blue-500 border-blue-500 text-white shadow-lg shadow-blue-500/20"
+                          : "bg-card text-text-muted border-border-main hover:border-border-hover hover:bg-background"
+                      )}
+                    >
+                      {labels[t]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {schedulingType === 'EXACT_TIME' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6 animate-in fade-in slide-in-from-top-2 duration-300">
+                <div>
+                  <label className="text-[10px] font-black text-text-muted uppercase tracking-widest block mb-3 ml-1">Début</label>
+                  <div className="relative">
+                    <Clock className="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted" size={18} />
+                    <input 
+                      type="time" 
+                      required
+                      value={time}
+                      onChange={e => setTime(e.target.value)}
+                      className="w-full pl-12 pr-4 py-4 bg-background border border-border-main rounded-2xl text-sm font-black text-[#003380] outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-text-muted uppercase tracking-widest block mb-3 ml-1">Durée Prévue</label>
+                  <select 
+                    value={duration} 
+                    onChange={e => setDuration(Number(e.target.value))}
+                    className="w-full px-4 py-4 bg-background border border-border-main rounded-2xl text-sm font-black text-text-main outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all appearance-none"
+                  >
+                    <option value={15}>15 min (Contrôle)</option>
+                    <option value={30}>30 min (Standard)</option>
+                    <option value={45}>45 min</option>
+                    <option value={60}>1 heure (Soin long)</option>
+                    <option value={90}>1h30 (Chirurgie)</option>
+                    <option value={120}>2 heures</option>
+                  </select>
+                </div>
+              </div>
+            )}
+
+
+            <div>
+              <label className="text-[10px] font-black text-text-muted uppercase tracking-widest block mb-3 ml-1">Statut Initial</label>
+              <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+                {(['PRÉVU', 'EN_S_ATTENTE', 'EN_FAUTEUIL', 'TERMINÉ', 'ANNULÉ', 'EN_ATTENTE_DEMANDE', 'EN_ATTENTE_CONFIRM', 'CONFIRMÉ', 'REFUSÉ', 'EXPIRÉ', 'ABSENT'] as AppointmentStatus[]).map(s => {
+                  const labels: Record<string, string> = {
+                    'PRÉVU': 'Prévu', 'EN_S_ATTENTE': 'Attente', 'EN_FAUTEUIL': 'Fauteuil',
+                    'TERMINÉ': 'Terminé', 'ANNULÉ': 'Annulé',
+                    'EN_ATTENTE_DEMANDE': 'Demande', 'EN_ATTENTE_CONFIRM': 'Confir?', 'CONFIRMÉ': 'Confirmé',
+                    'REFUSÉ': 'Refusé', 'EXPIRÉ': 'Expiré', 'ABSENT': 'Absent',
+                  };
+                  const colors: Record<string, string> = {
+                    'PRÉVU': 'bg-[#003380] border-[#003380] shadow-blue-900/20',
+                    'EN_S_ATTENTE': 'bg-amber-500 border-amber-500 shadow-amber-500/20',
+                    'EN_FAUTEUIL': 'bg-emerald-600 border-emerald-600 shadow-emerald-600/20',
+                    'TERMINÉ': 'bg-slate-500 border-border-hover shadow-slate-500/20',
+                    'ANNULÉ': 'bg-rose-500 border-rose-500 shadow-rose-500/20',
+                    'EN_ATTENTE_DEMANDE': 'bg-orange-500 border-orange-500 shadow-orange-500/20',
+                    'EN_ATTENTE_CONFIRM': 'bg-yellow-500 border-yellow-500 shadow-yellow-500/20',
+                    'CONFIRMÉ': 'bg-blue-600 border-blue-600 shadow-blue-600/20',
+                    'REFUSÉ': 'bg-red-500 border-red-500 shadow-red-500/20',
+                    'EXPIRÉ': 'bg-gray-500 border-border-hover shadow-gray-500/20',
+                    'ABSENT': 'bg-rose-600 border-rose-600 shadow-rose-600/20',
+                  };
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setStatus(s)}
+                      className={cn(
+                        "py-2.5 px-1 rounded-xl text-[9px] font-black uppercase tracking-tighter transition-all border",
+                        status === s
+                          ? `${colors[s]} text-white shadow-lg`
+                          : "bg-card text-text-muted border-border-main hover:border-border-hover"
+                      )}
+                    >
+                      {labels[s]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+          </div>
+
+          <div className="pt-6 sm:pt-8 flex flex-col sm:flex-row justify-between items-center gap-4 border-t border-border-main">
+            <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-start">
+              {selectedPatient && (
+                <button
+                  type="button"
+                  onClick={openWhatsApp}
+                  className="flex items-center gap-2 text-success hover:text-success font-black text-xs transition-colors"
+                >
+                  <MessageCircle size={16} /> Rappel WhatsApp
+                </button>
+              )}
+              {editingAppointment && (
+                <button
+                  type="button"
+                  onClick={handleDelete}
+                  className="flex items-center gap-2 text-danger hover:text-danger font-black text-xs transition-colors"
+                >
+                  <Trash2 size={16} /> Supprimer
+                </button>
+              )}
+            </div>
+            <div className="flex flex-col w-full sm:w-auto gap-3">
+              {conflicts.length > 0 && (
+                <div className="flex items-start gap-2 px-3 py-2 bg-warning-surface border border-warning-border rounded-xl text-[10px] font-bold text-warning">
+                  <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                  <span>
+                    Chevauchement avec {conflicts.length} RDV :&nbsp;
+                    {conflicts.map(c => `${c.patient_name || 'Patient'} (${new Date(c.datetime_start).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })})`).join(', ')}
+                  </span>
+                </div>
+              )}
+              <div className="flex gap-4">
+                <button type="button" onClick={onClose} className="w-1/2 sm:w-auto px-6 sm:px-8 py-3 sm:py-4 text-text-muted hover:text-text-main hover:bg-background rounded-2xl font-black transition-all">
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-1/2 sm:w-auto px-6 sm:px-10 py-3 sm:py-4 bg-gradient-to-r from-[#003380] to-[#0055d4] text-white rounded-2xl font-black hover:shadow-2xl hover:shadow-blue-900/30 hover:-translate-y-1 transition-all flex items-center justify-center gap-2 sm:gap-3 disabled:opacity-50 text-xs sm:text-base"
+                >
+                  {loading ? (
+                    <><Clock className="animate-spin" size={20} /> Création...</>
+                  ) : (
+                    <><Check size={20} /> {editingAppointment ? "Modifier le RDV" : "Confirmer le RDV"}</>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+
+        </form>
+      </div>
+
+      {protocol && (
+        <ClinicalRefSidebar 
+          protocol={protocol} 
+          isOpen={showClinicalRef} 
+          onClose={() => setShowClinicalRef(false)} 
+        />
+      )}
+    </div>
+  );
+};

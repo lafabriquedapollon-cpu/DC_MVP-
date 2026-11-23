@@ -1,0 +1,211 @@
+import { useEffect, useRef, useState } from 'react';
+import { CalendarPlus, Camera, ScanLine, UserPlus, X, Plus } from 'lucide-react';
+import type { MobileQuickActionCapabilities } from '../hooks/useMobileQuickActionCapabilities';
+
+export type MobileQuickPatientAction = 'photo' | 'scan';
+
+export function MobileQuickActionHub({
+  capabilities,
+  capabilitiesLoaded = true,
+  isOnline,
+  defaultOpen = false,
+  open: controlledOpen,
+  onOpenChange,
+  hideLauncher = false,
+  onNewAppointment,
+  onNewPatient,
+  onPatientAction,
+}: {
+  capabilities: MobileQuickActionCapabilities;
+  capabilitiesLoaded?: boolean;
+  isOnline: boolean;
+  defaultOpen?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  hideLauncher?: boolean;
+  onNewAppointment: () => void;
+  onNewPatient: () => void;
+  onPatientAction: (action: MobileQuickPatientAction) => void;
+}) {
+  const [internalOpen, setInternalOpen] = useState(defaultOpen);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const open = controlledOpen ?? internalOpen;
+  const hasAnyAction = capabilities.can_create_appointment
+    || capabilities.can_create_patient
+    || capabilities.can_open_clinical_context;
+
+  const setOpen = (next: boolean) => {
+    if (controlledOpen === undefined) setInternalOpen(next);
+    onOpenChange?.(next);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+
+    previousFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+
+    const dialog = dialogRef.current;
+    const focusable = Array.from(dialog?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) ?? []);
+    (focusable[0] ?? dialog)?.focus();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setOpen(false);
+        return;
+      }
+      if (event.key !== 'Tab' || !dialog) return;
+
+      const currentFocusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ));
+      if (currentFocusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const first = currentFocusable[0];
+      const last = currentFocusable[currentFocusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      const active = document.activeElement;
+      if (
+        previousFocusRef.current
+        && (active === document.body || (active instanceof Node && dialog?.contains(active)))
+      ) {
+        previousFocusRef.current.focus();
+      }
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (capabilitiesLoaded && !hasAnyAction && open) setOpen(false);
+  }, [capabilitiesLoaded, hasAnyAction, open]);
+
+  const run = (action: () => void) => {
+    if (!isOnline) return;
+    setOpen(false);
+    action();
+  };
+
+  if (!capabilitiesLoaded || !hasAnyAction) return null;
+
+  return (
+    <>
+      {open && (
+        <div className="fixed inset-0 z-[60]" data-mobile-quick-action-hub>
+          <button
+            type="button"
+            aria-label="Fermer le fond des actions rapides"
+            className="absolute inset-0 backdrop-blur-[2px]"
+            style={{ backgroundColor: 'color-mix(in srgb, var(--text-main) 23%, transparent)' }}
+            onClick={() => setOpen(false)}
+          />
+
+          <section
+            ref={dialogRef}
+            tabIndex={-1}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mobile-quick-action-title"
+            className="absolute left-3 right-3 bottom-[calc(104px+env(safe-area-inset-bottom))] mx-auto max-w-[720px] rounded-[24px] border border-glass-border bg-card p-4 shadow-elite-hover"
+            style={{
+              backgroundColor: 'var(--glass-bg)',
+              fontFamily: 'var(--app-font-family, "Inter", system-ui, sans-serif)',
+            }}
+          >
+            <div className="mx-auto mb-2 h-[5px] w-[68px] rounded-full bg-border-main" aria-hidden="true" />
+            <div className="mb-2.5">
+              <h2 id="mobile-quick-action-title" className="text-[18px] leading-[23px] font-bold text-text-main">Action rapide</h2>
+              <p className="mt-1 text-[11px] leading-[17px] font-medium text-text-muted">Digital Crown Pocket · accès clinique rapide</p>
+            </div>
+
+            {!isOnline && (
+              <div className="mb-2.5 rounded-[16px] border border-warning-border bg-warning-surface px-3 py-2 text-[10px] font-black text-warning">
+                Connexion cabinet requise pour créer ou enregistrer une action.
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-2.5">
+              {capabilities.can_create_appointment && (
+                <button
+                  type="button"
+                  disabled={!isOnline}
+                  onClick={() => run(onNewAppointment)}
+                  className="min-h-[65px] rounded-[18px] border border-primary/20 bg-primary/10 p-2.5 text-left text-primary active:scale-[0.98] disabled:opacity-40"
+                >
+                  <CalendarPlus size={17} />
+                  <span className="mt-2 block text-[12px] leading-[17px] font-semibold">Nouveau RDV</span>
+                </button>
+              )}
+              {capabilities.can_create_patient && (
+                <button
+                  type="button"
+                  disabled={!isOnline}
+                  onClick={() => run(onNewPatient)}
+                  className="min-h-[65px] rounded-[18px] border border-primary/20 bg-primary/10 p-2.5 text-left text-primary active:scale-[0.98] disabled:opacity-40"
+                >
+                  <UserPlus size={17} />
+                  <span className="mt-2 block text-[12px] leading-[17px] font-semibold">Nouveau patient</span>
+                </button>
+              )}
+              {capabilities.can_open_clinical_context && (
+                <>
+                  <button
+                    type="button"
+                    disabled={!isOnline}
+                    onClick={() => run(() => onPatientAction('photo'))}
+                    className="min-h-[65px] rounded-[18px] border border-glass-border bg-background p-2.5 text-left text-text-main active:scale-[0.98] disabled:opacity-40"
+                  >
+                    <Camera size={17} className="text-primary" />
+                    <span className="mt-2 block text-[12px] leading-[17px] font-semibold">Photo clinique</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!isOnline}
+                    onClick={() => run(() => onPatientAction('scan'))}
+                    className="min-h-[65px] rounded-[18px] border border-glass-border bg-background p-2.5 text-left text-text-main active:scale-[0.98] disabled:opacity-40"
+                  >
+                    <ScanLine size={17} className="text-primary" />
+                    <span className="mt-2 block text-[12px] leading-[17px] font-semibold">Scanner document</span>
+                  </button>
+                </>
+              )}
+            </div>
+
+          </section>
+        </div>
+      )}
+
+      {!hideLauncher && (
+        <div className="fixed bottom-32 right-6 z-[80]">
+          <button
+            type="button"
+            aria-label={open ? 'Fermer les actions rapides' : 'Ouvrir les actions rapides'}
+            aria-expanded={open}
+            onClick={() => setOpen(!open)}
+            className="flex h-14 w-14 items-center justify-center rounded-full border border-card bg-primary text-on-primary shadow-elite transition-transform hover:scale-105 active:scale-95"
+          >
+            {open ? <X size={24} /> : <Plus size={24} />}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}

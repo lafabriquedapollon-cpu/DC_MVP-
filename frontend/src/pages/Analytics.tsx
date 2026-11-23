@@ -1,0 +1,253 @@
+import React, { Suspense, lazy } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { api } from '../services/api';
+import { Activity, TrendingUp, AlertTriangle, Users, MessageCircle, Clock, Download, RefreshCcw } from 'lucide-react';
+import { DigitalCrownLoader } from '../components/DigitalCrownLoader';
+import toast from 'react-hot-toast';
+
+const downloadCSV = (rows: string[][], filename: string) => {
+  const content = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(';')).join('\r\n');
+  const blob = new Blob(['﻿' + content], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+// Code Splitting for Recharts (to avoid blocking the main thread)
+const AnalyticsCharts = lazy(() => import('../features/analytics/AnalyticsCharts').then(m => ({ default: m.AnalyticsCharts })));
+
+export const Analytics = () => {
+  const [showWaModal, setShowWaModal] = React.useState(false);
+
+  // Récupération des données Financières
+  const { data: financialStats, isLoading: isFinLoading, isError: isFinError, refetch: refetchFin } = useQuery({
+    queryKey: ['stats', 'financial'],
+    queryFn: () => api.get('/stats/financial').then(res => res.data),
+    staleTime: 5 * 60 * 1000, // Cache 5 minutes
+  });
+
+  // Récupération des données Opérationnelles
+  const { data: operationalStats, isLoading: isOpLoading, isError: isOpError, refetch: refetchOp } = useQuery({
+    queryKey: ['stats', 'operational'],
+    queryFn: () => api.get('/stats/operational').then(res => res.data),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  if (isFinLoading || isOpLoading) {
+    return <DigitalCrownLoader minHeight="min-h-[60vh]" />;
+  }
+
+  if (isFinError || isOpError) {
+    return (
+      <div className="min-h-[60vh] flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-card dark:bg-slate-800 rounded-3xl shadow-xl border border-border-main dark:border-border-hover p-8 text-center space-y-6">
+          <div className="w-20 h-20 bg-danger-surface dark:bg-red-900/20 text-danger rounded-full flex items-center justify-center mx-auto">
+            <AlertTriangle size={40} />
+          </div>
+          <div>
+            <h1 className="text-2xl font-black text-text-main dark:text-white mb-2">Impossible de charger les indicateurs</h1>
+            <p className="text-text-muted dark:text-text-muted font-medium text-sm">Erreur réseau. Vérifiez votre connexion et réessayez.</p>
+          </div>
+          <button
+            onClick={() => { refetchFin(); refetchOp(); }}
+            className="w-full px-4 py-2.5 text-sm font-bold text-white bg-primary hover:bg-primary/90 rounded-lg transition-all flex items-center justify-center gap-2"
+            style={{ backgroundColor: 'var(--primary)' }}
+          >
+            <RefreshCcw size={16} /> Réessayer
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6 max-w-7xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      
+      {/* HEADER GHOST BRAIN */}
+      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-blue-400 dark:to-indigo-400">
+            Indicateurs
+          </h1>
+          <p className="text-text-muted dark:text-text-muted mt-1">
+            Indicateurs de performance et de rentabilité en temps réel.
+          </p>
+        </div>
+        <button
+          onClick={() => {
+            if (!financialStats) return;
+            const date = new Date().toLocaleDateString('fr-FR');
+            const rows: string[][] = [
+              ['Rapport Analytics Digital Crown', date],
+              [],
+              ['KPIs Financiers'],
+              ['Indicateur', 'Valeur'],
+              ['Revenus du mois (MAD)', String(financialStats.revenu_mois ?? 0)],
+              ['Trésorerie latente (MAD)', String(financialStats.latent_cash ?? 0)],
+              ['CA du jour (MAD)', String(financialStats.today_revenue ?? 0)],
+              ['Revenu du mois encaissé (MAD)', String(financialStats.month_revenue ?? 0)],
+              ['Impayés globaux (MAD)', String(financialStats.total_debt ?? 0)],
+              [],
+              ['Top 5 Relances (devis en attente)'],
+              ['Patient', 'Soin', 'Montant (MAD)'],
+              ...(financialStats.top_relances ?? []).map((p: any) => [`${p.nom} ${p.prenom}`, p.soin, String(p.montant)]),
+            ];
+            downloadCSV(rows, `Analytics_${date.replace(/\//g, '-')}.csv`);
+            toast.success('Rapport CSV téléchargé');
+          }}
+          disabled={!financialStats}
+          className="flex items-center gap-2 px-5 py-2.5 rounded-2xl text-white font-black uppercase text-[11px] tracking-widest shadow-lg transition-all hover:-translate-y-0.5 active:scale-95 disabled:opacity-50"
+          style={{ backgroundColor: 'var(--primary)' }}
+        >
+          <Download size={15} />
+          Exporter CSV
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        
+        {/* BLOC 1 : FINANCES (Latent Cash & Revenus) */}
+        <section className="bg-card dark:bg-slate-800 rounded-3xl p-6 shadow-sm border border-border-main dark:border-border-hover">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-3 bg-success-surface dark:bg-green-900/30 text-success rounded-2xl">
+              <TrendingUp size={24} />
+            </div>
+            <h2 className="text-xl font-bold text-text-main dark:text-white">Trésorerie & Revenus</h2>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 mb-6">
+            <div className="p-5 bg-background dark:bg-slate-900/50 rounded-2xl border border-border-main dark:border-border-hover">
+              <p className="text-sm font-medium text-text-muted dark:text-text-muted">Revenus du mois</p>
+              <p className="text-2xl font-bold text-text-main dark:text-white mt-1">
+                {financialStats?.revenu_mois?.toLocaleString('fr-FR')} MAD
+              </p>
+            </div>
+            <div className="p-5 bg-blue-50 dark:bg-blue-900/20 rounded-2xl border border-blue-100 dark:border-blue-800/30 relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-24 h-24 bg-blue-500/10 rounded-full -mr-8 -mt-8 blur-2xl"></div>
+              <p className="text-sm font-bold text-blue-600 dark:text-blue-400">Latent Cash</p>
+              <p className="text-3xl font-black text-blue-700 dark:text-blue-300 mt-1">
+                {financialStats?.latent_cash?.toLocaleString('fr-FR')} MAD
+              </p>
+              <p className="text-xs font-medium text-blue-500/70 mt-1">Devis non encaissés</p>
+            </div>
+          </div>
+
+          {/* ACTION BUTTON UX (Sofia) */}
+          <div 
+            onClick={() => setShowWaModal(true)}
+            className="mt-4 p-4 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white flex items-center justify-between group cursor-pointer shadow-lg shadow-blue-600/20 hover:shadow-blue-600/40 transition-all"
+          >
+            <div>
+              <p className="font-bold flex items-center gap-2">
+                <MessageCircle size={18} />
+                Générer relances WhatsApp (Top 5)
+              </p>
+              <p className="text-blue-100 text-sm mt-1">
+                Des messages personnalisés peuvent être préparés pour les devis les plus élevés.
+              </p>
+            </div>
+            <div className="bg-white/20 p-2 rounded-xl group-hover:scale-110 transition-transform">
+              <TrendingUp size={20} />
+            </div>
+          </div>
+        </section>
+
+        {/* WhatsApp Recovery Modal */}
+        {showWaModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-in fade-in">
+            <div className="bg-card dark:bg-slate-800 rounded-3xl p-6 shadow-2xl max-w-lg w-full relative">
+              <h3 className="text-2xl font-bold text-text-main dark:text-white mb-4 flex items-center gap-2">
+                <MessageCircle className="text-success" /> Relances intelligentes
+              </h3>
+              <p className="text-text-muted dark:text-text-muted mb-6">
+                Le Ghost Brain a identifié {financialStats?.top_relances?.length || 0} patients à fort potentiel de conversion pour récupérer votre Latent Cash.
+              </p>
+              
+              <div className="space-y-3 mb-6 max-h-60 overflow-y-auto pr-2">
+                {financialStats?.top_relances?.map((patient: any, idx: number) => {
+                  const message = `Bonjour ${patient.prenom}, c'est le cabinet dentaire. Suite à votre devis pour le soin "${patient.soin}" (${patient.montant} MAD), nous avons des créneaux disponibles cette semaine. Souhaitez-vous le planifier ?`;
+                  const waLink = `https://wa.me/${patient.telephone.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(message)}`;
+                  
+                  return (
+                    <div key={idx} className="p-3 bg-background dark:bg-slate-700/50 rounded-xl border border-border-main dark:border-border-hover flex items-center justify-between">
+                      <div>
+                        <p className="font-bold text-text-main dark:text-white">{patient.nom} {patient.prenom}</p>
+                        <p className="text-sm text-text-muted">{patient.soin} — {patient.montant} MAD</p>
+                      </div>
+                      <a 
+                        href={waLink} 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="p-2 bg-green-500 hover:bg-green-600 text-white rounded-lg transition-colors flex items-center gap-1 text-sm font-medium"
+                      >
+                        Envoyer
+                      </a>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <button 
+                onClick={() => setShowWaModal(false)}
+                className="w-full py-3 bg-input-field hover:bg-input-field dark:bg-slate-700 dark:hover:bg-slate-600 text-text-main dark:text-white font-bold rounded-xl transition-colors"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* BLOC 2 : OPERATIONS (Secrétariat & Flux) */}
+        <section className="bg-card dark:bg-slate-800 rounded-3xl p-6 shadow-sm border border-border-main dark:border-border-hover">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-3 bg-warning-surface dark:bg-amber-900/30 text-warning rounded-2xl">
+              <Activity size={24} />
+            </div>
+            <h2 className="text-xl font-bold text-text-main dark:text-white">Opérations & Flux</h2>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 mb-6">
+            <div className="p-5 bg-danger-surface dark:bg-rose-900/20 rounded-2xl border border-danger-border dark:border-rose-800/30">
+              <div className="flex items-center gap-2 mb-1">
+                <AlertTriangle size={16} className="text-danger" />
+                <p className="text-sm font-bold text-danger dark:text-danger">Taux d'Annulation</p>
+              </div>
+              <p className="text-3xl font-black text-danger dark:text-danger">
+                {operationalStats?.no_show_rate}%
+              </p>
+            </div>
+
+            <div className="p-5 bg-background dark:bg-slate-900/50 rounded-2xl border border-border-main dark:border-border-hover flex flex-col justify-between">
+              <div>
+                <p className="text-sm font-medium text-text-muted dark:text-text-muted flex items-center gap-2">
+                  <Clock size={16} /> Attente Estimée
+                </p>
+                <p className="text-2xl font-bold text-text-main dark:text-white mt-1">
+                  {operationalStats?.estimated_wait_time_minutes} min
+                </p>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-text-muted dark:text-text-muted flex items-center gap-2 mt-4">
+                  <Users size={16} /> Flux du Jour
+                </p>
+                <p className="text-xl font-bold text-text-main dark:text-white mt-1">
+                  {operationalStats?.flux_today} patients
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      {/* CHARTS (Asynchronous Lazy Load) */}
+      <Suspense fallback={<div className="h-[300px] w-full bg-input-field dark:bg-slate-800/50 rounded-3xl animate-pulse"></div>}>
+        <AnalyticsCharts />
+      </Suspense>
+
+    </div>
+  );
+};

@@ -1,0 +1,98 @@
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from backend.env_loader import BASE_DIR
+
+class Settings(BaseSettings):
+    # App Settings
+    APP_NAME: str = "Digital Crown API"
+    DEBUG: bool = False
+    SECRET_KEY: str = "SET_A_REAL_SECRET_KEY_IN_ENV"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30            # 30 minutes (rotation via refresh token)
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 30             # 30 jours
+
+    # Database
+    DATABASE_URL: str = "sqlite:///./digital_crown.db"
+
+    # Environment
+    ENVIRONMENT: str = "development"
+    APP_PUBLIC_URL: str = "http://localhost:5173"
+    # V1.5-04.4: canonical same-origin URL reachable by the patient's phone.
+    # Required for QR/NFC handoff in cabinet/production, never derived from Host.
+    STATION_HANDOFF_PUBLIC_ORIGIN: str = ""
+    SUPPORT_EMAIL: str = "REDACTED_EMAIL"
+    SUPERADMIN_EMAIL: str = ""
+
+    # Security
+    ALLOWED_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173,https://localhost:5173,https://127.0.0.1:5173"
+    RATE_LIMIT_LOGIN: str = "10/minute"
+    # V1.5-03.2 — dedicated HMAC pepper for short-lived workstation pairing codes.
+    # Empty keeps a domain-separated SECRET_KEY-derived fallback for backwards-compatible startup.
+    PAIRING_CODE_PEPPER: str = ""
+
+    @field_validator("ALLOWED_ORIGINS", mode="after")
+    @classmethod
+    def include_stable_mobile_origin(cls, value: str) -> str:
+        """M6-I: a legacy .env must not silently omit the stable WebAuthn origin."""
+        stable = "https://digitalcrown.local:5173"
+        origins = [item.strip() for item in str(value).split(",") if item.strip()]
+        if stable not in origins:
+            origins.append(stable)
+        return ",".join(origins)
+
+    # Télémétrie / remontée cloud (P0.1) — OFF par défaut, opt-in EXPLICITE.
+    # Tant que ce flag est False, AUCUNE statistique ne quitte le cabinet.
+    TELEMETRY_ENABLED: bool = False
+
+    # ZERO-LLM preview adapter: opt-in only, NO action execution or deployment.
+    CROWN_BOT_DETERMINISTIC_WORKFLOWS_ENABLED: bool = False
+    # CB-02 separate bounded guided parser preview; never enables an action.
+    CROWN_BOT_GUIDED_NLU_ENABLED: bool = False
+    # CB-03 G1-A: independently gated, non-executable appointment preparation.
+    CROWN_BOT_CB03_PREPARATION_ENABLED: bool = False
+    # CB-03 G1-B independently gated status-change preparation, no execution.
+    CROWN_BOT_CB03_STATUS_PREPARATION_ENABLED: bool = False
+    # CB-03 G2 separately gated explicit confirmation (clinical writes); OFF.
+    CROWN_BOT_CB03_CONFIRMATION_ENABLED: bool = False
+    # CB-01 pilot: runtime cabinet IANA timezone; tenant-specific migration is Agenda A5.
+    CROWN_BOT_CABINET_TIMEZONE: str = "Africa/Casablanca"
+
+    # Storage
+    MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024 # 10 Mo
+
+    # Firebase
+    # Les clés Firebase sont gérées par le fichier firebase_creds.json
+
+    # Google OAuth
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    FRONTEND_URL: str = "http://localhost:5173"
+
+    # Patient Companion opaque relay — disabled unless both values are configured.
+    PATIENT_COMPANION_RELAY_URL: str = ""
+    PATIENT_COMPANION_RELAY_BOOTSTRAP_SECRET: str = ""
+    PATIENT_COMPANION_RELAY_POLL_SECONDS: int = 5
+    # PC-09 — provider-agnostic TURN REST credentials (coturn-compatible).
+    # The shared secret stays server-side; browsers receive only short-lived credentials.
+    PATIENT_COMPANION_TURN_URLS: str = ""
+    PATIENT_COMPANION_TURN_SECRET: str = ""
+    PATIENT_COMPANION_TURN_TTL_SECONDS: int = 900
+
+    # Transactional Email
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = "REDACTED_EMAIL"
+    SMTP_FROM_NAME: str = "Digital Crown"
+    SMTP_USE_TLS: bool = True
+    ADMIN_NOTIFICATION_EMAIL: str = ""
+
+    model_config = SettingsConfigDict(
+        env_file=(str(BASE_DIR / ".env.local"), str(BASE_DIR / ".env")),
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
+
+settings = Settings()

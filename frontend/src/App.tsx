@@ -1,0 +1,478 @@
+import { createBrowserRouter, RouterProvider, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Toaster } from 'react-hot-toast';
+import { lazy, Suspense, useEffect, useState } from 'react';
+import axios from 'axios';
+import { MainLayout } from './components/Layout/MainLayout';
+import { cabinetApi } from './services/templateApi';
+import { API_BASE } from './services/api';
+import { safeStorage } from './hooks/useLocalStorage';
+import { useAuthStore } from './stores/useAuthStore';
+import { hasAccess } from './utils/accessControl';
+import { isCommandCabinetLabEnabled } from './features/command/command-cabinet-readonly-policy';
+import { canViewMigrationStudio } from './features/admin/migration/MappingStudioPolicy';
+
+// Chargés immédiatement (première interaction utilisateur)
+import { Dashboard } from './pages/Dashboard';
+import { LoginPage } from './pages/LoginPage';
+import { RegisterPage } from './pages/RegisterPage';
+import { WelcomeScreen } from './pages/WelcomeScreen';
+import { LandingPage } from './pages/LandingPage';
+import { DownloadPage } from './pages/DownloadPage';
+import { ActivateTrialPage } from './pages/ActivateTrialPage';
+import { authService } from './services/auth';
+import { CabinetAuthTransitionBoundary } from './components/Auth/CabinetAuthTransitionBoundary';
+import { PatientDraftRouteGuard } from './features/patients/PatientDraftRouteGuard';
+import { workstationModeService } from './services/workstationMode';
+
+// Chargés à la demande
+const PatientList     = lazy(() => import('./features/patients/PatientList').then(m => ({ default: m.PatientList })));
+const PatientDetails  = lazy(() => import('./features/patients/PatientDetails').then(m => ({ default: m.PatientDetails })));
+const AddPatientForm  = lazy(() => import('./features/patients/AddPatientForm').then(m => ({ default: m.AddPatientForm })));
+const EditPatientForm = lazy(() => import('./features/patients/EditPatientForm').then(m => ({ default: m.EditPatientForm })));
+const PatientDocuments = lazy(() => import('./features/patients/PatientDocuments').then(m => ({ default: m.PatientDocuments })));
+const AgendaPage      = lazy(() => import('./pages/AgendaPage').then(m => ({ default: m.AgendaPage })));
+const CommandCabinetReadOnlyRoute = lazy(() => import('./features/command/CommandCabinetReadOnlyRoute').then(m => ({ default: m.CommandCabinetReadOnlyRoute })));
+const AccountingPage  = lazy(() => import('./pages/AccountingPage').then(m => ({ default: m.AccountingPage })));
+const Settings        = lazy(() => import('./pages/Settings').then(m => ({ default: m.Settings })));
+const MigrationMappingStudio = lazy(() => import('./features/admin/migration/MigrationMappingStudio').then(m => ({ default: m.MigrationMappingStudio })));
+const Analytics       = lazy(() => import('./pages/Analytics').then(m => ({ default: m.Analytics })));
+const SetupWizard     = lazy(() => import('./features/admin/SetupWizard').then(m => ({ default: m.SetupWizard })));
+const EliteLibrary    = lazy(() => import('./features/clinical-ref/EliteLibrary').then(m => ({ default: m.EliteLibrary })));
+const EliteScienceHub = lazy(() => import('./features/clinical-ref/EliteScienceHub').then(m => ({ default: m.EliteScienceHub })));
+const SuperAdminDashboard = lazy(() => import('./features/superadmin/SuperAdminDashboard').then(m => ({ default: m.SuperAdminDashboard })));
+const LabJobsBoard    = lazy(() => import('./components/LabJobsBoard').then(m => ({ default: m.LabJobsBoard })));
+const StockPage       = lazy(() => import('./pages/StockPage').then(m => ({ default: m.StockPage })));
+const PartnerMarketplacePage = lazy(() => import('./pages/PartnerMarketplacePage').then(m => ({ default: m.PartnerMarketplacePage })));
+const PartnerCatalogAdminPage = lazy(() => import('./pages/PartnerCatalogAdminPage').then(m => ({ default: m.PartnerCatalogAdminPage })));
+const PartnerSupplierPage = lazy(() => import('./pages/PartnerSupplierPage').then(m => ({ default: m.PartnerSupplierPage })));
+const PartnerProductPage = lazy(() => import('./pages/PartnerProductPage').then(m => ({ default: m.PartnerProductPage })));
+const WaitingRoomPage  = lazy(() => import('./pages/WaitingRoomPage').then(m => ({ default: m.WaitingRoomPage })));
+const LegalPage        = lazy(() => import('./pages/LegalPage').then(m => ({ default: m.LegalPage })));
+const PatientCompanionApp = lazy(() => import('./features/patient-companion/PatientCompanionApp').then(m => ({ default: m.PatientCompanionApp })));
+const HubPage = lazy(() => import('./features/hub/HubPage').then(m => ({ default: m.HubPage })));
+const WorkstationExperiencePage = lazy(() => import('./features/hub/WorkstationExperiencePage').then(m => ({ default: m.WorkstationExperiencePage })));
+const WorkstationModeGate = lazy(() => import('./features/hub/WorkstationModeGate').then(m => ({ default: m.WorkstationModeGate })));
+const StationWallDisplay = lazy(() => import('./features/hub/StationWallDisplay').then(m => ({ default: m.StationWallDisplay })));
+
+// MOBILE PWA
+const OnboardingScanner = lazy(() => import('./features/mobile/Onboarding/OnboardingScanner').then(m => ({ default: m.OnboardingScanner })));
+const MobileDashboard  = lazy(() => import('./features/mobile/Dashboard/MobileDashboard').then(m => ({ default: m.MobileDashboard })));
+const MobileContext    = lazy(() => import('./features/mobile/Context/MobileContext').then(m => ({ default: m.MobileContext })));
+
+import { MobileStorage } from './services/zka/MobileStorage';
+import { MobileBiometricGate } from './features/mobile/Security/MobileBiometricGate';
+
+import { DigitalCrownLoader } from './components/DigitalCrownLoader';
+import { ComingSoon } from './components/ComingSoon';
+
+const PageLoader = () => (
+  <DigitalCrownLoader minHeight="min-h-[60vh]" className="bg-transparent" spinnerColor="border-blue-600" />
+);
+
+const ContextualToaster = () => {
+  const location = useLocation();
+  const [compactViewport, setCompactViewport] = useState(() => window.innerWidth < 1024);
+
+  useEffect(() => {
+    const onResize = () => setCompactViewport(window.innerWidth < 1024);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const patientCompact = /^\/patients(?:\/|$)/.test(location.pathname) && compactViewport;
+  // Patient identity stays visible: the old top-centred toast obscured its header.
+  const patientDetailCompact = /^\/patients\/\d+(?:\/|$)/.test(location.pathname) && compactViewport;
+
+  // Public wall must never inherit staff/application transient chrome.
+  if (location.pathname === '/station/wall') return null;
+
+  return (
+    <Toaster
+      containerClassName="dc-global-toast-position"
+      position={patientDetailCompact ? 'bottom-center' : patientCompact ? 'top-center' : 'bottom-right'}
+      containerStyle={patientDetailCompact
+        ? { top: 'auto', bottom: 'calc(12px + env(safe-area-inset-bottom, 0px))', left: 12, right: 12 }
+        : patientCompact ? { top: 12, left: 12, right: 12, bottom: 'auto' } : undefined}
+      toastOptions={{
+        style: {
+          borderRadius: '16px',
+          fontWeight: 700,
+          fontSize: '13px',
+          maxWidth: patientCompact ? 'calc(100vw - 24px)' : '420px',
+        },
+        success: { duration: 3000 },
+        error: { duration: 5000 },
+      }}
+    />
+  );
+};
+
+// ==============================================================================
+// COMPOSANT DE PROTECTION DES ROUTES
+// ==============================================================================
+
+interface ProtectedRouteProps {
+  children: React.ReactNode;
+}
+
+const PermissionRoute = ({ permission, children }: { permission: string; children: React.ReactNode }) => {
+  const user = useAuthStore(state => state.user);
+  if (!hasAccess(user, permission)) return <Navigate to="/dashboard" replace />;
+  return <>{children}</>;
+};
+
+const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
+  const [isLoading, setIsLoading] = useState(true);
+  const [isInitialized, setIsInitialized] = useState<boolean | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [workstationEnrollmentRequired, setWorkstationEnrollmentRequired] = useState(false);
+  const location = useLocation();
+
+  useEffect(() => {
+    const checkAuthAndInit = async () => {
+      setWorkstationEnrollmentRequired(false);
+      // 1. Attendre que la base de données / le backend soit complètement chargé
+      const waitForBackend = async () => {
+        const MAX_ATTEMPTS = 15; // 15 × 2s = 30s max
+        for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+          try {
+            await axios.get(`${API_BASE}/health`);
+            break;
+          } catch (error: any) {
+            if (error.response && error.response.status !== 502 && error.response.status !== 503) {
+              break;
+            }
+            if (attempt < MAX_ATTEMPTS - 1) {
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+          }
+        }
+      };
+
+      try {
+        await waitForBackend();
+        const authStatus = await authService.isAuthenticated();
+        setIsAuthenticated(authStatus);
+
+        if (authStatus && location.pathname !== '/login') {
+          // The workstation bootstrap is intentionally available before enrollment.
+          // Resolve this authority before clinic init: the latter MUST return 423
+          // for a fresh annex browser and must not be mistaken for missing setup.
+          const workstationBootstrap = await workstationModeService.getBootstrapState();
+          if (workstationBootstrap.enrollmentRequired) {
+            setIsInitialized(null);
+            setWorkstationEnrollmentRequired(true);
+            return;
+          }
+          await useAuthStore.getState().checkAuth();
+          const status = await cabinetApi.checkInitStatus();
+          setIsInitialized(status.is_initialized);
+
+          if (status.is_initialized && !safeStorage.get('appMode')) {
+            safeStorage.set('appMode', 'prod');
+          }
+        }
+      } catch (error) {
+        // A valid new annex account may be refused until its browser is paired.
+        // A 423 enrollment refusal is not "cabinet not initialized": never route
+        // the operator into the clinic Setup Wizard, and never unlock clinical UI.
+        if (axios.isAxiosError(error)
+          && error.response?.status === 423
+          && (
+            error.response?.data?.detail === 'WORKSTATION_ENROLLMENT_REQUIRED'
+            || error.response?.data?.detail === 'WORKSTATION_IDENTITY_REQUIRED'
+          )) {
+          setWorkstationEnrollmentRequired(true);
+        } else {
+          console.error('Erreur vérification statut:', error);
+          setIsInitialized(false);
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    checkAuthAndInit();
+  }, [location.pathname]);
+
+  if (isLoading) {
+    return <DigitalCrownLoader text="Démarrage de Digital Crown…" />;
+  }
+
+  // BYPASS AUTH : Si on est sur /login et pas connecté, on laisse passer pour afficher la page
+  if (!isAuthenticated) {
+    if (['/login', '/register', '/terms', '/privacy'].includes(location.pathname)) return <>{children}</>;
+    return <Navigate to="/login" replace />;
+  }
+
+  // Enrollment is server-enforced; send the newly authenticated workstation to
+  // its pairing surface instead of accidentally offering clinic creation.
+  if (workstationEnrollmentRequired) {
+    return <Navigate to="/hub?enroll=1" replace />;
+  }
+
+  // Force le choix du mode s'il n'existe pas (Mode PROD par défaut désormais)
+  const appMode = safeStorage.get('appMode');
+  if (!appMode) {
+    safeStorage.set('appMode', 'prod');
+  }
+
+  // Si le cabinet est déjà initialisé, on empêche l'accès au setup
+  if (isInitialized && location.pathname === '/setup') {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  // Nouveau cabinet non configuré → forcer le wizard (sauf si déjà sur /setup)
+  if (isInitialized === false && location.pathname !== '/setup') {
+    return <Navigate to="/setup" replace />;
+  }
+
+  return <>{children}</>;
+};
+
+// ==============================================================================
+// PROTECTION PWA MOBILE (ZKA)
+// ==============================================================================
+
+const MobileProtectedRoute = ({ children }: { children: React.ReactNode }) => {
+  const [gate, setGate] = useState<'loading' | 'allow' | 'redirect'>('loading');
+
+  useEffect(() => {
+    // Sans .catch(), un rejet (IndexedDB indisponible/bloqué) laissait le gate
+    // bloqué en 'loading' pour toujours → spinner infini au lieu de retomber sur
+    // l'écran d'appairage (perçu par l'utilisateur comme "l'app ne reste pas connectée").
+    MobileStorage.isPaired()
+      .then(async (paired) => {
+        if (paired) { setGate('allow'); return; }
+        // Pas (ou plus) appairé -- mais si un snapshot a déjà été chargé avec succès,
+        // on laisse quand même passer plutôt que de renvoyer sèchement vers le QR :
+        // MobileDashboard sait déjà retomber sur ce cache (useMobileDashboard::fetchSnapshot).
+        // C'est précisément le cas "loin du cabinet / IndexedDB des identifiants évincée
+        // par le navigateur" qui faisait perdre l'accès aux dernières données scannées.
+        const hasCache = await MobileStorage.hasCachedSnapshot().catch(() => false);
+        setGate(hasCache ? 'allow' : 'redirect');
+      })
+      .catch(() => setGate('redirect'));
+  }, []);
+
+  if (gate === 'loading') return <PageLoader />;
+  if (gate === 'redirect') return <Navigate to="/mobile/onboarding" replace />;
+
+  return <MobileBiometricGate>{children}</MobileBiometricGate>;
+};
+
+// =============================================================================
+// ROUTES PROTÉGÉES (avec layout)
+// =============================================================================
+
+const ProtectedRoutes = () => {
+  const user = useAuthStore((state) => state.user);
+  // A principal/tenant/permission transition must not reuse any mounted
+  // dossier, editor, image viewer or async media subtree across identities.
+  // Viewport changes leave this key stable and preserve ordinary drafts.
+  const clinicalScope = user
+    ? JSON.stringify([user.id, user.employer_id, user.role, user.permissions])
+    : 'anonymous';
+
+  return (
+    <MainLayout key={clinicalScope}>
+      <Suspense fallback={<PageLoader />}>
+        <Routes>
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/cabinet" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/agenda" element={<PermissionRoute permission="agenda"><AgendaPage /></PermissionRoute>} />
+          {/* LOT07/07-C opt-in dev laboratory only. Parent auth + workstation gates remain mandatory. */}
+          {isCommandCabinetLabEnabled(import.meta.env.DEV, import.meta.env.VITE_COMMAND_CABINET_LAB) && (
+            <Route path="/command-cabinet-lab" element={<PermissionRoute permission="agenda"><CommandCabinetReadOnlyRoute /></PermissionRoute>} />
+          )}
+          <Route path="/accounting" element={<PermissionRoute permission="accounting"><AccountingPage /></PermissionRoute>} />
+          <Route path="/patients" element={<PermissionRoute permission="patients"><PatientList /></PermissionRoute>} />
+          <Route path="/patients/new" element={<PermissionRoute permission="patients"><AddPatientForm /></PermissionRoute>} />
+          <Route path="/patients/:id" element={<PermissionRoute permission="patients"><PatientDetails /></PermissionRoute>} />
+          <Route path="/patients/:id/archives" element={<PermissionRoute permission="patients"><PatientDocuments /></PermissionRoute>} />
+          <Route path="/patients/:id/edit" element={<PermissionRoute permission="patients"><EditPatientForm /></PermissionRoute>} />
+          <Route path="/settings" element={<PermissionRoute permission="settings"><Settings /></PermissionRoute>} />
+          <Route path="/settings/migration" element={canViewMigrationStudio(user) ? <MigrationMappingStudio /> : <Navigate to="/dashboard" replace />} />
+          <Route path="/analytics" element={<Analytics />} />
+          <Route
+            path="/labo"
+            element={<ComingSoon title="Module Labo" description="Ce module n’est pas disponible dans cette version." />} />
+          <Route path="/stock" element={<StockPage />} />
+          <Route path="/approvisionnement" element={<PermissionRoute permission="patients"><PartnerMarketplacePage /></PermissionRoute>} />
+          <Route
+            path="/approvisionnement/admin"
+            element={user?.is_superadmin ? <PartnerCatalogAdminPage /> : <Navigate to="/approvisionnement" replace />}
+          />
+          <Route path="/approvisionnement/partenaire/:partnerId" element={<PermissionRoute permission="patients"><PartnerSupplierPage /></PermissionRoute>} />
+          <Route path="/approvisionnement/produits/:productId" element={<PermissionRoute permission="patients"><PartnerProductPage /></PermissionRoute>} />
+          <Route
+            path="/salle-attente"
+            element={<ComingSoon title="Salle d'attente" description="Ce module n’est pas disponible dans cette version." />} />
+          <Route path="/bibliotheque" element={<EliteLibrary />} />
+          <Route path="/bibliotheque/:code" element={<EliteLibrary />} />
+          <Route path="/science-hub" element={<EliteScienceHub />} />
+          <Route path="/super-admin" element={user?.is_superadmin ? <SuperAdminDashboard /> : <Navigate to="/dashboard" replace />} />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Routes>
+      </Suspense>
+    </MainLayout>
+  );
+};
+
+// =============================================================================
+// ROUTAGE INTELLIGENT PWA (Mobile vs Desktop)
+// =============================================================================
+
+const SmartRootRouter = () => {
+  const isMobile = window.innerWidth <= 768 || /Mobi|Android|iPhone/i.test(navigator.userAgent);
+  const [authStatus, setAuthStatus] = useState<'checking' | 'authenticated' | 'anonymous'>('checking');
+
+  useEffect(() => {
+    if (isMobile) return;
+
+    let cancelled = false;
+
+    const resolveAuth = async () => {
+      try {
+        const isAuthenticated = await authService.isAuthenticated();
+        if (!cancelled) {
+          setAuthStatus(isAuthenticated ? 'authenticated' : 'anonymous');
+        }
+      } catch {
+        if (!cancelled) {
+          setAuthStatus('anonymous');
+        }
+      }
+    };
+
+    resolveAuth();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isMobile]);
+  if (isMobile) {
+    return <Navigate to="/mobile/dashboard" replace />;
+  }
+  // Connecté → dashboard directement ; non-connecté → page marketing publique
+  if (authStatus === 'checking') {
+    return <PageLoader />;
+  }
+  if (authStatus === 'authenticated') {
+    return <Navigate to="/hub" replace />;
+  }
+  return <Navigate to="/landing" replace />;
+};
+
+// =============================================================================
+// APP PRINCIPAL
+// =============================================================================
+
+import { OfflineQueueViewer } from './components/mobile/OfflineQueueViewer';
+
+function App() {
+  const [animatedBg, setAnimatedBg] = useState(() => safeStorage.get('app_background_animated') === 'true');
+
+  // Application globale du thème (Persistance) et Paramètres IA
+  useEffect(() => {
+    const savedTheme = localStorage.getItem('digitalcrown_theme');
+    if (savedTheme) {
+      document.body.dataset.theme = savedTheme;
+    }
+
+    const applySettings = () => {
+      // Mode Performance
+      const isPerfMode = safeStorage.get('performanceMode') === 'true';
+      if (isPerfMode) {
+        document.body.classList.add('performance-mode');
+      } else {
+        document.body.classList.remove('performance-mode');
+      }
+
+      // Arrière-plan Animé
+      setAnimatedBg(safeStorage.get('app_background_animated') === 'true');
+    };
+
+    applySettings();
+
+    // Permet la mise à jour réactive sans recharger si déclenché manuellement
+    window.addEventListener('settings_updated', applySettings);
+    return () => window.removeEventListener('settings_updated', applySettings);
+  }, []);
+
+  return (
+    <RouterProvider router={cabinetDataRouter} />
+  );
+}
+
+// Keep the existing route table intact inside a single data-router root.
+// The draft exit guard must mount ABOVE nested Routes and MainLayout animations.
+function CabinetRouteTree() {
+  return (
+    <PatientDraftRouteGuard>
+      <OfflineQueueViewer />
+      <ContextualToaster />
+      <Routes>
+        {/* ROUTAGE INTELLIGENT RACINE (PWA Entry Point) */}
+        <Route path="/" element={<SmartRootRouter />} />
+
+        {/* ROUTES PWA MOBILE (Accès Direct) */}
+        <Route path="/mobile/onboarding" element={
+          <Suspense fallback={<PageLoader />}><OnboardingScanner /></Suspense>
+        } />
+        <Route path="/mobile/dashboard" element={
+          <MobileProtectedRoute>
+            <Suspense fallback={<PageLoader />}><MobileDashboard /></Suspense>
+          </MobileProtectedRoute>
+        } />
+        <Route path="/mobile/context" element={
+          <MobileProtectedRoute>
+            <Suspense fallback={<PageLoader />}><MobileContext /></Suspense>
+          </MobileProtectedRoute>
+        } />
+        <Route path="/mobile/dentists" element={<Navigate to="/mobile/dashboard" replace />} />
+        <Route path="/mobile/superadmin" element={<Navigate to="/mobile/dashboard" replace />} />
+
+        {/* V1.5 workstation Hub: data-free dispatcher remains available even if cabinet backend is down. */}
+        <Route path="/hub" element={<Suspense fallback={<PageLoader />}><WorkstationModeGate target="hub"><HubPage /></WorkstationModeGate></Suspense>} />
+        <Route path="/station" element={<Suspense fallback={<PageLoader />}><WorkstationModeGate target="station"><WorkstationExperiencePage experience="station" /></WorkstationModeGate></Suspense>} />
+        <Route path="/station/wall" element={<Suspense fallback={<PageLoader />}><WorkstationModeGate target="station"><StationWallDisplay /></WorkstationModeGate></Suspense>} />
+        <Route path="/control-center" element={<Suspense fallback={<PageLoader />}><WorkstationModeGate target="control-center"><WorkstationExperiencePage experience="control-center" /></WorkstationModeGate></Suspense>} />
+
+        {/* Patient Companion: local-first patient boundary paired by one-time QR/code */}
+        <Route path="/companion" element={<Suspense fallback={<PageLoader />}><PatientCompanionApp /></Suspense>} />
+
+        {/* Page marketing publique (avant connexion) */}
+        <Route path="/landing" element={<LandingPage />} />
+        <Route path="/download" element={<DownloadPage />} />
+        <Route path="/activate" element={<ActivateTrialPage />} />
+        <Route path="/welcome" element={<Navigate to="/landing" replace />} />
+
+        {/* Toutes les autres routes passent par le filtre Mode/Init */}
+        <Route path="/*" element={
+          <CabinetAuthTransitionBoundary>
+            <ProtectedRoute>
+              <Suspense fallback={<PageLoader />}>
+                <Routes>
+                  <Route path="/login" element={<LoginPage />} />
+                  <Route path="/register" element={<RegisterPage />} />
+                  <Route path="/terms" element={<LegalPage type="terms" />} />
+                  <Route path="/privacy" element={<LegalPage type="privacy" />} />
+                  <Route path="/setup" element={<SetupWizard />} />
+                  <Route path="/*" element={<WorkstationModeGate target="protected"><ProtectedRoutes /></WorkstationModeGate>} />
+                </Routes>
+              </Suspense>
+            </ProtectedRoute>
+          </CabinetAuthTransitionBoundary>
+        } />
+      </Routes>
+    </PatientDraftRouteGuard>
+  );
+}
+
+const cabinetDataRouter = createBrowserRouter([
+  { path: '*', element: <CabinetRouteTree /> },
+]);
+
+export default App;

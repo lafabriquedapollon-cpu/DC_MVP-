@@ -1,0 +1,713 @@
+import hmac
+import logging
+import os
+import secrets
+from typing import Union, List
+from datetime import timedelta
+
+logger = logging.getLogger(__name__)
+from fastapi import APIRouter, Depends, HTTPException, status, Request, BackgroundTasks, Response
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+from jose import JWTError, jwt
+
+from backend import models, schemas, database
+from backend.security import (
+    verify_password,
+    verify_dummy_password,
+    create_access_token,
+    create_refresh_token,
+    token_blacklist,
+    SECRET_KEY,
+    ALGORITHM,
+)
+from backend.schemas import TokenData, SupabaseSyncRequest
+from backend.utils.rate_limit import check_rate_limit
+from backend.config import settings
+import httpx
+from urllib.parse import urlencode
+
+router = APIRouter(tags=["Authentication"])
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login", auto_error=False)
+
+get_db = database.get_db
+
+
+def is_superadmin_user(user: models.User | None) -> bool:
+    if not user or not getattr(user, "email", None):
+        return False
+    superadmin_email = settings.SUPERADMIN_EMAIL.lower().strip()
+    return bool(superadmin_email and user.email.lower().strip() == superadmin_email)
+
+
+def _set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
+    """Pose les tokens en cookies HttpOnly — sécurisés en prod, non-Secure en dev."""
+    environment = getattr(settings, "ENVIRONMENT", "development").lower()
+    cabinet_https = os.getenv("DIGITALCROWN_ENABLE_HTTPS", "false").strip().lower() in {"1", "true", "yes", "on"}
+    secure_cookie = environment == "production" or (environment == "cabinet" and cabinet_https)
+    cookie_kwargs = dict(
+        httponly=True,
+        samesite="lax",
+        secure=secure_cookie,
+        path="/",
+    )
+    response.set_cookie(
+        "access_token",
+        access_token,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        **cookie_kwargs,
+    )
+    response.set_cookie(
+        "refresh_token",
+        refresh_token,
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        **cookie_kwargs,
+    )
+
+
+async def get_current_user(
+    request: Request,
+    token_header: str | None = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    # Desktop/API authentication accepts desktop access tokens only.
+    # Paired Pocket JWTs are intentionally scoped to /api/mobile/* dependencies
+    # and must never become generic Digital Crown sessions.
+    token = request.cookies.get("access_token") or token_header
+    if not token:
+        raise credentials_exception
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        token_type: str = payload.get("type")
+        jti: str = payload.get("jti")
+
+        if token_type != "access":
+            raise credentials_exception
+
+        if jti and token_blacklist.is_revoked(jti, db):
+            raise credentials_exception
+
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+        user = db.query(models.User).filter(models.User.email == email).first()
+
+    except HTTPException:
+        raise credentials_exception
+    except (JWTError, ValueError, KeyError, TypeError):
+        raise credentials_exception
+
+    if user is None or not user.is_active:
+        raise credentials_exception
+    approval = getattr(user, "approval_status", "approved") or "approved"
+    if getattr(user, "employer_id", None) is not None and approval != "approved":
+        raise credentials_exception
+
+    # Only auth/session lifecycle and workstation recovery endpoints may bypass
+    # the Station boundary. Any other endpoint that resolves a cabinet web
+    # session through get_current_user remains subject to workstation authority,
+    # including privileged /api/mobile/* and /api/patient-companion/* routes.
+    workstation_guard_exempt = request.url.path.startswith((
+        "/api/auth",
+        "/api/workstation",
+    ))
+    if not workstation_guard_exempt:
+        # Lazy import avoids the auth <-> workstation router import cycle while
+        # enforcing Station at the backend dependency used by clinical APIs.
+        from backend.routers.workstation_mode import enforce_authenticated_workstation_access
+        enforce_authenticated_workstation_access(
+            request,
+            db,
+            user,
+            session_jti=str(jti) if jti else None,
+        )
+    return user
+
+
+async def get_current_user_optional(
+    request: Request,
+    token_header: str | None = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
+    try:
+        return await get_current_user(request=request, token_header=token_header, db=db)
+    except HTTPException:
+        return None
+
+
+_SECRETARY_LEGACY_DEFAULTS = {
+    "agenda": True,
+    "patients": True,
+    "prescriptions": False,
+    "accounting": False,
+    "payments": False,
+    "panoramic": False,
+    "cephalo": False,
+    "settings": False,
+    "admin": False,
+}
+
+_DENTIST_EMPLOYEE_LEGACY_DEFAULTS = {
+    "agenda": True,
+    "patients": True,
+    "prescriptions": True,
+    "accounting": False,
+    "payments": False,
+    "panoramic": True,
+    "cephalo": True,
+    "settings": False,
+    "admin": False,
+}
+
+
+def has_permission(current_user: models.User, permission_name: Union[str, List[str]]) -> bool:
+    """Politique backend canonique, fail-closed, des permissions cabinet."""
+    if is_superadmin_user(current_user):
+        return True
+
+    role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    if role == "ADMIN":
+        return True
+    if role == "DENTISTE" and current_user.employer_id is None:
+        return True
+
+    perms = current_user.permissions or {}
+    perms_to_check = [permission_name] if isinstance(permission_name, str) else permission_name
+
+    if isinstance(perms, dict) and len(perms) > 0:
+        return any(perms.get(p) is True for p in perms_to_check)
+
+    if role == "SECRETAIRE":
+        return any(_SECRETARY_LEGACY_DEFAULTS.get(p, False) for p in perms_to_check)
+    if role == "DENTISTE" and current_user.employer_id is not None:
+        return any(_DENTIST_EMPLOYEE_LEGACY_DEFAULTS.get(p, False) for p in perms_to_check)
+
+    return False
+
+
+def require_permission(permission_name: Union[str, List[str]]):
+    def dependency(current_user: models.User = Depends(get_current_user)):
+        if has_permission(current_user, permission_name):
+            return current_user
+
+        perms_to_check = [permission_name] if isinstance(permission_name, str) else permission_name
+        perms_str = "' ou '".join(perms_to_check)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Accès refusé. Vous n'avez pas la permission '{perms_str}'."
+        )
+    return dependency
+
+
+def require_superadmin(current_user: models.User = Depends(get_current_user)):
+    if is_superadmin_user(current_user):
+        return current_user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Acces refuse. Superadmin requis.",
+    )
+
+
+def require_elite_license(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if is_superadmin_user(current_user):
+        return current_user
+        
+    license_owner = current_user
+    if current_user.employer_id:
+        license_owner = db.query(models.User).filter(models.User.id == current_user.employer_id).first() or current_user
+
+    if not license_owner.is_licensed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès refusé. Cette fonctionnalité requiert une licence active."
+        )
+    return current_user
+
+
+from backend.services.audit_service import audit_service
+
+
+@router.post("/login", response_model=schemas.Token,
+    summary="Connexion locale",
+    description="Authentification email/mot de passe. Retourne un access token (JWT, 60 min) et un refresh token (7 jours).")
+async def login_for_access_token(
+    request: Request,
+    response: Response,
+    background_tasks: BackgroundTasks,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
+    check_rate_limit(request)
+    user = db.query(models.User).filter(models.User.email == form_data.username).first()
+
+    password_is_valid = False
+    if user:
+        password_is_valid = verify_password(form_data.password, user.hashed_password)
+    else:
+        verify_dummy_password()
+
+    if not user or not password_is_valid:
+        audit_service.log(
+            db=db,
+            user_id=user.id if user else None,
+            action="LOGIN_FAIL",
+            resource_type="User",
+            resource_id=form_data.username,
+            severity="WARNING",
+            ip_address=request.client.host if request.client else None,
+            details=f"Echec de connexion pour l'utilisateur {form_data.username}",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email ou mot de passe incorrect",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not user.is_active:
+        audit_service.log(
+            db=db,
+            user_id=user.id,
+            action="LOGIN_INACTIVE",
+            resource_type="User",
+            resource_id=user.email,
+            severity="WARNING",
+            details="Tentative de connexion sur un compte desactive",
+        )
+        if user.employer_id is None:
+            detail_msg = "Votre demande d'accès est en attente de validation par notre équipe. Vous recevrez un email dès l'activation de votre compte."
+        else:
+            detail_msg = "Ce compte a été désactivé par le praticien principal."
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=detail_msg,
+        )
+
+    approval = getattr(user, "approval_status", "approved") or "approved"
+    if approval == "pending":
+        audit_service.log(
+            db=db,
+            user_id=user.id,
+            action="LOGIN_PENDING",
+            resource_type="User",
+            resource_id=user.email,
+            severity="WARNING",
+            details="Tentative de connexion sur un compte en attente d'approbation",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Votre compte est en attente d'approbation par votre praticien.",
+        )
+    if approval == "rejected":
+        audit_service.log(
+            db=db,
+            user_id=user.id,
+            action="LOGIN_REJECTED",
+            resource_type="User",
+            resource_id=user.email,
+            severity="WARNING",
+            details="Tentative de connexion sur un compte refuse",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Votre demande d'acces a ete refusee par votre praticien.",
+        )
+
+    access_token = create_access_token(data={"sub": user.email})
+    refresh_token = create_refresh_token(data={"sub": user.email})
+
+    audit_service.log(
+        db=db,
+        user_id=user.id,
+        employer_id=user.get_employer_id(),
+        action="LOGIN_SUCCESS",
+        resource_type="User",
+        resource_id=user.email,
+        severity="INFO",
+    )
+
+    if settings.TELEMETRY_ENABLED:
+        try:
+            from backend.services.telemetry import sync_telemetry_logs, sync_business_intelligence_leak
+            background_tasks.add_task(sync_telemetry_logs)
+            background_tasks.add_task(sync_business_intelligence_leak)
+        except Exception as e:
+            logger.warning(f"Telemetry task registration failed: {e}")
+
+    _set_auth_cookies(response, access_token, refresh_token)
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+    }
+
+
+@router.post("/refresh", response_model=schemas.Token,
+    summary="Renouveler l'access token",
+    description="Échange un refresh token valide contre un nouveau couple access/refresh token (rotation automatique).")
+async def refresh_access_token(
+    request: Request,
+    response: Response,
+    body: schemas.RefreshRequest,
+    db: Session = Depends(get_db),
+):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Refresh token invalide ou expiré",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    refresh_token_value = body.refresh_token or request.cookies.get("refresh_token", "")
+    if not refresh_token_value:
+        raise credentials_exception
+    try:
+        payload = jwt.decode(refresh_token_value, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        jti: str = payload.get("jti")
+        token_type: str = payload.get("type")
+
+        if email is None or token_type != "refresh":
+            raise credentials_exception
+        if jti and token_blacklist.is_revoked(jti, db):
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if user is None or not user.is_active:
+        raise credentials_exception
+    approval = getattr(user, "approval_status", "approved") or "approved"
+    if getattr(user, "employer_id", None) is not None and approval != "approved":
+        raise credentials_exception
+
+    token_blacklist.revoke(refresh_token_value, db)
+    new_access = create_access_token(data={"sub": user.email})
+    new_refresh = create_refresh_token(data={"sub": user.email})
+
+    _set_auth_cookies(response, new_access, new_refresh)
+    return {
+        "access_token": new_access,
+        "refresh_token": new_refresh,
+        "token_type": "bearer",
+    }
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT,
+    summary="Déconnexion",
+    description="Révoque l'access token courant et le refresh token fourni (blacklist JTI en DB).")
+async def logout(
+    request: Request,
+    response: Response,
+    body: schemas.RefreshRequest,
+    token_header: str | None = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    token = request.cookies.get("access_token") or token_header
+    refresh_tok = body.refresh_token or request.cookies.get("refresh_token", "")
+
+    if token:
+        token_blacklist.revoke(token, db)
+    if refresh_tok:
+        token_blacklist.revoke(refresh_tok, db)
+
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+    # Station escape is bound to the current access-session JTI and must not
+    # survive an explicit logout, even for the same user reconnecting quickly.
+    response.delete_cookie("dc_station_escape", path="/")
+
+    audit_service.log(
+        db=db,
+        user_id=current_user.id,
+        action="LOGOUT",
+        resource_type="User",
+        resource_id=current_user.email,
+        severity="INFO",
+    )
+
+
+@router.get("/me", response_model=schemas.UserOut)
+async def read_users_me(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db),
+):
+    superadmin_email = settings.SUPERADMIN_EMAIL.lower().strip()
+    current_email = (current_user.email or "").lower().strip()
+    plan_owner = current_user
+    if current_user.employer_id:
+        plan_owner = db.query(models.User).filter(models.User.id == current_user.employer_id).first() or current_user
+    effective_subscription_plan = getattr(plan_owner, "subscription_plan", None)
+    return schemas.UserOut(
+        id=current_user.id,
+        email=current_user.email,
+        role=current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role),
+        is_superadmin=bool(superadmin_email and current_email == superadmin_email),
+        nom_complet=current_user.nom_complet,
+        is_active=current_user.is_active,
+        employer_id=current_user.employer_id,
+        permissions=current_user.permissions,
+        is_licensed=current_user.is_licensed,
+        license_expires_at=current_user.license_expires_at,
+        subscription_plan=effective_subscription_plan,
+    )
+
+
+@router.post("/signup", response_model=schemas.UserOut,
+    summary="Inscription en ligne",
+    description="Crée un compte cabinet (Dentiste) en attente de validation (is_active=False). Pousse aussi sur Firebase.")
+async def signup_client(
+    req: schemas.UserSignup,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    check_rate_limit(request, scope="signup")
+    from backend.security import get_password_hash
+    if not req.accept_terms or not req.accept_privacy:
+        raise HTTPException(
+            status_code=400,
+            detail="Vous devez accepter les CGU et la politique de confidentialite pour creer un compte.",
+        )
+
+    existing = db.query(models.User).filter(models.User.email == req.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Cet email est déjà utilisé.")
+        
+    new_user = models.User(
+        email=req.email,
+        hashed_password=get_password_hash(req.password),
+        role=models.UserRole.DENTISTE,
+        nom_complet=req.nom_complet,
+        telephone_mobile=req.telephone_mobile,
+        adresse_complete=req.adresse_complete,
+        is_active=False,
+        is_licensed=False,
+    )
+    
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    audit_service.log(
+        db=db,
+        user_id=new_user.id,
+        action="SIGNUP_SUCCESS",
+        resource_type="User",
+        resource_id=new_user.email,
+        severity="INFO",
+        details="Nouveau client inscrit. CGU et politique de confidentialite acceptees. En attente de validation."
+    )
+
+    try:
+        from backend.services.email_service import email_service
+        background_tasks.add_task(email_service.send_signup_received, new_user.email, new_user.nom_complet)
+        background_tasks.add_task(email_service.send_admin_signup_notice, new_user.email, new_user.nom_complet)
+    except Exception as e:
+        logger.warning("Email transactionnel inscription non programme: %s", e)
+    
+    try:
+        from backend.services.license_service import LicenseService
+        from datetime import datetime, timezone
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        firebase_db = LicenseService()._db
+        if firebase_db:
+            # Cloud boundary: Firebase stores only identity/licensing onboarding
+            # metadata. Contact/address and local database identifiers stay local.
+            firebase_db.collection('pending_clients').document(req.email).set({
+                "email": req.email,
+                "nom_complet": req.nom_complet,
+                "status": "pending",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.info(f"Demande d'inscription envoyée sur Firebase pour {req.email}")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Echec push pending_clients vers Firebase : {e}")
+        
+    return new_user
+
+
+# ---------------------------------------------------------------------------
+# Google OAuth 2.0 — Authorization Code Flow
+# ---------------------------------------------------------------------------
+
+_GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+_GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
+_GOOGLE_LOCAL_HTTPS_ORIGIN = "https://127.0.0.1:8005"
+_GOOGLE_LOCAL_HTTP_ORIGIN = "http://127.0.0.1:8005"
+
+
+def _cabinet_https_enabled() -> bool:
+    return os.getenv("DIGITALCROWN_ENABLE_HTTPS", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _google_local_origin() -> str:
+    return _GOOGLE_LOCAL_HTTPS_ORIGIN if _cabinet_https_enabled() else _GOOGLE_LOCAL_HTTP_ORIGIN
+
+
+def _google_redirect_uri() -> str:
+    return f"{_google_local_origin()}/api/auth/google/callback"
+
+
+_GOOGLE_STATE_COOKIE = "google_oauth_state"
+_GOOGLE_STATE_MAX_AGE_SECONDS = 300
+_GOOGLE_STATE_COOKIE_PATH = "/api/auth/google"
+
+
+def _google_clear_state_cookie(response: Response) -> None:
+    response.delete_cookie(_GOOGLE_STATE_COOKIE, path=_GOOGLE_STATE_COOKIE_PATH)
+
+
+@router.get("/google/authorize", summary="Démarrer la connexion Google")
+async def google_authorize(request: Request):
+    # The real HTTPS cabinet launcher exposes the UI on digitalcrown.local for
+    # WebAuthn, while Google OAuth is intentionally registered on loopback.
+    # Normalize the browser onto the callback origin *before* minting state so
+    # the host-only state cookie and the callback always share one origin.
+    canonical_origin = _google_local_origin()
+    current_origin = f"{request.url.scheme}://{request.url.netloc}"
+    if request.url.port == 8005 and current_origin != canonical_origin:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(
+            url=f"{canonical_origin}/api/auth/google/authorize",
+        )
+
+    if not settings.GOOGLE_CLIENT_ID:
+        raise HTTPException(
+            status_code=501,
+            detail="Google OAuth non configuré. Ajoutez GOOGLE_CLIENT_ID dans backend/.env.local (ou dans le fichier d’environnement actif).",
+        )
+
+    state = secrets.token_urlsafe(32)
+    params = {
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": _google_redirect_uri(),
+        "response_type": "code",
+        "scope": "openid email profile",
+        "access_type": "offline",
+        "prompt": "select_account",
+        "state": state,
+    }
+    from fastapi.responses import RedirectResponse
+
+    redirect = RedirectResponse(url=f"{_GOOGLE_AUTH_URL}?{urlencode(params)}")
+    redirect.set_cookie(
+        _GOOGLE_STATE_COOKIE,
+        state,
+        max_age=_GOOGLE_STATE_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=_cabinet_https_enabled(),
+        samesite="lax",
+        path=_GOOGLE_STATE_COOKIE_PATH,
+    )
+    return redirect
+
+
+@router.get("/google/callback", summary="Callback Google OAuth")
+async def google_callback(
+    request: Request,
+    state: str = None,
+    code: str = None,
+    error: str = None,
+    db: Session = Depends(get_db),
+):
+    from fastapi.responses import RedirectResponse
+    from backend.routers.mobile import resolve_frontend_url
+
+    if _cabinet_https_enabled():
+        frontend_url = _GOOGLE_LOCAL_HTTPS_ORIGIN
+    else:
+        frontend_url = resolve_frontend_url(settings.FRONTEND_URL)
+
+    expected_state = request.cookies.get(_GOOGLE_STATE_COOKIE, "")
+    if not state or not expected_state or not hmac.compare_digest(state, expected_state):
+        redirect = RedirectResponse(url=f"{frontend_url}/login?error=google_state_invalid")
+        _google_clear_state_cookie(redirect)
+        return redirect
+
+    if error or not code:
+        redirect = RedirectResponse(url=f"{frontend_url}/login?error=google_cancelled")
+        _google_clear_state_cookie(redirect)
+        return redirect
+
+    async with httpx.AsyncClient() as client:
+        token_res = await client.post(_GOOGLE_TOKEN_URL, data={
+            "code": code,
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "redirect_uri": _google_redirect_uri(),
+            "grant_type": "authorization_code",
+        })
+        if token_res.status_code != 200:
+            redirect = RedirectResponse(url=f"{frontend_url}/login?error=google_token_failed")
+            _google_clear_state_cookie(redirect)
+            return redirect
+
+        google_tokens = token_res.json()
+        access_token_google = google_tokens.get("access_token")
+
+        userinfo_res = await client.get(
+            _GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token_google}"},
+        )
+        if userinfo_res.status_code != 200:
+            redirect = RedirectResponse(url=f"{frontend_url}/login?error=google_userinfo_failed")
+            _google_clear_state_cookie(redirect)
+            return redirect
+
+        userinfo = userinfo_res.json()
+
+    email = userinfo.get("email")
+    nom_complet = userinfo.get("name", "")
+
+    if not email:
+        redirect = RedirectResponse(url=f"{frontend_url}/login?error=google_no_email")
+        _google_clear_state_cookie(redirect)
+        return redirect
+
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if not user:
+        params = urlencode({"email": email, "full_name": nom_complet, "google_signup": "true"})
+        redirect = RedirectResponse(url=f"{frontend_url}/register?{params}")
+        _google_clear_state_cookie(redirect)
+        return redirect
+
+    if not user.is_active:
+        redirect = RedirectResponse(url=f"{frontend_url}/login?error=account_inactive")
+        _google_clear_state_cookie(redirect)
+        return redirect
+
+    approval = getattr(user, "approval_status", "approved") or "approved"
+    if getattr(user, "employer_id", None) is not None and approval != "approved":
+        redirect = RedirectResponse(url=f"{frontend_url}/login?error=account_inactive")
+        _google_clear_state_cookie(redirect)
+        return redirect
+
+    access_token = create_access_token(data={"sub": user.email})
+    refresh_token = create_refresh_token(data={"sub": user.email})
+
+    audit_service.log(
+        db=db,
+        user_id=user.id,
+        employer_id=user.get_employer_id(),
+        action="LOGIN_GOOGLE",
+        resource_type="User",
+        resource_id=user.email,
+        severity="INFO",
+    )
+
+    redirect = RedirectResponse(url=f"{frontend_url}/login?google=success")
+    _google_clear_state_cookie(redirect)
+    _set_auth_cookies(redirect, access_token, refresh_token)
+    return redirect
