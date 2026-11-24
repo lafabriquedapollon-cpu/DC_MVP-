@@ -1,0 +1,86 @@
+name: DC MVP - isolated UI smoke
+on:
+  push:
+    branches: [ci/dc-mvp-smoke-20261124]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: dc-mvp-ui-smoke
+  cancel-in-progress: true
+jobs:
+  ui-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      CI: "true"
+      VITE_API_URL: http://127.0.0.1:8008
+      VITE_ENABLE_HTTPS: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Launch Vite on loopback and inspect real login UI
+        working-directory: frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/dc-ui-smoke"
+          mkdir -p "$evidence"
+          ./node_modules/.bin/vite --host 127.0.0.1 --port 5173 --strictPort > "$RUNNER_TEMP/dc-vite.log" 2>&1 &
+          vite_pid=$!
+          trap 'kill "$vite_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in $(seq 1 40); do
+            if curl --noproxy '*' --fail --silent http://127.0.0.1:5173/login > /dev/null; then
+              ready=true
+              break
+            fi
+            if ! kill -0 "$vite_pid" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            echo "::error::Vite did not serve /login on loopback"
+            tail -n 25 "$RUNNER_TEMP/dc-vite.log"
+            exit 1
+          fi
+          echo "VITE_HTTP_PASS"
+          chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser)
+          flags=(--headless --no-sandbox --disable-dev-shm-usage --disable-background-networking --disable-sync --disable-extensions --no-first-run --no-default-browser-check '--proxy-server=http://127.0.0.1:9' '--proxy-bypass-list=127.0.0.1;localhost' --window-size=1440,900 --virtual-time-budget=12000)
+          timeout 50s "$chrome" "${flags[@]}" --user-data-dir="$RUNNER_TEMP/dc-chrome-shot" --screenshot="$evidence/login.png" http://127.0.0.1:5173/login > "$RUNNER_TEMP/dc-chrome-shot.log" 2>&1
+          test -s "$evidence/login.png"
+          timeout 50s "$chrome" "${flags[@]}" --user-data-dir="$RUNNER_TEMP/dc-chrome-dom" --dump-dom http://127.0.0.1:5173/login > "$RUNNER_TEMP/dc-login.html" 2> "$RUNNER_TEMP/dc-chrome-dom.log"
+          python3 - "$RUNNER_TEMP/dc-login.html" <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          import sys
+          class LoginProbe(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.types = set()
+                  self.overlay = False
+              def handle_starttag(self, tag, attrs):
+                  if tag == "input":
+                      self.types.add(dict(attrs).get("type", ""))
+                  if tag == "vite-error-overlay":
+                      self.overlay = True
+          probe = LoginProbe()
+          probe.feed(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if probe.overlay or not {"email", "password"} <= probe.types:
+              raise SystemExit("UI_LOGIN_BLOCKED: expected form controls missing or Vite error overlay present")
+          print("UI_LOGIN_FORM_PASS: email and password inputs rendered; backend/auth not tested")
+          PY
+      - name: Upload synthetic UI screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dc-mvp-login-screenshot
+          path: ${{ runner.temp }}/dc-ui-smoke/login.png
+          if-no-files-found: ignore
+          retention-days: 3
