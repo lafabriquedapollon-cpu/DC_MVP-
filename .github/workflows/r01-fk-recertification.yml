@@ -1,0 +1,228 @@
+name: R0.1 FK historical recertification
+on:
+  push:
+    branches: [ci/r01-fk-recertification-20261124]
+    paths: ['.github/workflows/r01-fk-recertification.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: r01-fk-recertification
+  cancel-in-progress: false
+jobs:
+  private-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Verify ephemeral loopback namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          ns="r01-probe-$GITHUB_RUN_ID"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          test "$(sudo ip netns exec "$ns" ip -o link show | wc -l)" -eq 1
+          test -z "$(sudo ip netns exec "$ns" ip route show default)"
+          echo RUNNER_LOOPBACK_PREFLIGHT_PASS
+      - name: Require confidential input
+        shell: bash
+        env:
+          DC_PRIVATE_BUNDLE: ${{ secrets.DC_R01_FK_RECERT_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DC_PRIVATE_BUNDLE" ]]; then
+            echo "PRIVATE_BUNDLE_REQUIRED"
+            exit 1
+          fi
+          printf '%s' "$DC_PRIVATE_BUNDLE" | base64 -d | sha256sum -c <(printf '%s  -\n' 75c5f0ee2134e3ec8edf59c5370cd8b9ec32bc3564bb31bef7c761ac5c9efe80) >/dev/null
+          echo PRIVATE_BUNDLE_SHA256_PASS
+      - uses: actions/checkout@v4
+        with:
+          ref: 92dec23fe7e46bef2312acdf6a58d2eeb42c81d3
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install validated runtime prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsqlcipher-dev libmagic1 libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libgl1 libglib2.0-0t64
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+          python -m pip install --no-cache-dir --index-url https://pypi.org/simple -r backend/requirements.txt
+          python -m pip check
+          python -c 'import sqlcipher3'
+      - name: Stage and execute recovery in disposable LABs
+        shell: bash
+        env:
+          DC_PRIVATE_BUNDLE: ${{ secrets.DC_R01_FK_RECERT_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export DC_STAGE="$(mktemp -d "$RUNNER_TEMP/r01-private.XXXXXXXX")"
+          export DC_CHECKOUT="$GITHUB_WORKSPACE"
+          export DC_PYTHON="$(command -v python)"
+          ns="r01-exec-$GITHUB_RUN_ID"
+          lab=""
+          cleanup() {
+            sudo ip netns del "$ns" 2>/dev/null || true
+            if [[ -n "$lab" ]]; then rm -rf -- "$lab"; fi
+            rm -rf -- "$DC_STAGE" "$DC_CHECKOUT/backend/tests"
+          }
+          # Never remove a preexisting tests directory.
+          test "$(git rev-parse HEAD)" = 92dec23fe7e46bef2312acdf6a58d2eeb42c81d3
+          test -z "$(git status --porcelain=v1 --untracked-files=all --ignored=matching)"
+          test ! -e backend/tests && test ! -L backend/tests
+          trap cleanup EXIT
+          printf '%s' "$DC_PRIVATE_BUNDLE" | base64 -d > "$DC_STAGE/bundle.zip"
+          unset DC_PRIVATE_BUNDLE
+          # All raw test output and source stays in the disposable runner.
+          if ! python - <<'PY' > "$DC_STAGE/stage.log" 2>&1
+          import ast, hashlib, json, os, pathlib, stat, zipfile
+          s=pathlib.Path(os.environ["DC_STAGE"])
+          root=pathlib.Path(os.environ["DC_CHECKOUT"]).resolve()
+          zpath=s/"bundle.zip"
+          assert hashlib.sha256(zpath.read_bytes()).hexdigest()=="75c5f0ee2134e3ec8edf59c5370cd8b9ec32bc3564bb31bef7c761ac5c9efe80"
+          with zipfile.ZipFile(zpath) as z:
+              names=z.namelist()
+              assert len(names)==len(set(names))==15 and z.testzip() is None
+              for f in z.infolist():
+                  p=pathlib.PurePosixPath(f.filename)
+                  assert not p.is_absolute() and ".." not in p.parts and not f.is_dir() and chr(92) not in f.filename
+                  assert stat.S_IFMT(f.external_attr>>16) in (0,stat.S_IFREG)
+              m=json.loads(z.read("manifest.json"))
+              assert m["base"]=="92dec23fe7e46bef2312acdf6a58d2eeb42c81d3" and len(m["historical_tests"])==11
+              expected={"manifest.json","run_case.sh","backend/tests/_recovery_guard.py","backend/tests/conftest.py"}
+              nodes=[]
+              for item in m["historical_tests"]:
+                  f=item["file"]; p=pathlib.PurePosixPath(f)
+                  assert p.parent==pathlib.PurePosixPath("backend/tests") and p.name.startswith("test_") and p.suffix==".py"
+                  b=z.read(f)
+                  assert hashlib.sha256(b).hexdigest()==item["sha256"]
+                  found=[f+"::"+n.name for n in ast.parse(b).body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name.startswith("test_")]
+                  assert found==item["nodes"]
+                  expected.add(f); nodes.extend(found)
+              assert set(names)==expected and len(nodes)==len(set(nodes))==29
+              for f in names:
+                  if f.startswith("backend/tests/"):
+                      dst=root/f
+                      assert not dst.exists() and not dst.is_symlink() and dst.resolve()==dst
+                      dst.parent.mkdir(parents=True,exist_ok=True)
+                      dst.write_bytes(z.read(f))
+              # Adapt only the historical synthetic pairing fixture to the current
+              # purpose-separated LAB key contract. Original archive stays immutable.
+              pocket_file="backend/tests/test_mobile_pocket_security_boundary.py"
+              assert sum(n.startswith(pocket_file+"::") for n in nodes)==3
+              dst=root/pocket_file
+              original=dst.read_text(encoding="utf-8")
+              tree=ast.parse(original)
+              kw=[n for n in ast.walk(tree) if isinstance(n,ast.keyword) and n.arg=="master_key" and isinstance(n.value,ast.BinOp) and isinstance(n.value.op,ast.Mult) and isinstance(n.value.left,ast.Constant) and n.value.left.value=="a" and isinstance(n.value.right,ast.Constant) and n.value.right.value==64]
+              assert len(kw)==1
+              v=kw[0].value
+              assert v.lineno==v.end_lineno
+              lines=original.splitlines(keepends=True)
+              line=lines[v.lineno-1]
+              assert line.isascii()
+              lines[v.lineno-1]=line[:v.col_offset]+"__import__('backend.core.key_material', fromlist=['mobile_pairing_key_hex']).mobile_pairing_key_hex()"+line[v.end_col_offset:]
+              adapted="".join(lines)
+              a=ast.parse(adapted)
+              def assertions(t):
+                  return [ast.dump(n,include_attributes=False) for n in ast.walk(t) if isinstance(n,ast.Assert)]
+              assert assertions(tree)==assertions(a)
+              assert len(assertions(a))>0
+              assert [n.name for n in tree.body if isinstance(n,ast.FunctionDef)]==[n.name for n in a.body if isinstance(n,ast.FunctionDef)]
+              dst.write_text(adapted,encoding="utf-8")
+              # The missing-key negative fixture must remove the dedicated key too.
+              # This happens only within pytest monkeypatch scope, after LAB attestation.
+              candidates=[]
+              for item in m["historical_tests"]:
+                  dst=root/item["file"]
+                  original=dst.read_text(encoding="utf-8")
+                  tree=ast.parse(original)
+                  for n in ast.walk(tree):
+                      if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and isinstance(n.value.func,ast.Attribute) and n.value.func.attr=="delenv" and n.value.args and isinstance(n.value.args[0],ast.Constant) and n.value.args[0].value=="CABINET_MASTER_KEY_HEX":
+                          candidates.append((dst,original,tree,n))
+              assert len(candidates)==1
+              dst,original,tree,n=candidates[0]
+              lines=original.splitlines(keepends=True)
+              lines.insert(n.lineno-1," "*n.col_offset+'monkeypatch.delenv("SQLCIPHER_KEY_HEX", raising=False)\n')
+              adapted="".join(lines)
+              a=ast.parse(adapted)
+              assert [ast.dump(x,include_attributes=False) for x in ast.walk(tree) if isinstance(x,ast.Assert)]==[ast.dump(x,include_attributes=False) for x in ast.walk(a) if isinstance(x,ast.Assert)]
+              dst.write_text(adapted,encoding="utf-8")
+              (s/"run_case.sh").write_bytes(z.read("run_case.sh"))
+              (s/"nodes").write_text("\n".join(sorted(nodes))+"\n")
+          PY
+          then echo STAGING_REFUSED; exit 1; fi
+          echo STAGING_PASS files=11 expected_tests=29 fixture_adaptations=2
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          test "$(sudo ip netns exec "$ns" ip -o link show | wc -l)" -eq 1
+          run_one() {
+            local node="$1" idx="$2" rc=0
+            lab="$(mktemp -d "$RUNNER_TEMP/dc-rehearsal.XXXXXXXX")"
+            sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_CHECKOUT="$DC_CHECKOUT" DC_PYTHON="$DC_PYTHON" DC_STAGE="$DC_STAGE" DC_NODE="$node" bash -s > "$DC_STAGE/case-$idx.log" 2>&1 <<'LAB' || rc=$?
+          set -euo pipefail
+          umask 077
+          cd "$DC_CHECKOUT"
+          export HOME="$DC_LAB_ROOT/home"
+          export XDG_CONFIG_HOME="$HOME/config" XDG_RUNTIME_DIR="$HOME/runtime" XDG_DATA_HOME="$HOME/data"
+          export DIGITALCROWN_USER_DATA_DIR="$DC_LAB_ROOT/user-data" DIGITALCROWN_CONFIG_DIR="$DC_LAB_ROOT/config" DIGITALCROWN_LOG_DIR="$DC_LAB_ROOT/logs" DIGITALCROWN_RUNTIME_DIR="$DC_LAB_ROOT/runtime"
+          export MEDIA_ROOT="$DC_LAB_ROOT/rehearsal-media" DIGITALCROWN_ENV_FILE="$DC_LAB_ROOT/isolated.env"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME" "$DIGITALCROWN_USER_DATA_DIR" "$DIGITALCROWN_CONFIG_DIR" "$DIGITALCROWN_LOG_DIR" "$DIGITALCROWN_RUNTIME_DIR" "$MEDIA_ROOT"
+          touch "$DIGITALCROWN_ENV_FILE"
+          export ENVIRONMENT=e2e_install_rehearsal ALLOWED_ORIGINS=http://127.0.0.1:5173
+          export DATABASE_URL="sqlite:///$DC_LAB_ROOT/fresh-rehearsal.db"
+          export SECRET_KEY="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export CABINET_MASTER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export SQLCIPHER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export MOBILE_PAIRING_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export DIGITALCROWN_ISOLATED_RUNTIME=true TELEMETRY_ENABLED=false
+          export GOOGLE_CLIENT_ID='' GOOGLE_CLIENT_SECRET='' SMTP_HOST='' PATIENT_COMPANION_RELAY_URL='' PATIENT_COMPANION_RELAY_BOOTSTRAP_SECRET=''
+          export DIGITALCROWN_ISOLATION_DB_FINGERPRINT="$("$DC_PYTHON" -c 'import os; from backend.core.runtime_safety import database_target_fingerprint; print(database_target_fingerprint(os.environ["DATABASE_URL"]))')"
+          export DC_VERIFIED_BASE=92dec23fe7e46bef2312acdf6a58d2eeb42c81d3
+          test ! -e "$DC_LAB_ROOT/fresh-rehearsal.db"
+          test "$(ip -o link show | wc -l)" -eq 1
+          "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
+          bash "$DC_STAGE/run_case.sh" "$DC_NODE"
+          LAB
+            if [[ "$node" != collect ]]; then
+              if [[ -f "$lab/result.xml" ]]; then
+                if python - "$lab/result.xml" "$rc" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root=ET.parse(sys.argv[1]).getroot()
+          cases=root.findall(".//testcase")
+          assert len(cases)==1
+          case=cases[0]
+          states=[x for x in ("failure","error","skipped") if case.find(x) is not None]
+          if states or int(sys.argv[2])!=0:
+              import re
+              element=case.find(states[0]) if states else None
+              msg=element.get("message","") if element is not None else ""
+              status_match=re.search(r"assert (400|401|403|404|409|422|429|500|503) == (200|201|400|401|403|404|409|422|429)",msg)
+              kind=next((k for k in ("AssertionError","RuntimeError","IntegrityError","OperationalError","AttributeError","TypeError","ValueError","HTTPException") if k in msg),"UNCLASSIFIED")
+              print("CASE_DIAGNOSTIC state="+(states[0] if states else "exit_nonzero")+" kind="+kind+(" actual_status="+status_match[1]+" expected_status="+status_match[2] if status_match else ""))
+              raise SystemExit(1)
+          assert not states
+          PY
+                then rc=0; else rc=1; fi
+              else rc=1; fi
+            fi
+            rm -rf -- "$lab"
+            lab=""
+            return "$rc"
+          }
+          if ! run_one collect 0; then echo COLLECTION_FAILED; exit 1; fi
+          grep -E '^backend/tests/test_[a-z0-9_]+\.py::test_[a-z0-9_]+$' "$DC_STAGE/case-0.log" | sort > "$DC_STAGE/collected"
+          if ! cmp -s "$DC_STAGE/nodes" "$DC_STAGE/collected"; then echo COLLECTION_MISMATCH; exit 1; fi
+          echo COLLECTION_PASS count=29
+          passed=0; failed=0; idx=0
+          while IFS= read -r node; do
+            idx=$((idx+1))
+            if run_one "$node" "$idx"; then passed=$((passed+1)); else failed=$((failed+1)); fi
+            printf 'CASE_%02d completed\n' "$idx"
+          done < "$DC_STAGE/nodes"
+          printf 'RECOVERY_RESULT collected=29 attempted=%d passed=%d nonpassing=%d\n' "$idx" "$passed" "$failed"
+          test "$idx" -eq 29 && test "$failed" -eq 0
