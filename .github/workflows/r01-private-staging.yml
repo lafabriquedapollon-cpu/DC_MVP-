@@ -1,0 +1,177 @@
+name: R0.1 isolated recovery
+on:
+  push:
+    branches: [ci/r01-private-staging-20261124]
+    paths: ['.github/workflows/r01-private-staging.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: r01-private-staging
+  cancel-in-progress: false
+jobs:
+  private-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Verify ephemeral loopback namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          ns="r01-probe-$GITHUB_RUN_ID"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          test "$(sudo ip netns exec "$ns" ip -o link show | wc -l)" -eq 1
+          test -z "$(sudo ip netns exec "$ns" ip route show default)"
+          echo RUNNER_LOOPBACK_PREFLIGHT_PASS
+      - name: Require confidential input
+        shell: bash
+        env:
+          DC_PRIVATE_BUNDLE: ${{ secrets.DC_R01_BUNDLE_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DC_PRIVATE_BUNDLE" ]]; then
+            echo "PRIVATE_BUNDLE_REQUIRED"
+            exit 1
+          fi
+          printf '%s' "$DC_PRIVATE_BUNDLE" | base64 -d | sha256sum -c <(printf '%s  -\n' b29e544e90c53f1acf245cb8d27bac86713d5c6a27d91d797372bc90bebc5cef) >/dev/null
+          echo PRIVATE_BUNDLE_SHA256_PASS
+      - uses: actions/checkout@v4
+        with:
+          ref: de319eed1904848577c74299d69a1dc69cabd869
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install validated runtime prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsqlcipher-dev libmagic1 libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libgl1 libglib2.0-0t64
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+          python -m pip install --no-cache-dir --index-url https://pypi.org/simple -r backend/requirements.txt
+          python -m pip check
+          python -c 'import sqlcipher3'
+      - name: Stage and execute recovery in disposable LABs
+        shell: bash
+        env:
+          DC_PRIVATE_BUNDLE: ${{ secrets.DC_R01_BUNDLE_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export DC_STAGE="$(mktemp -d "$RUNNER_TEMP/r01-private.XXXXXXXX")"
+          export DC_CHECKOUT="$GITHUB_WORKSPACE"
+          export DC_PYTHON="$(command -v python)"
+          ns="r01-exec-$GITHUB_RUN_ID"
+          lab=""
+          cleanup() {
+            sudo ip netns del "$ns" 2>/dev/null || true
+            if [[ -n "$lab" ]]; then rm -rf -- "$lab"; fi
+            rm -rf -- "$DC_STAGE" "$DC_CHECKOUT/backend/tests"
+          }
+          # Never remove a preexisting tests directory.
+          test "$(git rev-parse HEAD)" = de319eed1904848577c74299d69a1dc69cabd869
+          test -z "$(git status --porcelain=v1 --untracked-files=all --ignored=matching)"
+          test ! -e backend/tests && test ! -L backend/tests
+          trap cleanup EXIT
+          printf '%s' "$DC_PRIVATE_BUNDLE" | base64 -d > "$DC_STAGE/bundle.zip"
+          unset DC_PRIVATE_BUNDLE
+          # All raw test output and source stays in the disposable runner.
+          if ! python - <<'PY' > "$DC_STAGE/stage.log" 2>&1
+          import ast, hashlib, json, os, pathlib, stat, zipfile
+          s=pathlib.Path(os.environ["DC_STAGE"])
+          root=pathlib.Path(os.environ["DC_CHECKOUT"]).resolve()
+          zpath=s/"bundle.zip"
+          assert hashlib.sha256(zpath.read_bytes()).hexdigest()=="b29e544e90c53f1acf245cb8d27bac86713d5c6a27d91d797372bc90bebc5cef"
+          with zipfile.ZipFile(zpath) as z:
+              names=z.namelist()
+              assert len(names)==len(set(names))==15 and z.testzip() is None
+              for f in z.infolist():
+                  p=pathlib.PurePosixPath(f.filename)
+                  assert not p.is_absolute() and ".." not in p.parts and not f.is_dir() and chr(92) not in f.filename
+                  assert stat.S_IFMT(f.external_attr>>16) in (0,stat.S_IFREG)
+              m=json.loads(z.read("manifest.json"))
+              assert m["base"]=="de319eed1904848577c74299d69a1dc69cabd869" and len(m["historical_tests"])==8
+              expected={"README.md","guard-evidence.txt","manifest.json","run_case.sh","verify_guard.py","backend/tests/_recovery_guard.py","backend/tests/conftest.py"}
+              nodes=[]
+              for item in m["historical_tests"]:
+                  f=item["file"]; p=pathlib.PurePosixPath(f)
+                  assert p.parent==pathlib.PurePosixPath("backend/tests") and p.name.startswith("test_") and p.suffix==".py"
+                  b=z.read(f)
+                  assert hashlib.sha256(b).hexdigest()==item["sha256"]
+                  found=[f+"::"+n.name for n in ast.parse(b).body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name.startswith("test_")]
+                  assert found==item["nodes"]
+                  expected.add(f); nodes.extend(found)
+              assert set(names)==expected and len(nodes)==len(set(nodes))==21
+              for f in names:
+                  if f.startswith("backend/tests/"):
+                      dst=root/f
+                      assert not dst.exists() and not dst.is_symlink() and dst.resolve()==dst
+                      dst.parent.mkdir(parents=True,exist_ok=True)
+                      dst.write_bytes(z.read(f))
+              (s/"run_case.sh").write_bytes(z.read("run_case.sh"))
+              (s/"nodes").write_text("\n".join(sorted(nodes))+"\n")
+          PY
+          then echo STAGING_REFUSED; exit 1; fi
+          echo STAGING_PASS files=8 expected_tests=21
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          test "$(sudo ip netns exec "$ns" ip -o link show | wc -l)" -eq 1
+          run_one() {
+            local node="$1" idx="$2" rc=0
+            lab="$(mktemp -d "$RUNNER_TEMP/dc-rehearsal.XXXXXXXX")"
+            sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_CHECKOUT="$DC_CHECKOUT" DC_PYTHON="$DC_PYTHON" DC_STAGE="$DC_STAGE" DC_NODE="$node" bash -s > "$DC_STAGE/case-$idx.log" 2>&1 <<'LAB' || rc=$?
+          set -euo pipefail
+          umask 077
+          cd "$DC_CHECKOUT"
+          export HOME="$DC_LAB_ROOT/home"
+          export XDG_CONFIG_HOME="$HOME/config" XDG_RUNTIME_DIR="$HOME/runtime" XDG_DATA_HOME="$HOME/data"
+          export DIGITALCROWN_USER_DATA_DIR="$DC_LAB_ROOT/user-data" DIGITALCROWN_CONFIG_DIR="$DC_LAB_ROOT/config" DIGITALCROWN_LOG_DIR="$DC_LAB_ROOT/logs" DIGITALCROWN_RUNTIME_DIR="$DC_LAB_ROOT/runtime"
+          export MEDIA_ROOT="$DC_LAB_ROOT/rehearsal-media" DIGITALCROWN_ENV_FILE="$DC_LAB_ROOT/isolated.env"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME" "$DIGITALCROWN_USER_DATA_DIR" "$DIGITALCROWN_CONFIG_DIR" "$DIGITALCROWN_LOG_DIR" "$DIGITALCROWN_RUNTIME_DIR" "$MEDIA_ROOT"
+          touch "$DIGITALCROWN_ENV_FILE"
+          export ENVIRONMENT=e2e_install_rehearsal ALLOWED_ORIGINS=http://127.0.0.1:5173
+          export DATABASE_URL="sqlite:///$DC_LAB_ROOT/fresh-rehearsal.db"
+          export SECRET_KEY="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export CABINET_MASTER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export SQLCIPHER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export MOBILE_PAIRING_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export DIGITALCROWN_ISOLATED_RUNTIME=true TELEMETRY_ENABLED=false
+          export GOOGLE_CLIENT_ID='' GOOGLE_CLIENT_SECRET='' SMTP_HOST='' PATIENT_COMPANION_RELAY_URL='' PATIENT_COMPANION_RELAY_BOOTSTRAP_SECRET=''
+          export DIGITALCROWN_ISOLATION_DB_FINGERPRINT="$("$DC_PYTHON" -c 'import os; from backend.core.runtime_safety import database_target_fingerprint; print(database_target_fingerprint(os.environ["DATABASE_URL"]))')"
+          export DC_VERIFIED_BASE=de319eed1904848577c74299d69a1dc69cabd869
+          test ! -e "$DC_LAB_ROOT/fresh-rehearsal.db"
+          test "$(ip -o link show | wc -l)" -eq 1
+          "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
+          bash "$DC_STAGE/run_case.sh" "$DC_NODE"
+          LAB
+            if [[ "$node" != collect ]]; then
+              if [[ -f "$lab/result.xml" ]]; then
+                if python - "$lab/result.xml" "$rc" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root=ET.parse(sys.argv[1]).getroot()
+          cases=root.findall(".//testcase")
+          assert len(cases)==1
+          assert int(sys.argv[2])==0 and not any(cases[0].find(x) is not None for x in ("failure","error","skipped"))
+          PY
+                then rc=0; else rc=1; fi
+              else rc=1; fi
+            fi
+            rm -rf -- "$lab"
+            lab=""
+            return "$rc"
+          }
+          if ! run_one collect 0; then echo COLLECTION_FAILED; exit 1; fi
+          grep -E '^backend/tests/test_[a-z0-9_]+\.py::test_[a-z0-9_]+$' "$DC_STAGE/case-0.log" | sort > "$DC_STAGE/collected"
+          if ! cmp -s "$DC_STAGE/nodes" "$DC_STAGE/collected"; then echo COLLECTION_MISMATCH; exit 1; fi
+          echo COLLECTION_PASS count=21
+          passed=0; failed=0; idx=0
+          while IFS= read -r node; do
+            idx=$((idx+1))
+            if run_one "$node" "$idx"; then passed=$((passed+1)); else failed=$((failed+1)); fi
+            printf 'CASE_%02d completed\n' "$idx"
+          done < "$DC_STAGE/nodes"
+          printf 'RECOVERY_RESULT collected=21 attempted=%d passed=%d nonpassing=%d\n' "$idx" "$passed" "$failed"
+          test "$idx" -eq 21 && test "$failed" -eq 0
