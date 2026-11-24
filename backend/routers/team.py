@@ -169,8 +169,8 @@ def create_team_member(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    "Ce collaborateur existe deja dans votre equipe. "
-                    "Utilisez la liste des membres pour le reactiver ou modifier ses droits."
+                    "Compte archive : cette adresse est conservee pour la tracabilite." if existing.is_archived else
+                    "Ce collaborateur existe deja dans votre equipe. Utilisez la liste des membres pour le reactiver ou modifier ses droits."
                 )
             )
         raise HTTPException(
@@ -241,6 +241,8 @@ def approve_team_member(
     ).first()
     if not member:
         raise HTTPException(status_code=404, detail="Membre introuvable dans votre equipe.")
+    if member.is_archived:
+        raise HTTPException(status_code=409, detail="Compte archive : reactivation interdite.")
     if getattr(member, "approval_status", "approved") != "pending":
         raise HTTPException(status_code=400, detail="Ce membre n'est pas en attente d'approbation.")
 
@@ -311,6 +313,9 @@ def update_team_member(
     if not member:
         raise HTTPException(status_code=404, detail="Membre introuvable dans votre equipe.")
 
+    if member.is_archived:
+        raise HTTPException(status_code=409, detail="Compte archive : modification interdite.")
+
     if updates.nom_complet is not None:
         member.nom_complet = updates.nom_complet
     if updates.email is not None:
@@ -351,7 +356,7 @@ def delete_team_member(
     db: Session = Depends(database.get_db),
     current_user: models.User = Depends(require_employer),
 ):
-    """Supprime definitivement un sous-compte de l'equipe."""
+    """Archive le sous-compte et revoque son acces sans supprimer son historique."""
     member = db.query(models.User).filter(
         models.User.id == member_id,
         models.User.employer_id == current_user.id,
@@ -359,5 +364,9 @@ def delete_team_member(
     if not member:
         raise HTTPException(status_code=404, detail="Membre introuvable dans votre equipe.")
 
-    db.delete(member)
+    # Preserve historical principal and clinical/financial references.
+    # Rejected members no longer reserve a seat; archived addresses remain reserved.
+    member.is_active = False
+    member.is_archived = True
+    member.approval_status = "rejected"
     db.commit()
