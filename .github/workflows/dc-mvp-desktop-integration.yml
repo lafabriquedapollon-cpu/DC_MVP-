@@ -147,7 +147,7 @@ jobs:
                   time.sleep(1)
           else:
               raise RuntimeError("Restart health failed")
-          credentials = urllib.parse.urlencode({"username":"ci-owner@example.invalid","password":os.environ["DC_SYNTH_PASSWORD"]}).encode()
+          credentials = urllib.parse.urlencode({"username":"ci-owner@example.com","password":os.environ["DC_SYNTH_PASSWORD"]}).encode()
           with opener.open(urllib.request.Request(base+"/api/auth/login",data=credentials),timeout=10) as r:
               token = json.load(r)["access_token"]
           patient_id = int((pathlib.Path(os.environ["DC_LAB_ROOT"])/"synthetic-patient-id").read_text())
