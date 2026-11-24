@@ -25,6 +25,8 @@ jobs:
       - name: Install locked frontend dependencies
         working-directory: frontend
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Validate integration driver syntax
+        run: node --check frontend/scripts/ci-desktop-integration.mjs
       - name: Validate all Python source syntax
         run: |
           python - <<'PY'
@@ -135,27 +137,19 @@ jobs:
           "$DC_PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port 8008 > "$DC_LAB_ROOT/uvicorn-restart.log" 2>&1 &
           pid=$!
           "$DC_PYTHON" - <<'PY'
-          import json, os, pathlib, time, urllib.request, urllib.parse
-          base = "http://127.0.0.1:8008"
+          import json, time, urllib.request
           opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
           for attempt in range(60):
               try:
-                  with opener.open(base + "/health", timeout=2) as r:
+                  with opener.open("http://127.0.0.1:8008/health", timeout=2) as r:
                       assert json.load(r)["db"] == "ok"
                   break
               except (OSError, AssertionError, ValueError, KeyError):
                   time.sleep(1)
           else:
               raise RuntimeError("Restart health failed")
-          credentials = urllib.parse.urlencode({"username":"ci-owner@example.com","password":os.environ["DC_SYNTH_PASSWORD"]}).encode()
-          with opener.open(urllib.request.Request(base+"/api/auth/login",data=credentials),timeout=10) as r:
-              token = json.load(r)["access_token"]
-          patient_id = int((pathlib.Path(os.environ["DC_LAB_ROOT"])/"synthetic-patient-id").read_text())
-          with opener.open(urllib.request.Request(base+"/api/patients/"+str(patient_id),headers={"Authorization":"Bearer "+token}),timeout=10) as r:
-              result=json.load(r)
-          assert result["nom"]=="CI-SYNTHETIC" and result["prenom"]=="Fixture"
-          print("BACKEND_RESTART_PATIENT_READ_PASS")
           PY
+          timeout 150s node frontend/scripts/ci-desktop-integration.mjs --verify-restart
           LAB
       - name: Upload synthetic browser evidence
         if: always()

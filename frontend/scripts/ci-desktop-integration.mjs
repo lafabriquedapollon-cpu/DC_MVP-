@@ -59,15 +59,46 @@ const setField=async(q,v)=>{
 const clickSubmit=()=>evalPage('(()=>{const b=document.querySelector("form button[type=submit]");if(!b||b.disabled)return false;b.click();return true})()');
 const pagePath=()=>evalPage('location.pathname');
 const api=async(path,options={})=>{
-  const r=await fetch(base+path,options);return {status:r.status,body:await r.json().catch(()=>null)};
+  const r=await fetch(base+path,options);return {status:r.status,body:await r.json().catch(()=>null),cookies:r.headers.getSetCookie()};
 };
 const login=async email=>{
   const r=await api('/api/auth/login',{method:'POST',body:new URLSearchParams({username:email,password})});
   assert.equal(r.status,200);assert(r.body?.access_token&&r.body?.refresh_token);return r.body;
 };
 const bearer=t=>({Authorization:'Bearer '+t});
+const workstationCookie=async()=>{
+  const result=await call('Network.getCookies',{urls:[base]});
+  const cookie=result.cookies.find(c=>c.name==='dc_workstation');
+  assert(Boolean(cookie?.httpOnly && cookie.value),'Server workstation cookie missing');
+  return 'dc_workstation='+cookie.value;
+};
+const withWorkstation=(token,cookie)=>({...bearer(token),Cookie:cookie});
+const denied=async(path,headers,status,detail,label)=>{
+  const r=await api(path,{headers});
+  assert.equal(r.status,status,label);
+  if(detail) assert.equal(r.body?.detail,detail,label+' reason');
+};
+const verifyIdentity=()=>evalPage('Boolean(document.body && document.body.innerText.toUpperCase().includes("CI-SYNTHETIC") && document.body.innerText.toUpperCase().includes("FIXTURE"))');
 try {
   await call('Network.enable');await call('Page.enable');
+  if(process.argv.includes('--verify-restart')){
+    const id=Number(fs.readFileSync(process.env.DC_LAB_ROOT+'/synthetic-patient-id','utf8'));
+    assert(Number.isSafeInteger(id)&&id>0);
+    const cookie=await workstationCookie();
+    const owner=await login('ci-owner@example.com');
+    const noStation=await api('/api/patients/'+id,{headers:bearer(owner.access_token)});
+    assert.equal(noStation.status,423,'Restart still requires workstation identity');
+    assert.equal(noStation.body?.detail,'WORKSTATION_IDENTITY_REQUIRED');
+    const result=await api('/api/patients/'+id,{headers:withWorkstation(owner.access_token,cookie)});
+    assert.equal(result.status,200,'Restart authenticated patient read');
+    assert.equal(result.body.nom,'CI-SYNTHETIC');
+    assert.equal(result.body.prenom,'Fixture');
+    await call('Page.reload',{ignoreCache:true});
+    await wait('restart patient GET',()=>responses.some(r=>r.path==='/api/patients/'+id&&r.method==='GET'&&r.status===200));
+    await wait('restart patient identity',verifyIdentity);
+    await capture('05-patient-restarted');
+    console.log('BACKEND_RESTART_PATIENT_READ_PASS');
+  } else {
   await wait('login form',()=>visible('input[type=email]'));
   await capture('01-login');
   assert.equal((await api('/api/patients/')).status,401);
@@ -95,18 +126,34 @@ try {
   const id=Number(path.split('/').pop());
   assert(Number.isSafeInteger(id)&&id>0);
   await wait('patient detail API',()=>responses.some(r=>r.path==='/api/patients/'+id&&r.method==='GET'&&r.status===200));
+  await wait('rendered patient identity',verifyIdentity);
   await capture('04-patient-detail');
   const result=await evalPage('fetch('+JSON.stringify(base+'/api/patients/'+id)+',{credentials:"include"}).then(async r=>({status:r.status,data:await r.json()}))');
   assert.equal(result.status,200);assert.equal(result.data.nom,'CI-SYNTHETIC');assert.equal(result.data.prenom,'Fixture');
   fs.writeFileSync(process.env.DC_LAB_ROOT+'/synthetic-patient-id',String(id));
   console.log('BROWSER_PATIENT_CREATE_READ_PASS');
+  const ownerCookie=await workstationCookie();
   const other=await login('ci-other@example.com');
-  assert.equal((await api('/api/patients/'+id,{headers:bearer(other.access_token)})).status,403);
-  const otherList=await api('/api/patients/',{headers:bearer(other.access_token)});
-  assert.equal(otherList.status,200);assert.deepEqual(otherList.body,[]);
+  // A different tenant receives its own first workstation through the real API.
+  const otherState=await api('/api/workstation/state',{headers:bearer(other.access_token)});
+  assert.equal(otherState.status,200,'Other tenant workstation registration');
+  const otherCookie=otherState.cookies.find(c=>c.startsWith('dc_workstation=')&&/httponly/i.test(c))?.split(';')[0];
+  assert(Boolean(otherCookie),'Other server workstation cookie missing');
+  assert(otherCookie!==ownerCookie,'Tenant workstation identities must differ');
+  const otherHeaders=withWorkstation(other.access_token,otherCookie);
+  await denied('/api/patients/'+id,withWorkstation(other.access_token,ownerCookie),423,'WORKSTATION_IDENTITY_REQUIRED','Cross-tenant workstation');
+  await denied('/api/patients/'+id,otherHeaders,403,'Accès refusé','Cross-tenant patient');
+  const otherList=await api('/api/patients/',{headers:otherHeaders});
+  assert.equal(otherList.status,200,'Other tenant list');assert(Array.isArray(otherList.body)&&otherList.body.length===0,'Other tenant list leaked data');
   const restricted=await login('ci-restricted@example.com');
-  assert.equal((await api('/api/patients/'+id,{headers:bearer(restricted.access_token)})).status,403);
-  assert.equal((await api('/api/patients/',{headers:bearer(restricted.access_token)})).status,403);
+  await denied('/api/patients/'+id,bearer(restricted.access_token),423,'WORKSTATION_IDENTITY_REQUIRED','Unidentified workstation');
+  // Same tenant, existing legitimate workstation identity; independently test RBAC.
+  const restrictedHeaders=withWorkstation(restricted.access_token,ownerCookie);
+  const state=await api('/api/workstation/bootstrap',{headers:restrictedHeaders});
+  assert.equal(state.status,200);assert(state.body.authenticated===true && state.body.enrollmentRequired===false && Boolean(state.body.workstationId),'Restricted user valid workstation');
+  await denied('/api/patients/'+id,restrictedHeaders,403,null,'Restricted patient detail');
+  await denied('/api/patients/',restrictedHeaders,403,null,'Restricted patient list');
+  console.log('API_WORKSTATION_DENIAL_PASS');
   console.log('API_TENANT_AND_PERMISSION_DENIAL_PASS');
   const rotated=await api('/api/auth/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({refresh_token:other.refresh_token})});
   assert.equal(rotated.status,200);assert(rotated.body.access_token);
@@ -116,6 +163,7 @@ try {
   assert.equal(logout.status,204);
   assert.equal((await api('/api/auth/me',{headers:bearer(rotated.body.access_token)})).status,401);
   console.log('API_REFRESH_REPLAY_LOGOUT_PASS');
+  }
 } catch(error) {
   await capture('failure').catch(()=>{});
   console.log('API_STATUS_EVIDENCE',JSON.stringify(responses.slice(-35)));
