@@ -42,6 +42,12 @@ def main():
     from sqlalchemy import inspect, text
     if app is None or database.engine.dialect.driver != "pysqlcipher":
         raise RuntimeError("Actual application/SQLCipher driver required")
+    print("FASTAPI_IMPORT_PASS", flush=True)
+    # Match the operator baseline metadata, including default-inert print tables.
+    from backend.core.operator_baseline_metadata import register_operator_baseline_metadata
+    from backend.core.print_audit_ddl import PROTECTED_PRINT_AUDITS
+    register_operator_baseline_metadata(models.Base.metadata)
+    print("OPERATOR_BASELINE_METADATA_PASS", flush=True)
     with database.engine.begin() as connection:
         if not connection.execute(text("PRAGMA cipher_version")).scalar():
             raise RuntimeError("SQLCipher unavailable")
@@ -55,6 +61,17 @@ def main():
         expected = set(models.Base.metadata.tables)
         if not expected <= tables:
             raise RuntimeError("Incomplete ORM metadata")
+        required_guards = {
+            f"dc_immutable_{table}_{operation}"
+            for table in PROTECTED_PRINT_AUDITS
+            for operation in ("update", "delete")
+        }
+        installed_guards = set(connection.execute(text(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+        )).scalars())
+        if not required_guards <= installed_guards:
+            raise RuntimeError("Append-only print audit guards missing")
+        print(f"PRINT_AUDIT_GUARDS_PRESENT count={len(required_guards)}", flush=True)
         for table in ("patients", "users"):
             if connection.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar() != 0:
                 raise RuntimeError("Synthetic baseline unexpectedly populated")
