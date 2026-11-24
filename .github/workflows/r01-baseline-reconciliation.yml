@@ -1,0 +1,111 @@
+name: R0.1 baseline schema reconciliation
+on:
+  push:
+    branches: [ci/r01-private-staging-20261124]
+    paths: ['.github/workflows/r01-baseline-reconciliation.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  schema-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: de319eed1904848577c74299d69a1dc69cabd869
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install validated runtime prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsqlcipher-dev libmagic1 libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libgl1 libglib2.0-0t64
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+          python -m pip install --no-cache-dir --index-url https://pypi.org/simple -r backend/requirements.txt
+          python -m pip check
+          python -c 'import sqlcipher3'
+      - name: Inspect fresh SQLCipher baseline without external network
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(git rev-parse HEAD)" = de319eed1904848577c74299d69a1dc69cabd869
+          lab="$(mktemp -d "$RUNNER_TEMP/dc-rehearsal.XXXXXXXX")"
+          ns="r01-schema-$GITHUB_RUN_ID"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_CHECKOUT="$GITHUB_WORKSPACE" DC_PYTHON="$(command -v python)" bash -s <<'LAB'
+          set -euo pipefail
+          umask 077
+          cd "$DC_CHECKOUT"
+          export HOME="$DC_LAB_ROOT/home"
+          export XDG_CONFIG_HOME="$HOME/config" XDG_RUNTIME_DIR="$HOME/runtime" XDG_DATA_HOME="$HOME/data"
+          export DIGITALCROWN_USER_DATA_DIR="$DC_LAB_ROOT/user-data" DIGITALCROWN_CONFIG_DIR="$DC_LAB_ROOT/config" DIGITALCROWN_LOG_DIR="$DC_LAB_ROOT/logs" DIGITALCROWN_RUNTIME_DIR="$DC_LAB_ROOT/runtime"
+          export MEDIA_ROOT="$DC_LAB_ROOT/rehearsal-media" DIGITALCROWN_ENV_FILE="$DC_LAB_ROOT/isolated.env"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME" "$DIGITALCROWN_USER_DATA_DIR" "$DIGITALCROWN_CONFIG_DIR" "$DIGITALCROWN_LOG_DIR" "$DIGITALCROWN_RUNTIME_DIR" "$MEDIA_ROOT"
+          touch "$DIGITALCROWN_ENV_FILE"
+          export ENVIRONMENT=e2e_install_rehearsal ALLOWED_ORIGINS=http://127.0.0.1:5173
+          export DATABASE_URL="sqlite:///$DC_LAB_ROOT/fresh-rehearsal.db"
+          export SECRET_KEY="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export CABINET_MASTER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export SQLCIPHER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export MOBILE_PAIRING_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export DIGITALCROWN_ISOLATED_RUNTIME=true TELEMETRY_ENABLED=false
+          export GOOGLE_CLIENT_ID='' GOOGLE_CLIENT_SECRET='' SMTP_HOST='' PATIENT_COMPANION_RELAY_URL='' PATIENT_COMPANION_RELAY_BOOTSTRAP_SECRET=''
+          export DIGITALCROWN_ISOLATION_DB_FINGERPRINT="$("$DC_PYTHON" -c 'import os; from backend.core.runtime_safety import database_target_fingerprint; print(database_target_fingerprint(os.environ["DATABASE_URL"]))')"
+          export DC_VERIFIED_BASE=de319eed1904848577c74299d69a1dc69cabd869
+          test ! -e "$DC_LAB_ROOT/fresh-rehearsal.db"
+          test "$(ip -o link show | wc -l)" -eq 1
+          "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
+          "$DC_PYTHON" - <<'PY'
+          from sqlalchemy import inspect, text
+          from backend.database import engine
+          from backend.core.schema_runtime import CURRENT_ALEMBIC_HEAD
+          assert engine.dialect.driver == "pysqlcipher"
+          gaps=[]
+          with engine.connect() as c:
+              i=inspect(c)
+              names=set(i.get_table_names())
+              tables=("workstation_modes","workstation_security_policies","workstation_pairing_codes","workstation_patient_sessions")
+              assert set(tables)<=names
+              print("WORKSTATION_TABLES_PRESENT count=4")
+              checks={x["name"] for x in i.get_check_constraints("workstation_modes")}
+              if "ck_workstation_default_experience" not in checks:
+                  gaps.append("WORKSTATION_MODE_CHECK_ABSENT")
+              for table, index, predicate in (
+                  ("workstation_pairing_codes","uq_workstation_pairing_codes_one_active","used_at IS NULL"),
+                  ("workstation_patient_sessions","uq_workstation_patient_sessions_one_active","purged_at IS NULL"),
+              ):
+                  entries={x["name"]:x for x in i.get_indexes(table)}
+                  e=entries.get(index,{})
+                  if not e.get("unique") or str(e.get("dialect_options",{}).get("sqlite_where","")).lower()!=predicate.lower():
+                      gaps.append("PARTIAL_UNIQUE_INDEX_MISMATCH:"+table)
+              for table, cols in {
+                  "workstation_modes":("mode_revision","created_at","updated_at"),
+                  "workstation_security_policies":("pairing_failed_attempts","created_at","updated_at"),
+                  "workstation_pairing_codes":("created_at",),
+                  "workstation_patient_sessions":("fallback_failed_attempts","created_at"),
+              }.items():
+                  by_name={x["name"]:x for x in i.get_columns(table)}
+                  for col in cols:
+                      if by_name[col]["default"] is None:
+                          gaps.append("SQL_DEFAULT_ABSENT:"+table+"."+col)
+              config={x["name"]:x for x in i.get_columns("cabinet_configs")}
+              assert str(config["station_identification_fallback"]["default"]).strip("'\"")=="disabled"
+              print("STATION_FALLBACK_DEFAULT_PASS")
+              for table in tables:
+                  print("FK_DECLARATIONS",table,len(i.get_foreign_keys(table)))
+              print("FK_ENFORCEMENT_ON_CONNECTION",c.execute(text("PRAGMA foreign_keys")).scalar())
+              assert c.execute(text("SELECT version_num FROM alembic_version")).scalar()==CURRENT_ALEMBIC_HEAD
+              print("BASELINE_STAMP",CURRENT_ALEMBIC_HEAD)
+          for gap in gaps:
+              print("SCHEMA_GAP",gap)
+          print("SCHEMA_RECONCILIATION_RESULT gaps="+str(len(gaps)))
+          raise SystemExit(bool(gaps))
+          PY
+          LAB
