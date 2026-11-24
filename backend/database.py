@@ -133,9 +133,28 @@ if "pysqlcipher" in SQLALCHEMY_DATABASE_URL or SQLALCHEMY_DATABASE_URL.startswit
     @event.listens_for(engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.close()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA foreign_keys")
+            if cursor.fetchone() != (1,):
+                raise RuntimeError("SQLite foreign key enforcement unavailable")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+        finally:
+            cursor.close()
+
+    @event.listens_for(engine, "checkout")
+    def verify_sqlite_foreign_keys(dbapi_connection, connection_record, connection_proxy):
+        from sqlalchemy.exc import DisconnectionError
+
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys")
+            if cursor.fetchone() != (1,):
+                # Discard a connection whose enforcement was disabled by a caller.
+                raise DisconnectionError("SQLite foreign key enforcement disabled")
+        finally:
+            cursor.close()
 else:
     engine = create_engine(
         SQLALCHEMY_DATABASE_URL,
