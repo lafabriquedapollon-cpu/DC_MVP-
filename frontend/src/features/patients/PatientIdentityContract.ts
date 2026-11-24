@@ -95,12 +95,12 @@ export const validatePatientIdentity = (
   if (!data.prenom.trim()) errors.prenom = 'Le prénom est requis.';
 
   if (!data.date_naissance) {
-    errors.date_naissance = null;
+    errors.date_naissance = 'La date de naissance est requise.';
   } else {
     const birthDate = new Date(data.date_naissance);
     const minDate = new Date('1900-01-01T00:00:00');
     if (Number.isNaN(birthDate.getTime()) || birthDate < minDate || birthDate > now) {
-      errors.date_naissance = nullhui).";
+      errors.date_naissance = "La date de naissance doit être valide (entre 1900 et aujourd’hui).";
     }
   }
 

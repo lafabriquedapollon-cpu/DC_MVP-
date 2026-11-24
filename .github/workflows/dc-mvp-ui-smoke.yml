@@ -26,6 +26,33 @@ jobs:
       - name: Install locked frontend dependencies
         working-directory: frontend
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Scan TypeScript syntax across all frontend sources
+        working-directory: frontend
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import ts from 'typescript';
+          let checked=0, errors=0;
+          function walk(dir) {
+            for (const entry of fs.readdirSync(dir,{withFileTypes:true})) {
+              const file=path.join(dir,entry.name);
+              if(entry.isDirectory()) { walk(file); continue; }
+              if(!entry.isFile() || !/\.tsx?$/.test(file)) continue;
+              checked++;
+              const source=ts.createSourceFile(file,fs.readFileSync(file,'utf8'),ts.ScriptTarget.Latest,true);
+              for(const d of source.parseDiagnostics) {
+                errors++;
+                const pos=source.getLineAndCharacterOfPosition(d.start || 0);
+                console.log(file+':'+(pos.line+1)+':'+(pos.character+1)+' TS'+d.code+' '+ts.flattenDiagnosticMessageText(d.messageText,' '));
+              }
+            }
+          }
+          walk('src');
+          console.log('TS_SYNTAX_SCAN: checked='+checked+' errors='+errors);
+          if(errors) process.exitCode=1;
+          JS
       - name: Launch Vite on loopback and inspect real login UI
         working-directory: frontend
         shell: bash
@@ -91,20 +118,26 @@ jobs:
           });
           const evaluate = async expression => {
             const r = await call('Runtime.evaluate',{expression,returnByValue:true});
-            if (r.exceptionDetails) throw new Error('DOM inspection failed');
+            if (r.exceptionDetails) throw new Error('DOM inspection failed: ' + (r.exceptionDetails.text || 'evaluation exception'));
             return r.result.value;
           };
           let state;
           const deadline = Date.now() + 75000;
           try {
             while (Date.now() < deadline) {
-              state = await evaluate(`(() => {
+              try {
+                state = await evaluate(`(() => {
                 const visible = q => {
                   const el = document.querySelector(q);
                   return !!el && !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
                 };
-                return { path:location.pathname, email:visible('input[type=email]'), password:visible('input[type=password]'), overlay:!!document.querySelector('vite-error-overlay'), loading:document.body.innerText.includes('Démarrage de Digital Crown') };
+                return { path:location.pathname, email:visible('input[type=email]'), password:visible('input[type=password]'), overlay:!!document.querySelector('vite-error-overlay'), loading:!!document.body && document.body.innerText.includes('Démarrage de Digital Crown') };
               })()`);
+              } catch (error) {
+                console.log('DOM inspection retry:', String(error).slice(0, 180));
+                await sleep(1000);
+                continue;
+              }
               if (state.overlay || (state.path === '/login' && state.email && state.password)) break;
               await sleep(1000);
             }
