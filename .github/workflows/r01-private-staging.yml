@@ -111,11 +111,34 @@ jobs:
                       assert not dst.exists() and not dst.is_symlink() and dst.resolve()==dst
                       dst.parent.mkdir(parents=True,exist_ok=True)
                       dst.write_bytes(z.read(f))
+              # Adapt only the historical synthetic pairing fixture to the current
+              # purpose-separated LAB key contract. Original archive stays immutable.
+              pocket_file=sorted(nodes)[14].split("::",1)[0]
+              assert all(n.split("::",1)[0]==pocket_file for n in sorted(nodes)[14:17])
+              dst=root/pocket_file
+              original=dst.read_text(encoding="utf-8")
+              tree=ast.parse(original)
+              kw=[n for n in ast.walk(tree) if isinstance(n,ast.keyword) and n.arg=="master_key" and isinstance(n.value,ast.BinOp) and isinstance(n.value.op,ast.Mult) and isinstance(n.value.left,ast.Constant) and n.value.left.value=="a" and isinstance(n.value.right,ast.Constant) and n.value.right.value==64]
+              assert len(kw)==1
+              v=kw[0].value
+              assert v.lineno==v.end_lineno
+              lines=original.splitlines(keepends=True)
+              line=lines[v.lineno-1]
+              assert line.isascii()
+              lines[v.lineno-1]=line[:v.col_offset]+"__import__('backend.core.key_material', fromlist=['mobile_pairing_key_hex']).mobile_pairing_key_hex()"+line[v.end_col_offset:]
+              adapted="".join(lines)
+              a=ast.parse(adapted)
+              def assertions(t):
+                  return [ast.dump(n,include_attributes=False) for n in ast.walk(t) if isinstance(n,ast.Assert)]
+              assert assertions(tree)==assertions(a)
+              assert len(assertions(a))>0
+              assert [n.name for n in tree.body if isinstance(n,ast.FunctionDef)]==[n.name for n in a.body if isinstance(n,ast.FunctionDef)]
+              dst.write_text(adapted,encoding="utf-8")
               (s/"run_case.sh").write_bytes(z.read("run_case.sh"))
               (s/"nodes").write_text("\n".join(sorted(nodes))+"\n")
           PY
           then echo STAGING_REFUSED; exit 1; fi
-          echo STAGING_PASS files=8 expected_tests=21
+          echo STAGING_PASS files=8 expected_tests=21 fixture_adaptations=1
           sudo ip netns add "$ns"
           sudo ip netns exec "$ns" ip link set lo up
           test "$(sudo ip netns exec "$ns" ip -o link show | wc -l)" -eq 1
@@ -154,7 +177,17 @@ jobs:
           root=ET.parse(sys.argv[1]).getroot()
           cases=root.findall(".//testcase")
           assert len(cases)==1
-          assert int(sys.argv[2])==0 and not any(cases[0].find(x) is not None for x in ("failure","error","skipped"))
+          case=cases[0]
+          states=[x for x in ("failure","error","skipped") if case.find(x) is not None]
+          if states or int(sys.argv[2])!=0:
+              import re
+              element=case.find(states[0]) if states else None
+              msg=element.get("message","") if element is not None else ""
+              status_match=re.search(r"assert (400|401|403|404|409|422|429|500|503) == (200|201|400|401|403|404|409|422|429)",msg)
+              kind=next((k for k in ("AssertionError","RuntimeError","IntegrityError","OperationalError","AttributeError","TypeError","ValueError","HTTPException") if k in msg),"UNCLASSIFIED")
+              print("CASE_DIAGNOSTIC state="+(states[0] if states else "exit_nonzero")+" kind="+kind+(" actual_status="+status_match[1]+" expected_status="+status_match[2] if status_match else ""))
+              raise SystemExit(1)
+          assert not states
           PY
                 then rc=0; else rc=1; fi
               else rc=1; fi
