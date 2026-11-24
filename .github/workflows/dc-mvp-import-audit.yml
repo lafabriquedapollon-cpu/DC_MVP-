@@ -1,0 +1,75 @@
+name: DC MVP - static backend import inventory
+on:
+  push:
+    branches: [ci/dc-mvp-import-audit-20261124]
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Inventory internal import targets without importing backend
+        run: |
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+          import subprocess
+          root = Path('.')
+          files = sorted(root.glob('backend/**/*.py'))
+          modules = set()
+          for p in files:
+              parts = list(p.with_suffix('').parts)
+              if parts[-1] == '__init__':
+                  parts.pop()
+              for i in range(1, len(parts)+1):
+                  modules.add('.'.join(parts[:i]))
+          missing = {}
+          root_names = {}
+          def record(name, p, line, kind):
+              if (name == 'backend' or name.startswith('backend.')) and name not in modules:
+                  missing.setdefault(name, []).append((str(p), line, kind))
+          for p in files:
+              tree = ast.parse(p.read_text(encoding='utf-8-sig'), filename=str(p))
+              package = list(p.parent.parts)
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      for alias in node.names:
+                          record(alias.name, p, node.lineno, 'import')
+                  elif isinstance(node, ast.ImportFrom):
+                      if node.level:
+                          if node.level > len(package):
+                              continue
+                          base = '.'.join(package[:len(package)-node.level+1])
+                          name = '.'.join(x for x in (base, node.module) if x)
+                      else:
+                          name = node.module or ''
+                      record(name, p, node.lineno, 'from')
+                      if name in modules and (root.joinpath(*name.split('.'))).is_dir():
+                          for alias in node.names:
+                              if alias.name == '*':
+                                  continue
+                              candidate = name + '.' + alias.name
+                              if candidate not in modules:
+                                  root_names.setdefault(candidate, []).append((str(p), node.lineno))
+                  elif isinstance(node, ast.Call) and node.args:
+                      fn = node.func
+                      dynamic = isinstance(fn, ast.Name) and fn.id in ('__import__', 'import_module') or isinstance(fn, ast.Attribute) and fn.attr == 'import_module'
+                      arg = node.args[0]
+                      if dynamic and isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                          record(arg.value, p, node.lineno, 'literal_dynamic')
+          print('AUDIT_HEAD', subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip())
+          print('PYTHON_FILES', len(files), 'MODULES_AND_PACKAGES', len(modules))
+          print('MISSING_EXPLICIT_MODULES', len(missing))
+          for name, refs in sorted(missing.items()):
+              print('MISSING', name, 'references', len(refs))
+              for p, line, kind in refs:
+                  print(' ', p, line, kind)
+          print('PACKAGE_MEMBER_CANDIDATES', len(root_names), '(may be exported symbols, not confirmed missing)')
+          for name, refs in sorted(root_names.items()):
+              print('CANDIDATE', name, '; '.join(f'{p}:{line}' for p,line in refs))
+          print('AUDIT_COMPLETE_STATIC_ONLY')
+          PY
