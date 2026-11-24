@@ -1,0 +1,135 @@
+name: R0.1 audit copy provenance
+on:
+  push:
+    branches: [ci/r01-audit-provenance-20261124]
+    paths: ['.github/workflows/r01-audit-provenance.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install SQLCipher
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsqlcipher-dev
+          python -m pip install --no-cache-dir 'sqlcipher3==0.6.2'
+      - name: Verify read-only behavior on synthetic encrypted copies
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          git diff --exit-code -- backend/scripts/ci_fk_readonly_audit.py
+          sha256sum backend/scripts/ci_fk_readonly_audit.py
+          ns="r01-audit-$GITHUB_RUN_ID"
+          lab="$(mktemp -d "$RUNNER_TEMP/r01-audit.XXXXXXXX")"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" HOME="$lab" LAB="$lab" PYTHONPATH="$GITHUB_WORKSPACE/backend/scripts" "$(command -v python)" - <<'PY'
+          import os, secrets, pathlib, subprocess, shutil
+          from sqlcipher3 import dbapi2 as driver
+          from ci_fk_readonly_audit import audit, sha256
+          assert len(subprocess.check_output(["ip","-o","link","show"],text=True).splitlines()) == 1
+          lab=pathlib.Path(os.environ["LAB"])
+          key=secrets.token_hex(32)
+          def build(name, orphan=False):
+              p=lab/name
+              c=driver.connect(str(p))
+              try:
+                  c.execute("PRAGMA key = '"+key+"'")
+                  c.execute("CREATE TABLE parent(id INTEGER PRIMARY KEY)")
+                  c.execute("CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id REFERENCES parent(id))")
+                  c.execute("INSERT INTO parent VALUES (1)")
+                  c.execute("INSERT INTO child VALUES (1,1)")
+                  if orphan:
+                      c.execute("INSERT INTO child VALUES (2,999)")
+                  c.commit()
+              finally:
+                  c.close()
+              copy=lab/("copy-"+name)
+              shutil.copyfile(p,copy)
+              return copy
+          clean=build("clean.db")
+          bad=build("orphan.db",True)
+          for p,count in ((clean,0),(bad,1)):
+              before=sha256(p)
+              assert audit(p,driver,key)=={"integrity_ok":True,"fk_violations":count,"unchanged":True}
+              assert sha256(p)==before
+              print("AUDIT_SYNTHETIC_PASS violations="+str(count))
+          before=sha256(clean)
+          try:
+              audit(clean,driver,secrets.token_hex(32))
+          except Exception:
+              pass
+          else:
+              raise AssertionError("Wrong key accepted")
+          assert sha256(clean)==before
+          print("AUDIT_WRONG_KEY_REFUSED_PASS")
+          c=driver.connect(clean.as_uri()+"?mode=ro&immutable=1",uri=True)
+          try:
+              c.execute("PRAGMA key = '"+key+"'")
+              try:
+                  c.execute("DELETE FROM child")
+              except driver.DatabaseError:
+                  pass
+              else:
+                  raise AssertionError("Read-only URI accepted mutation")
+          finally:
+              c.close()
+          assert sha256(clean)==before
+          print("AUDIT_READONLY_WRITE_REFUSED_PASS")
+          pathlib.Path(str(clean)+"-wal").touch()
+          try:
+              audit(clean,driver,key)
+          except RuntimeError as e:
+              assert str(e)=="COPY_HAS_SIDECARS"
+          else:
+              raise AssertionError("Sidecar accepted")
+          assert sha256(clean)==before
+          print("AUDIT_SIDECAR_REFUSED_PASS")
+          pathlib.Path(str(clean)+"-wal").unlink()
+          hard=lab/"hardlink.db"
+          os.link(clean,hard)
+          try:
+              audit(clean,driver,key)
+          except RuntimeError as e:
+              assert str(e)=="COPY_LINK_COUNT_INVALID"
+          else:
+              raise AssertionError("Hardlinked source accepted")
+          hard.unlink()
+          print("AUDIT_HARDLINK_REFUSED_PASS")
+          clean.chmod(0o666)
+          try:
+              audit(clean,driver,key)
+          except RuntimeError as e:
+              assert str(e)=="COPY_PERMISSIONS_UNSAFE"
+          else:
+              raise AssertionError("Writable shared source accepted")
+          clean.chmod(0o600)
+          print("AUDIT_UNSAFE_PERMISSIONS_REFUSED_PASS")
+          class ChangedSourceDriver:
+              @staticmethod
+              def connect(uri,**kwargs):
+                  assert "snapshot.db" in uri and str(clean) not in uri
+                  with clean.open("ab") as f:
+                      f.write(b"synthetic-concurrent-change")
+                  return driver.connect(uri,**kwargs)
+          try:
+              audit(clean,ChangedSourceDriver,key)
+          except RuntimeError as e:
+              assert str(e)=="COPY_CHANGED_DURING_AUDIT"
+          else:
+              raise AssertionError("Changed source accepted")
+          assert not list(lab.glob(".dc-fk-audit-*"))
+          print("AUDIT_SOURCE_CHANGE_AND_CLEANUP_PASS")
+          print("SQLCIPHER_READONLY_AUDIT_PASS count=8")
+          PY
