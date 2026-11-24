@@ -30,6 +30,10 @@ ws.addEventListener('message',e=>{
     if(m.error)p.reject(new Error('CDP '+m.error.code));else p.resolve(m.result);
   }
   if(m.method==='Network.requestWillBeSent') requests.set(m.params.requestId,m.params.request.method);
+  if(m.method==='Network.loadingFailed'){
+    const failure=m.params;
+    if(failure.corsErrorStatus) console.log('BROWSER_CORS_FAILURE',failure.corsErrorStatus.corsError);
+  }
   if(m.method==='Network.responseReceived'){
     const r=m.params.response;
     if(r.url.startsWith(base+'/api/')) responses.push({path:new URL(r.url).pathname,status:r.status,method:requests.get(m.params.requestId)});
@@ -40,7 +44,7 @@ const call=(method,params={})=>new Promise((resolve,reject)=>{
 });
 const evalPage=async expression=>{
   const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});
-  if(r.exceptionDetails) throw new Error('Page evaluation failed');
+  if(r.exceptionDetails) throw new Error('Page evaluation failed: '+(r.exceptionDetails.exception?.className||'unknown'));
   return r.result.value;
 };
 const capture=async name=>{
@@ -67,14 +71,15 @@ try {
   await wait('login form',()=>visible('input[type=email]'));
   await capture('01-login');
   assert.equal((await api('/api/patients/')).status,401);
-  await setField('input[type=email]','ci-owner@example.invalid');
+  await setField('input[type=email]','ci-owner@example.com');
   await setField('input[type=password]',password);
   assert(await clickSubmit());
   await wait('real login API',()=>responses.some(r=>r.path==='/api/auth/login'&&r.method==='POST'&&r.status===200));
   await wait('dashboard',async()=>await pagePath()==='/dashboard');
-  await wait('authenticated profile',()=>responses.some(r=>r.path==='/api/auth/me'&&r.status===200));
+  console.log('BROWSER_DASHBOARD_ROUTE_REACHED');
+  await wait('authenticated profile GET',()=>responses.some(r=>r.path==='/api/auth/me'&&r.method==='GET'&&r.status===200));
   const me=await evalPage('fetch('+JSON.stringify(base+'/api/auth/me')+',{credentials:"include"}).then(async r=>({status:r.status,email:(await r.json()).email}))');
-  assert.equal(me.status,200);assert.equal(me.email,'ci-owner@example.invalid');
+  assert.equal(me.status,200);assert.equal(me.email,'ci-owner@example.com');
   await capture('02-dashboard');
   console.log('BROWSER_LOGIN_SESSION_PASS');
   await call('Page.navigate',{url:web+'/patients/new'});
@@ -89,17 +94,17 @@ try {
   const path=await wait('patient detail',async()=>{const p=await pagePath();return /^\/patients\/\d+$/.test(p)?p:false;});
   const id=Number(path.split('/').pop());
   assert(Number.isSafeInteger(id)&&id>0);
-  await wait('patient detail API',()=>responses.some(r=>r.path==='/api/patients/'+id&&r.status===200));
+  await wait('patient detail API',()=>responses.some(r=>r.path==='/api/patients/'+id&&r.method==='GET'&&r.status===200));
   await capture('04-patient-detail');
   const result=await evalPage('fetch('+JSON.stringify(base+'/api/patients/'+id)+',{credentials:"include"}).then(async r=>({status:r.status,data:await r.json()}))');
   assert.equal(result.status,200);assert.equal(result.data.nom,'CI-SYNTHETIC');assert.equal(result.data.prenom,'Fixture');
   fs.writeFileSync(process.env.DC_LAB_ROOT+'/synthetic-patient-id',String(id));
   console.log('BROWSER_PATIENT_CREATE_READ_PASS');
-  const other=await login('ci-other@example.invalid');
+  const other=await login('ci-other@example.com');
   assert.equal((await api('/api/patients/'+id,{headers:bearer(other.access_token)})).status,403);
   const otherList=await api('/api/patients/',{headers:bearer(other.access_token)});
   assert.equal(otherList.status,200);assert.deepEqual(otherList.body,[]);
-  const restricted=await login('ci-restricted@example.invalid');
+  const restricted=await login('ci-restricted@example.com');
   assert.equal((await api('/api/patients/'+id,{headers:bearer(restricted.access_token)})).status,403);
   assert.equal((await api('/api/patients/',{headers:bearer(restricted.access_token)})).status,403);
   console.log('API_TENANT_AND_PERMISSION_DENIAL_PASS');
