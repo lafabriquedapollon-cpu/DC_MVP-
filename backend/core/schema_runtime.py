@@ -44,6 +44,9 @@ def assert_database_at_current_head(engine, expected_head: str = CURRENT_ALEMBIC
             str(value)
             for value in connection.execute(text("SELECT version_num FROM alembic_version")).scalars()
         }
+        if engine.dialect.name == "sqlite" and connection.execute(text("PRAGMA foreign_key_check")).fetchone() is not None:
+            transaction.rollback()
+            raise RuntimeError("SECURITE : intégrité référentielle invalide ; audit hors ligne requis.")
         transaction.rollback()
 
     if versions != {expected_head}:

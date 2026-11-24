@@ -63,7 +63,8 @@ class GuidedRestoreWorker:
         source = rescue_dir / "clinical_vault.db"
         if not source.exists():
             raise RuntimeError("Secours DB introuvable")
-        _validate_database_file(source, driver)
+        # A rescue must preserve the pre-restore state, not silently repair it.
+        _validate_database_file(source, driver, require_referential_integrity=False)
 
     @staticmethod
     def _restore_database_from_rescue(target: Path, rescue_dir: Path) -> None:

@@ -354,7 +354,7 @@ class Acte(Base):
     
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     patient_id: Mapped[int] = mapped_column(ForeignKey("patients.id", ondelete="CASCADE"), nullable=False)
-    praticien_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    praticien_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     
     type_acte: Mapped[ActeType] = mapped_column(SQLEnum(ActeType), nullable=False)
     libelle: Mapped[str] = mapped_column(String(255), nullable=False)

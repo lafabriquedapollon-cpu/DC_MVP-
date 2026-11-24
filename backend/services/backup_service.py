@@ -152,7 +152,7 @@ class BackupService:
         raise RuntimeError("SQLCipher key unavailable")
 
     @staticmethod
-    def _verify_sqlcipher_file(db_path: Path, passphrase: str) -> None:
+    def _verify_sqlcipher_file(db_path: Path, passphrase: str, *, require_referential_integrity: bool = True) -> None:
         try:
             from sqlcipher3 import dbapi2 as sqlcipher
         except ImportError as exc:
@@ -164,6 +164,8 @@ class BackupService:
             row = conn.execute("PRAGMA integrity_check").fetchone()
             if not row or str(row[0]).lower() != "ok":
                 raise RuntimeError("SQLCipher integrity_check failed")
+            if require_referential_integrity and conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise RuntimeError("SQLCipher foreign_key_check failed")
         finally:
             conn.close()
 
@@ -197,7 +199,9 @@ class BackupService:
             source.close()
         if not snapshot_db.exists() or snapshot_db.stat().st_size == 0:
             raise RuntimeError("SQLCipher export produced no snapshot")
-        BackupService._verify_sqlcipher_file(snapshot_db, passphrase)
+        # Preserve rescue snapshots even when historical references are inconsistent.
+        # Restore verification below is stricter and refuses such snapshots.
+        BackupService._verify_sqlcipher_file(snapshot_db, passphrase, require_referential_integrity=False)
 
     @staticmethod
     def _backup_sqlite_family(backups_dir: Path, timestamp: str, driver: str) -> dict:
@@ -312,6 +316,20 @@ class BackupService:
                 if not passphrase:
                     raise RuntimeError("SQLCipher passphrase required for verification")
                 BackupService._verify_sqlcipher_file(temp_restore, passphrase)
+            else:
+                environment = os.getenv("ENVIRONMENT", "development").strip().lower()
+                if environment in {"cabinet", "production"} or "rehearsal" in environment:
+                    raise RuntimeError("SQLCipher verification required before restore")
+                conn = sqlite3.connect(temp_restore.absolute().as_uri() + "?mode=ro", uri=True)
+                try:
+                    if conn.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                        raise RuntimeError("SQLite integrity_check failed")
+                    if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                        raise RuntimeError("SQLite foreign_key_check failed")
+                finally:
+                    conn.close()
+            if any(Path(str(restore_db) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")):
+                raise RuntimeError("Restore target has SQLite sidecars; offline guided restore required")
             os.replace(temp_restore, restore_db)
         finally:
             if temp_restore.exists():
