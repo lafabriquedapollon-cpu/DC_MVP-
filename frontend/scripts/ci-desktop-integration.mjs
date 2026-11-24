@@ -93,10 +93,25 @@ try {
     assert.equal(result.status,200,'Restart authenticated patient read');
     assert.equal(result.body.nom,'CI-SYNTHETIC');
     assert.equal(result.body.prenom,'Fixture');
-    await call('Page.reload',{ignoreCache:true});
+    console.log('BACKEND_RESTART_API_READ_PASS');
+    // WorkstationModeGate deliberately redirects to the data-free Hub when
+    // backend authority is temporarily unavailable. Reloading the current
+    // location can therefore reload /hub instead of the intended dossier.
+    const before = await pagePath();
+    console.log('RESTART_BROWSER_ROUTE', /^\/(hub|dashboard|cabinet|login|patients\/\d+)$/.test(before) ? before : 'other');
+    if(before==='/hub'){
+      await wait('cabinet recovery entry',()=>visible('[data-hub-experience="cabinet"]'));
+      await capture('05-recovery-hub');
+      assert(await evalPage('(()=>{const b=document.querySelector(\'[data-hub-experience="cabinet"]\');if(!b||b.disabled)return false;b.click();return true})()'));
+      await wait('recovered dashboard',async()=>await pagePath()==='/dashboard');
+    }
+    // Explicitly reopen the known synthetic record via ordinary routing.
+    // Do not alter storage, session cookies, mode, or any authorization gate.
+    await call('Page.navigate',{url:web+'/patients/'+id});
+    await wait('restart patient route',async()=>await pagePath()==='/patients/'+id);
     await wait('restart patient GET',()=>responses.some(r=>r.path==='/api/patients/'+id&&r.method==='GET'&&r.status===200));
     await wait('restart patient identity',verifyIdentity);
-    await capture('05-patient-restarted');
+    await capture('06-patient-restarted');
     console.log('BACKEND_RESTART_PATIENT_READ_PASS');
   } else {
   await wait('login form',()=>visible('input[type=email]'));
