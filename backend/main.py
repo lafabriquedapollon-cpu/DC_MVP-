@@ -35,9 +35,6 @@ _IMPORT_BOOT_POLICY = assert_runtime_startup_allowed(app_settings)
 
 from backend import models, database
 from backend.services.sync_manager import sync_manager
-from backend.seed_templates import run_full_seed
-from backend.seed_user import seed_admin_user
-from backend.seed_clinical import seed_clinical_data
 from backend.services.panoramic_service import panoramic_engine
 from backend.core.media_paths import get_media_root
 from backend.core.paths import AppPaths
@@ -216,6 +213,13 @@ async def lifespan(app: FastAPI):
         boot_policy = assert_runtime_startup_allowed(_cfg)
 
         if boot_policy == DEV_BOOTSTRAP:
+            # Resolve all required development seeds before any schema/data write.
+            # Rehearsal and certified runtime do not execute development seeds.
+            from backend.seed_templates import run_full_seed
+            from backend.seed_user import seed_admin_user
+            from backend.seed_clinical import seed_clinical_data
+            from backend.seed_catalog import seed_catalog
+
             # Tests/dev are allowed to use create_all only after the explicit
             # isolation guard above has passed. Cabinet and rehearsal never enter
             # this branch.
@@ -230,7 +234,6 @@ async def lifespan(app: FastAPI):
             with database.SessionLocal() as db:
                 run_full_seed(db)
                 seed_clinical_data(db)
-                from backend.seed_catalog import seed_catalog
                 seed_catalog(db)
 
             seed_admin_user()
