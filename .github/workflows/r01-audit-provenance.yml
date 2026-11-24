@@ -118,8 +118,8 @@ jobs:
           print("AUDIT_UNSAFE_PERMISSIONS_REFUSED_PASS")
           class ChangedSourceDriver:
               @staticmethod
-              def connect(uri,**kwargs):
-                  assert "snapshot.db" in uri and str(clean) not in uri
+              def connect(database_uri,**kwargs):
+                  assert "snapshot.db" in database_uri and str(clean) not in database_uri
                   with clean.open("ab") as f:
                       f.write(b"synthetic-concurrent-change")
                   return driver.connect(uri,**kwargs)
