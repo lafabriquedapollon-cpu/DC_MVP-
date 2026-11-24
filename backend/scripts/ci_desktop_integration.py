@@ -31,21 +31,25 @@ def main():
         if sys.argv[1:] == ["seed"]:
             assert db.scalar(select(func.count()).select_from(models.User)) == 0
             assert db.scalar(select(func.count()).select_from(models.Patient)) == 0
+            # Validate fixture addresses with the actual response schema before DB writes.
+            from backend.schemas.auth import UserOut
+            for address in ("ci-owner@example.com", "ci-other@example.com", "ci-restricted@example.com"):
+                UserOut(id=1, email=address, role="DENTISTE")
             password_hash = database.pwd_context.hash(os.environ["DC_SYNTH_PASSWORD"])
             owner = models.User(
-                email="ci-owner@example.invalid", hashed_password=password_hash,
+                email="ci-owner@example.com", hashed_password=password_hash,
                 role=models.UserRole.DENTISTE, is_active=True, is_licensed=True,
                 nom_complet="CI Synthetic Owner",
             )
             other = models.User(
-                email="ci-other@example.invalid", hashed_password=password_hash,
+                email="ci-other@example.com", hashed_password=password_hash,
                 role=models.UserRole.DENTISTE, is_active=True, is_licensed=True,
                 nom_complet="CI Synthetic Other",
             )
             db.add_all([owner, other])
             db.flush()
             restricted = models.User(
-                email="ci-restricted@example.invalid", hashed_password=password_hash,
+                email="ci-restricted@example.com", hashed_password=password_hash,
                 role=models.UserRole.SECRETAIRE, is_active=True, is_licensed=True,
                 employer_id=owner.id, permissions={"patients": False},
                 nom_complet="CI Synthetic Restricted",
@@ -60,7 +64,7 @@ def main():
             db.commit()
             print("SYNTHETIC_FIXTURE_PASS users=3 patients=0", flush=True)
         elif sys.argv[1:] == ["verify"]:
-            owner = db.scalar(select(models.User).where(models.User.email == "ci-owner@example.invalid"))
+            owner = db.scalar(select(models.User).where(models.User.email == "ci-owner@example.com"))
             rows = db.scalars(select(models.Patient)).all()
             assert owner is not None and len(rows) == 1
             row = rows[0]
