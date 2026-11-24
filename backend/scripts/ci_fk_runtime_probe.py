@@ -22,7 +22,7 @@ def main():
     assert assert_runtime_startup_allowed(settings) == REHEARSAL_MIGRATION_ONLY
     from backend.database import engine
     from sqlalchemy import text
-    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.exc import IntegrityError, DBAPIError
 
     assert engine.dialect.driver == "pysqlcipher"
     assert Path(engine.url.database).resolve() == db
@@ -70,11 +70,63 @@ def main():
         assert not c.execute(text("PRAGMA foreign_key_check")).fetchall()
     print("FK_ORPHAN_INSERT_UPDATE_AND_WORKSTATION_DENIED_PASS count=3")
     print("FK_CASCADE_SET_NULL_PASS count=2")
-    # Disable enforcement deliberately on a checked-out synthetic connection,
-    # return it, then prove checkout discards it and creates an enforced one.
+    # Test the SQL guard on an actual borrowed connection, both before and
+    # during writes. Deliberate raw DBAPI authorizer removal is a CI-only
+    # counter-test of the existing checkout defense, not an application path.
+    with engine.begin() as c:
+        c.execute(text("CREATE TABLE ci_fk_tx_parent(id INTEGER PRIMARY KEY)"))
+        c.execute(text("CREATE TABLE ci_fk_tx_child(id INTEGER PRIMARY KEY, parent_id REFERENCES ci_fk_tx_parent(id))"))
+        c.execute(text("INSERT INTO ci_fk_tx_parent VALUES (1)"))
+    with engine.connect() as c:
+        check(c)
+        for statement in ("PRAGMA foreign_keys=OFF", "PRAGMA main.foreign_keys(OFF)", "PRAGMA defer_foreign_keys=ON"):
+            try:
+                c.exec_driver_sql(statement)
+            except DBAPIError as exc:
+                assert "authoriz" in str(exc.orig).lower()
+            else:
+                raise AssertionError("Protected PRAGMA accepted")
+        check(c)
+        c.rollback()
+        c.execute(text("INSERT INTO ci_fk_tx_child VALUES (1,1)"))
+        try:
+            c.exec_driver_sql("PRAGMA defer_foreign_keys=OFF")
+        except DBAPIError as exc:
+            assert "authoriz" in str(exc.orig).lower()
+        else:
+            raise AssertionError("Transaction FK bookkeeping change accepted")
+        c.rollback()
+        assert scalar(c,"SELECT count(*) FROM ci_fk_tx_child")==0
+    rejected("INSERT INTO ci_fk_tx_child VALUES (2,999)")
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    barrier=Barrier(6)
+    def worker(_):
+        with engine.connect() as c:
+            barrier.wait(timeout=20)
+            check(c)
+            assert scalar(c,"SELECT COUNT(*) FROM ci_fk_tx_parent")==1
+            try:
+                c.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            except DBAPIError as exc:
+                assert "authoriz" in str(exc.orig).lower()
+            else:
+                raise AssertionError("Concurrent connection accepted FK disable")
+            c.rollback()
+            check(c)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(worker, range(6)))
+    with engine.begin() as c:
+        assert not c.execute(text("PRAGMA foreign_key_check")).fetchall()
+        c.execute(text("DROP TABLE ci_fk_tx_child"))
+        c.execute(text("DROP TABLE ci_fk_tx_parent"))
+    print("FK_BORROW_PRAGMA_DENIED_PASS count=4")
+    print("FK_TRANSACTION_ROLLBACK_AND_ORPHAN_DENIED_PASS")
+    print("FK_CONCURRENT_CHECKOUT_PASS workers=6")
     engine.dispose()
     with engine.connect() as c:
         check(c)
+        c.connection.driver_connection.set_authorizer(None)
         c.exec_driver_sql("PRAGMA foreign_keys=OFF")
         assert scalar(c,"PRAGMA foreign_keys") == 0
     with engine.connect() as c:
