@@ -52,30 +52,71 @@ jobs:
           fi
           echo "VITE_HTTP_PASS"
           chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser)
-          flags=(--headless --enable-logging=stderr --v=0 --no-sandbox --disable-dev-shm-usage --disable-background-networking --disable-sync --disable-extensions --no-first-run --no-default-browser-check '--proxy-server=http://127.0.0.1:9' '--proxy-bypass-list=127.0.0.1;localhost' --window-size=1440,900 --virtual-time-budget=12000)
-          timeout 50s "$chrome" "${flags[@]}" --user-data-dir="$RUNNER_TEMP/dc-chrome-shot" --screenshot="$evidence/login.png" http://127.0.0.1:5173/login > "$RUNNER_TEMP/dc-chrome-shot.log" 2>&1
-          test -s "$evidence/login.png"
-          timeout 50s "$chrome" "${flags[@]}" --user-data-dir="$RUNNER_TEMP/dc-chrome-dom" --dump-dom http://127.0.0.1:5173/login > "$RUNNER_TEMP/dc-login.html" 2> "$RUNNER_TEMP/dc-chrome-dom.log"
-          python3 - "$RUNNER_TEMP/dc-login.html" <<'PY'
-          from html.parser import HTMLParser
-          from pathlib import Path
-          import sys
-          class LoginProbe(HTMLParser):
-              def __init__(self):
-                  super().__init__()
-                  self.types = set()
-                  self.overlay = False
-              def handle_starttag(self, tag, attrs):
-                  if tag == "input":
-                      self.types.add(dict(attrs).get("type", ""))
-                  if tag == "vite-error-overlay":
-                      self.overlay = True
-          probe = LoginProbe()
-          probe.feed(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          if probe.overlay or not {"email", "password"} <= probe.types:
-              raise SystemExit("UI_LOGIN_BLOCKED: expected form controls missing or Vite error overlay present")
-          print("UI_LOGIN_FORM_PASS: email and password inputs rendered; backend/auth not tested")
-          PY
+          flags=(--headless --enable-logging=stderr --v=0 --no-sandbox --disable-dev-shm-usage --disable-background-networking --disable-sync --disable-extensions --no-first-run --no-default-browser-check '--proxy-server=http://127.0.0.1:9' '--proxy-bypass-list=127.0.0.1;localhost' --window-size=1440,900 --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222)
+          "$chrome" "${flags[@]}" --user-data-dir="$RUNNER_TEMP/dc-chrome" http://127.0.0.1:5173/login > "$RUNNER_TEMP/dc-chrome-dom.log" 2>&1 &
+          chrome_pid=$!
+          trap 'kill "$chrome_pid" "$vite_pid" 2>/dev/null || true' EXIT
+          timeout 110s node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import { setTimeout as sleep } from 'node:timers/promises';
+          const tmp = process.env.RUNNER_TEMP;
+          let target;
+          for (let i = 0; i < 40; i++) {
+            try {
+              const list = await (await fetch('http://127.0.0.1:9222/json/list', {signal: AbortSignal.timeout(1500)})).json();
+              target = list.find(t => t.type === 'page' && t.url.startsWith('http://127.0.0.1:5173/'));
+              if (target) break;
+            } catch {}
+            await sleep(500);
+          }
+          if (!target) throw new Error('Chromium CDP target missing');
+          const ws = new WebSocket(target.webSocketDebuggerUrl);
+          await new Promise((resolve, reject) => {
+            ws.addEventListener('open', resolve, {once:true});
+            ws.addEventListener('error', reject, {once:true});
+          });
+          let id = 0;
+          const pending = new Map();
+          ws.addEventListener('message', e => {
+            const msg = JSON.parse(e.data);
+            const p = pending.get(msg.id);
+            if (!p) return;
+            pending.delete(msg.id);
+            if (msg.error) p.reject(new Error(msg.error.message)); else p.resolve(msg.result);
+          });
+          const call = (method, params = {}) => new Promise((resolve, reject) => {
+            const n = ++id;
+            pending.set(n, {resolve,reject});
+            ws.send(JSON.stringify({id:n,method,params}));
+          });
+          const evaluate = async expression => {
+            const r = await call('Runtime.evaluate',{expression,returnByValue:true});
+            if (r.exceptionDetails) throw new Error('DOM inspection failed');
+            return r.result.value;
+          };
+          let state;
+          const deadline = Date.now() + 75000;
+          try {
+            while (Date.now() < deadline) {
+              state = await evaluate(`(() => {
+                const visible = q => {
+                  const el = document.querySelector(q);
+                  return !!el && !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
+                };
+                return { path:location.pathname, email:visible('input[type=email]'), password:visible('input[type=password]'), overlay:!!document.querySelector('vite-error-overlay'), loading:document.body.innerText.includes('Démarrage de Digital Crown') };
+              })()`);
+              if (state.overlay || (state.path === '/login' && state.email && state.password)) break;
+              await sleep(1000);
+            }
+            const shot = await call('Page.captureScreenshot',{format:'png'});
+            fs.writeFileSync(tmp + '/dc-ui-smoke/login.png', Buffer.from(shot.data,'base64'));
+            console.log('UI_FINAL_STATE', JSON.stringify(state));
+            if (!state || state.path !== '/login' || !state.email || !state.password || state.overlay) {
+              throw new Error('UI_LOGIN_BLOCKED: real form not rendered within the bounded wait');
+            }
+            console.log('UI_LOGIN_FORM_PASS: real visible email/password controls; backend/auth not tested');
+          } finally { ws.close(); }
+          JS
       - name: Diagnose failed browser smoke
         if: failure()
         shell: bash
