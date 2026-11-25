@@ -25,11 +25,11 @@ jobs:
             python -m venv $lab
             if ($LASTEXITCODE -ne 0) { throw 'VENV_FAILED' }
             $py = Join-Path $lab 'Scripts\python.exe'
-            & $py -m pip install --disable-pip-version-check --only-binary=:all: 'SQLAlchemy==2.0.28' 'greenlet==3.3.1' 'typing_extensions==4.15.0' 'pydantic==2.6.3' 'pydantic_core==2.16.3' 'annotated-types==0.7.0' 'email-validator==2.3.0' 'dnspython==2.8.0' 'idna==3.11' 'fastapi==0.115.6' 'starlette==0.41.3' 'anyio==4.12.1' 'passlib==1.7.4' 'bcrypt==3.2.2' 'python-dotenv==1.2.1' 'sqlcipher3==0.6.2' 'pyinstaller==6.22.3'
+            & $py -m pip install --disable-pip-version-check --only-binary=:all: --no-deps -r (Join-Path $env:GITHUB_WORKSPACE 'scripts\requirements-r02-native-storage-rehearsal.txt')
             if ($LASTEXITCODE -ne 0) { throw 'PINNED_NATIVE_STORAGE_DEPENDENCIES_UNAVAILABLE' }
             & $py -m pip check
             if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_CONSISTENCY_FAILED' }
-            & $py -c "import importlib.metadata as m; assert m.version('sqlcipher3')=='0.6.2'; assert m.version('pyinstaller')=='6.22.3'"
+            & $py (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_native_storage_lock.py')
             if ($LASTEXITCODE -ne 0) { throw 'NATIVE_PIN_MISMATCH' }
             $probe = Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_native_storage_probe.py'
             $harness = Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_native_storage_harness.py'
