@@ -1,7 +1,7 @@
 name: R0.2 - strict type recovery diagnostics
 on:
   push:
-    branches: [ci/r02-conservative-cleanup-20261125]
+    branches: [ci/dc-mvp-integration-20261124, ci/r02-conservative-cleanup-20261125]
   workflow_dispatch:
 permissions:
   contents: read

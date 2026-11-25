@@ -63,7 +63,7 @@ jobs:
           export DC_CHECKOUT="$GITHUB_WORKSPACE"
           export DC_EVIDENCE="$RUNNER_TEMP/dc-integration-evidence"
           mkdir -p "$DC_EVIDENCE"
-          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" DC_BUILT_REHEARSAL="$([ "$GITHUB_REF_NAME" = ci/r02-conservative-cleanup-20261125 ] && echo true || echo false)" bash -s <<'LAB'
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" DC_BUILT_REHEARSAL=true bash -s <<'LAB'
           set -euo pipefail
           umask 077
           cd "$DC_CHECKOUT"
