@@ -67,10 +67,14 @@ const login=async email=>{
 };
 const bearer=t=>({Authorization:'Bearer '+t});
 const workstationCookie=async()=>{
-  const result=await call('Network.getCookies',{urls:[base]});
-  const cookie=result.cookies.find(c=>c.name==='dc_workstation');
-  assert(Boolean(cookie?.httpOnly && cookie.value),'Server workstation cookie missing');
-  return 'dc_workstation='+cookie.value;
+  // Dashboard routing and cookie delivery are separate asynchronous events.
+  // Observe the server-issued cookie; never inject or bypass workstation identity.
+  return wait('Server workstation cookie readiness',async()=>{
+    const result=await call('Network.getCookies',{urls:[base]});
+    const cookie=result.cookies.find(c=>c.name==='dc_workstation');
+    if(!cookie?.httpOnly || !cookie.value)return false;
+    return 'dc_workstation='+cookie.value;
+  },30000);
 };
 const withWorkstation=(token,cookie)=>({...bearer(token),Cookie:cookie});
 const denied=async(path,headers,status,detail,label)=>{
@@ -130,7 +134,12 @@ try {
   console.log('BROWSER_LOGIN_SESSION_PASS');
   // Isolated synthetic member, provisioned via actual API using the real browser workstation.
   const teamOwner=await login('ci-owner@example.com');
-  const teamHeaders={...withWorkstation(teamOwner.access_token,await workstationCookie()),'Content-Type':'application/json'};
+  const teamCookie=await workstationCookie();
+  const teamHeaders={...withWorkstation(teamOwner.access_token,teamCookie),'Content-Type':'application/json'};
+  const ready=await api('/api/workstation/bootstrap',{headers:teamHeaders});
+  assert.equal(ready.status,200);
+  assert(ready.body?.authenticated===true && ready.body?.enrollmentRequired===false && Boolean(ready.body?.workstationId),'Workstation not ready for team FUE');
+  console.log('FUE_TEAM_WORKSTATION_READY_PASS');
   const teamEmail='ci-fue-team-ui@example.com';
   const created=await api('/api/team/',{method:'POST',headers:teamHeaders,body:JSON.stringify({
     email:teamEmail,password:'CI-Synthetic!Archive-2026',nom_complet:'CI Synthetic Archive UI',role:'SECRETAIRE'
