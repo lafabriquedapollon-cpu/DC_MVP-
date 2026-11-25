@@ -88,7 +88,38 @@ jobs:
           echo LAB_LOOPBACK_ONLY
           "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
           "$DC_PYTHON" -m backend.scripts.ci_desktop_integration seed
-          "$DC_PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port 8008 > "$DC_LAB_ROOT/uvicorn.log" 2>&1 &
+          # Diagnostic launcher exists only in this isolated LAB.
+          cat > "$DC_LAB_ROOT/uvicorn-diagnostic.py" <<'PY'
+          import asyncio
+          import faulthandler
+          import os
+          import signal
+          import uvicorn
+
+          class DiagnosticServer(uvicorn.Server):
+              async def shutdown(self, sockets=None):
+                  print("R02_UVICORN_SHUTDOWN_ENTER", flush=True)
+                  async def monitor():
+                      while True:
+                          print("R02_UVICORN_STATE connections=%d tasks=%d" %
+                                (len(self.server_state.connections), len(self.server_state.tasks)), flush=True)
+                          await asyncio.sleep(2)
+                  task = asyncio.create_task(monitor())
+                  try:
+                      await super().shutdown(sockets=sockets)
+                      print("R02_UVICORN_SHUTDOWN_RETURN", flush=True)
+                  finally:
+                      task.cancel()
+                      await asyncio.gather(task, return_exceptions=True)
+
+          if __name__ == "__main__":
+              with open(os.path.join(os.environ["DC_LAB_ROOT"], "shutdown-stacks.log"), "a") as stacks:
+                  faulthandler.register(signal.SIGUSR1, file=stacks, all_threads=True)
+                  DiagnosticServer(uvicorn.Config("backend.main:app", host="127.0.0.1", port=8008)).run()
+          PY
+          export PYTHONPATH="$DC_CHECKOUT"
+          backend_log="$DC_LAB_ROOT/uvicorn.log"
+          "$DC_PYTHON" "$DC_LAB_ROOT/uvicorn-diagnostic.py" > "$backend_log" 2>&1 &
           pid=$!
           stop_lab_process() {
             local label="$1" child="$2" attempt
@@ -103,6 +134,14 @@ jobs:
               sleep 1
             done
             echo "R02_STOP_TIMEOUT_$label"
+            if [ "$label" = BACKEND ]; then
+              grep -E '^(R02_UVICORN_(SHUTDOWN_(ENTER|RETURN)|STATE connections=[0-9]+ tasks=[0-9]+)|INFO: +(Shutting down|Waiting for application shutdown[.]|Application shutdown complete[.]|Waiting for connections to close[.] \(CTRL\+C to force quit\)|Waiting for background tasks to complete[.] \(CTRL\+C to force quit\)))$' "$backend_log" | tail -n 25 || true
+              kill -USR1 "$child" 2>/dev/null || true
+              sleep 1
+              if [ -f "$DC_LAB_ROOT/shutdown-stacks.log" ]; then
+                sed -nE 's@^  File "([^"]*/)?([^/" ]+)", line ([0-9]+) in ([[:alnum:]_<>.-]+)$@R02_STACK \2:\3 \4@p' "$DC_LAB_ROOT/shutdown-stacks.log" | head -n 60 || true
+              fi
+            fi
             kill -KILL "$child" 2>/dev/null || true
             return 1
           }
@@ -169,7 +208,9 @@ jobs:
           timeout --kill-after=10s 90s "$DC_PYTHON" -m backend.scripts.ci_desktop_integration verify
           echo R02_PERSISTENCE_VERIFY_EXIT_PASS
           echo R02_BACKEND_RESTART_BEGIN
-          "$DC_PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port 8008 > "$DC_LAB_ROOT/uvicorn-restart.log" 2>&1 &
+          : > "$DC_LAB_ROOT/shutdown-stacks.log"
+          backend_log="$DC_LAB_ROOT/uvicorn-restart.log"
+          "$DC_PYTHON" "$DC_LAB_ROOT/uvicorn-diagnostic.py" > "$backend_log" 2>&1 &
           pid=$!
           "$DC_PYTHON" - <<'PY'
           import json, time, urllib.request
