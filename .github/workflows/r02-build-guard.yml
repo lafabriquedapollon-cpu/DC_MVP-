@@ -1,7 +1,7 @@
 name: R0.2 - isolated build guard recovery
 on:
   push:
-    branches: [ci/r02-build-guard-20261125]
+    branches: [ci/r02-conservative-cleanup-20261125]
   workflow_dispatch:
 permissions:
   contents: read
