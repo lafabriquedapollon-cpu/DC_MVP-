@@ -90,3 +90,39 @@ jobs:
             } finally { Pop-Location }
           } finally { Remove-Item -LiteralPath $lab -Recurse -Force }
           Write-Host 'R02_PACKAGING_PREFLIGHT_ONLY_PASS (NOT CODE_CERTIFIED OR INSTALLABLE_CERTIFIED)'
+      - name: Exercise actual recovery entrypoint (negative only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -B -m scripts.ci_r02_launcher_admission
+          if ($LASTEXITCODE -ne 0) { throw 'LAUNCHER_ADMISSION_TEST_FAILED' }
+          $lab = Join-Path $env:RUNNER_TEMP ('dc-launch-admission-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $lab | Out-Null
+          try {
+            python -m venv (Join-Path $lab 'venv')
+            if ($LASTEXITCODE -ne 0) { throw 'VENV_FAILED' }
+            $py = Join-Path $lab 'venv\Scripts\python.exe'
+            & $py -m pip install --disable-pip-version-check --only-binary=:all: 'pyinstaller==6.22.3'
+            if ($LASTEXITCODE -ne 0) { throw 'PINNED_TOOLCHAIN_UNAVAILABLE' }
+            Push-Location $lab
+            try {
+              & $py -m PyInstaller --noconfirm --clean --onedir --name dc_recovery_admission_probe --paths "$env:GITHUB_WORKSPACE" "$env:GITHUB_WORKSPACE\run.py"
+              if ($LASTEXITCODE -ne 0) { throw 'RECOVERY_PE_BUILD_FAILED' }
+              $exe = Join-Path $lab 'dist\dc_recovery_admission_probe\dc_recovery_admission_probe.exe'
+              $sandbox = Join-Path $lab 'uncreated-data'
+              $env:DIGITALCROWN_USER_DATA_DIR = $sandbox
+              $env:DIGITALCROWN_CONFIG_DIR = $sandbox
+              $env:DIGITALCROWN_LOG_DIR = $sandbox
+              $env:DIGITALCROWN_RUNTIME_DIR = $sandbox
+              $env:MEDIA_ROOT = $sandbox
+              $ErrorActionPreference = 'Continue'
+              $out = & $exe --initialize-new-cabinet 2>&1
+              $rc = $LASTEXITCODE
+              $ErrorActionPreference = 'Stop'
+              if ($rc -ne 2 -or (($out | Out-String) -notmatch 'R02_LAUNCH_REFUSED_UNVERIFIED_RELEASE') -or (Test-Path -LiteralPath $sandbox)) { throw 'RECOVERY_PE_GATE_FAILED' }
+              Write-Host 'R02_REAL_FROZEN_ENTRYPOINT_REFUSED_NO_DATA_WRITE_PASS'
+            } finally { Pop-Location }
+          } finally {
+            foreach ($name in @('DIGITALCROWN_USER_DATA_DIR','DIGITALCROWN_CONFIG_DIR','DIGITALCROWN_LOG_DIR','DIGITALCROWN_RUNTIME_DIR','MEDIA_ROOT')) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $lab -Recurse -Force
+          }
