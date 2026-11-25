@@ -375,7 +375,7 @@ class Acte(Base):
     # cette ligne automatiquement (documents.py::generate_document). NULL pour tout Acte
     # créé manuellement (POST /clinical/actes) ou legacy — jamais backfillé.
     document_archive_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("document_archives.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("document_archives.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     document_archive: Mapped[Optional["DocumentArchive"]] = relationship()
 
@@ -874,7 +874,7 @@ class Payment(Base):
     
     # Liens optionnels vers un acte ou une échéance
     acte_id: Mapped[Optional[int]] = mapped_column(ForeignKey("actes.id", ondelete="SET NULL"), nullable=True)
-    installment_id: Mapped[Optional[int]] = mapped_column(ForeignKey("installments.id", ondelete="SET NULL"), nullable=True)
+    installment_id: Mapped[Optional[int]] = mapped_column(ForeignKey("installments.id", ondelete="RESTRICT"), nullable=True)
     
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     validated_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
