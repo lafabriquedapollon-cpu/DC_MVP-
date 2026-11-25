@@ -119,6 +119,13 @@ def main():
     entries.append({"path": rel, "sha256": digest(db), "bytes": db.stat().st_size,
                     "package": package_owner(rel), "imports": []})
     manifest = {"schema": 1, "scope": "synthetic-native-rehearsal", "files": entries}
+    lock = json.loads(Path(__file__).resolve().with_name("r02-native-bundle-lock.json").read_text(encoding="utf-8"))
+    actual = {entry["path"]: entry for entry in entries}
+    expected = {entry["path"]: entry for entry in lock["files"]}
+    require(lock["schema"] == 1 and lock["scope"] == manifest["scope"]
+            and len(expected) == len(lock["files"]) and actual == expected,
+            "NATIVE_BUNDLE_LOCK_DRIFT")
+    print("R02_NATIVE_BUNDLE_EXACT_LOCK_PASS count=" + str(len(actual)), flush=True)
     data = json.dumps(manifest, sort_keys=True, indent=2) + "\n"
     (root / "manifest.json").write_text(data, encoding="utf-8")
     # Only non-sensitive public package identity and hash evidence, no binary upload.

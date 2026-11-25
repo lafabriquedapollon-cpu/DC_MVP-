@@ -12,7 +12,8 @@ def run(command, expected, *, negative=False):
                             capture_output=True, text=True, encoding="utf-8",
                             errors="replace", timeout=90)
     for line in result.stdout.splitlines():
-        if re.fullmatch(r"R02_RELOCATED_NATIVE_[A-Z_]+(?: dlls=[0-9]+)?", line):
+        if (re.fullmatch(r"R02_RELOCATED_NATIVE_[A-Z_]+(?: dlls=[0-9]+)?", line)
+                or re.fullmatch(r"R02_RELOCATED_NATIVE_COLLISION name=[a-z0-9_.+-]+\.dll origin=(?:python-runtime|base-python|windows-system|other) sha256=[a-f0-9]{64} same_bytes=[01]", line)):
             print(line, flush=True)
     if negative:
         if result.returncode == 0 or expected not in result.stderr:

@@ -115,9 +115,23 @@ def main():
             observed = {p.name.lower() for p in loaded if p.parent == native}
             require(required <= observed and all("bin/" + name in listed for name in observed),
                     "NATIVE_LOADER_PATH_MISMATCH")
-            # Detect a second copy with the same filename from an unexpected origin.
-            require(not any("bin/" + p.name.lower() in listed and p.parent != native for p in loaded),
-                    "DUPLICATE_EXTERNAL_NATIVE_DLL")
+            # Diagnose collisions, including Python's own already loaded runtime DLLs.
+            # Keep strict denial until ownership and ABI compatibility are established.
+            duplicates = sorted(p for p in loaded if "bin/" + p.name.lower() in listed and p.parent != native)
+            for p in duplicates:
+                if p.is_relative_to(Path(sys.prefix).resolve()):
+                    origin = "python-runtime"
+                elif p.is_relative_to(Path(sys.base_prefix).resolve()):
+                    origin = "base-python"
+                elif p.is_relative_to(win):
+                    origin = "windows-system"
+                else:
+                    origin = "other"
+                same = sha(p) == sha(native / p.name.lower())
+                print("R02_RELOCATED_NATIVE_COLLISION name=" + p.name.lower() +
+                      " origin=" + origin + " sha256=" + sha(p) +
+                      " same_bytes=" + str(int(same)), flush=True)
+            require(not duplicates, "DUPLICATE_EXTERNAL_NATIVE_DLL")
             print(f"R02_RELOCATED_NATIVE_MIME_PDF_PASS dlls={len(observed)}", flush=True)
     print("R02_RELOCATED_NATIVE_" + ("FROZEN" if frozen else "SOURCE") + "_PASS", flush=True)
 
