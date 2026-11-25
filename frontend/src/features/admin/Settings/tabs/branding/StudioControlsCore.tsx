@@ -3,7 +3,7 @@ import { cn } from '../../../../../utils/cn';
 import { BRAND_IDENTITIES, PREMIUM_FONTS } from '../../../constants';
 import { DENSITY_DEFAULTS } from './presets';
 import type { Density } from './types';
-import { Upload, Check, QrCode, UserCircle, Link, Instagram, MessageCircle, MapPin, Shield, CreditCard, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Trash2, FileText, RotateCcw } from 'lucide-react';
+import { Upload, Check, UserCircle, Link, Instagram, MessageCircle, MapPin, Shield, CreditCard, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Trash2, FileText, RotateCcw } from 'lucide-react';
 import { useSettingsStore } from '../../hooks/useSettingsStore';
 import { API_BASE } from '../../../../../services/api';
 import { useAuthenticatedImage } from '../../../../../hooks/useAuthenticatedImage';

@@ -1,23 +1,4 @@
-import { 
-  Stethoscope, 
-  Activity, 
-  LayoutGrid, 
-  Component, 
-  Scissors, 
-  Anchor, 
-  Sparkles, 
-  Building2, 
-  Moon,
-  Phone,
-  Palette,
-  CheckCircle2,
-  Image as ImageIcon,
-  Wand2,
-  HeartPulse,
-  Leaf,
-  Layers,
-  QrCode
-} from 'lucide-react';
+import { Stethoscope, Activity, LayoutGrid, Component, Scissors, Anchor, Sparkles, Building2, Phone, Palette, CheckCircle2, Image as ImageIcon, Wand2, HeartPulse, Leaf, QrCode } from 'lucide-react';
 
 export const SPECIALTIES_DICT = [
   { id: 'soins', fr: 'Soins', ar: 'علاج', icon: HeartPulse },

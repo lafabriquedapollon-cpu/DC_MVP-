@@ -12,7 +12,7 @@ import {
 import { PatientCompanionSync } from './PatientCompanionSync';
 import { PatientCompanionRemoteCrypto } from './PatientCompanionRemoteCrypto';
 import { PatientCompanionAgendaApi, type PatientAgendaPractitioner, type PatientAgendaSlot } from './PatientCompanionAgendaApi';
-import { PatientCompanionAgendaTransport, type AgendaOperation } from './PatientCompanionAgendaTransport';
+import { PatientCompanionAgendaTransport } from './PatientCompanionAgendaTransport';
 import { PatientCompanionQuestionnaires } from './PatientCompanionQuestionnaires';
 import { PatientCompanionConsentVault } from './PatientCompanionConsentVault';
 import { PatientCompanionNotifications } from './PatientCompanionNotifications';

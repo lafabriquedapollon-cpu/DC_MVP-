@@ -5,10 +5,7 @@ import { cephaloArchiveErrorMessage } from '../cephaloArchiveGate';
 import toast from 'react-hot-toast';
 import { prepareBoundCephaloDocumentSource, type BoundCephaloDocumentSource } from '../cephaloDocumentSource';
 import { API_BASE } from '../../../services/api';
-import {
-  buildPayload, computeMcNamaraProjections, initializeDefaultApexes,
-  calcDDMCephalo, computeLocalImpa
-} from '../cephaloUtils';
+import { buildPayload, computeMcNamaraProjections, calcDDMCephalo, computeLocalImpa } from '../cephaloUtils';
 import type { Landmark, SyncState, ImageFilters, UIMode, VTOSettings, StepId } from '../cephaloShared';
 import type { LocalState, DDMState, DiagnosticTexts, DonneesEtape2, DonneesEtape3, PhotoUpload, ProfilFacial } from '../cephaloTypes';
 import {

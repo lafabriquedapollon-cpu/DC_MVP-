@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { api } from '../../services/api';
 import type { Patient } from '../../types';
-import { UserPlus, Search, Loader2, Edit3, Trash2, AlertTriangle, X, UserX, ArrowRight, LayoutGrid, List, UploadCloud } from 'lucide-react';
+import { UserPlus, Search, Edit3, Trash2, AlertTriangle, X, UserX, ArrowRight, LayoutGrid, List, UploadCloud } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { cn } from '../../utils/cn';
 import { PatientScoreBadge } from './components/PatientScoreBadge';
