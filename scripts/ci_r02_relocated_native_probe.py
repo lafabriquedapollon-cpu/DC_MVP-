@@ -23,10 +23,17 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+SHARED_FFI_SHA256 = "eff52743773eb550fcc6ce3efc37c85724502233b6b002a35496d828bd7b280a"
+
+
 def verify(root):
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    require(manifest.get("schema") == 1 and manifest.get("scope") == "synthetic-native-rehearsal",
+    require(manifest.get("schema") == 2 and manifest.get("scope") == "synthetic-native-rehearsal",
             "INVALID_NATIVE_MANIFEST")
+    shared = manifest.get("shared_runtime", {})
+    require(shared.get("name") == "libffi-8.dll" and shared.get("sha256") == SHARED_FFI_SHA256
+            and shared.get("provider") == "CPython 3.12.10 x64"
+            and sys.version_info[:3] == (3, 12, 10), "INVALID_SHARED_FFI_MANIFEST")
     paths = set()
     for entry in manifest["files"]:
         rel = entry["path"]
@@ -40,7 +47,8 @@ def verify(root):
                 "NATIVE_FILE_HASH_MISMATCH " + rel)
         paths.add(rel)
     actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
-    require(actual == paths | {"manifest.json"}, "NATIVE_FILE_SET_MISMATCH")
+    require(actual == paths | {"manifest.json"} and "bin/libffi-8.dll" not in paths,
+            "NATIVE_FILE_SET_MISMATCH")
     print("R02_RELOCATED_NATIVE_MANIFEST_PASS", flush=True)
     return paths
 
@@ -68,6 +76,18 @@ def module_paths():
     return paths
 
 
+def verify_single_ffi(frozen):
+    expected = ((Path(sys._MEIPASS) / "libffi-8.dll") if frozen else
+                (Path(sys.base_prefix) / "DLLs" / "libffi-8.dll")).resolve(strict=True)
+    loaded = {p for p in module_paths() if p.name.lower() == "libffi-8.dll"}
+    require(loaded == {expected}, "SHARED_FFI_PROVIDER_MISMATCH")
+    require(sha(expected) == SHARED_FFI_SHA256, "SHARED_FFI_HASH_MISMATCH")
+    # Real ctypes callback exercises the pinned interpreter ABI.
+    callback = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int)(lambda n: n + 7)
+    require(callback(35) == 42, "SHARED_FFI_CALLBACK_FAILED")
+    print("R02_RELOCATED_NATIVE_SHARED_FFI_PASS", flush=True)
+
+
 def main():
     require(os.name == "nt" and os.environ.get("GITHUB_ACTIONS") == "true", "WINDOWS_CI_ONLY")
     runner = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
@@ -76,6 +96,7 @@ def main():
     root = (Path(sys.executable).parent / "native" if frozen else Path(sys.argv[1])).resolve(strict=True)
     require(root.is_relative_to(runner) and root.name in {"native", "native-bundle"}, "INVALID_NATIVE_ROOT")
     listed = verify(root)
+    verify_single_ffi(frozen)
     native = root / "bin"
     win = Path(os.environ["SystemRoot"]).resolve(strict=True)
     os.environ["PATH"] = os.pathsep.join(map(str, (native, win / "System32", win)))
@@ -106,6 +127,7 @@ def main():
             with pymupdf.open(stream=payload, filetype="pdf") as doc:
                 require(len(doc) == 1 and "Digital Crown synthetic native bundle" in doc[0].get_text(),
                         "PDF_CONTENT_FAILED")
+            verify_single_ffi(frozen)
             loaded = module_paths()
             source = Path(r"C:\msys64").resolve()
             require(not any(p.is_relative_to(source) for p in loaded), "EXTERNAL_MSYS_DLL_LOADED")

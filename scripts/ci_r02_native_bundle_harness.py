@@ -34,10 +34,16 @@ def main():
     script = Path(__file__).resolve().with_name("ci_r02_relocated_native_probe.py")
     native = lab / "native-bundle"
     run([sys.executable, "-I", "-B", str(script), str(native)], "R02_RELOCATED_NATIVE_SOURCE_PASS")
+    ffi = Path(sys.base_prefix) / "DLLs" / "libffi-8.dll"
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir",
+           "--add-binary", str(ffi) + ";.",
            "--name", "dc_native_bundle_rehearsal", "--collect-data", "weasyprint",
            "--collect-submodules", "weasyprint", "--hidden-import", "magic", str(script)]
-    built = subprocess.run(cmd, cwd=lab, stdin=subprocess.DEVNULL, timeout=300)
+    env = dict(os.environ)
+    win = Path(env["SystemRoot"])
+    env["PATH"] = os.pathsep.join(map(str, (lab / "Scripts", Path(sys.base_prefix),
+                                           win / "System32", win)))
+    built = subprocess.run(cmd, cwd=lab, env=env, stdin=subprocess.DEVNULL, timeout=300)
     if built.returncode:
         raise RuntimeError("NATIVE_BUNDLE_BUILD_FAILED")
     output = lab / "dist" / "dc_native_bundle_rehearsal"

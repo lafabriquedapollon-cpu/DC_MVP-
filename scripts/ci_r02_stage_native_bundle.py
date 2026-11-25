@@ -21,6 +21,7 @@ ANCHORS = {
     "libgobject-2.0-0.dll": "a417864358cbe7a1da74b7cfcc61f7d49b03772b02f29fa611b01a67d5b99632",
     "libpangoft2-1.0-0.dll": "38602e75c85e149bf7294bccb8792f54299daed45509a8ac4b3a18e3921ec56e",
 }
+SHARED_FFI_SHA256 = "eff52743773eb550fcc6ce3efc37c85724502233b6b002a35496d828bd7b280a"
 SEEDS = set(ANCHORS) | {"libfontconfig-1.dll", "libglib-2.0-0.dll",
                         "libharfbuzz-0.dll", "libfreetype-6.dll"}
 
@@ -71,6 +72,65 @@ def imported_dlls(path):
         return sorted(names)
     finally:
         pe.close()
+
+
+def imported_ffi_symbols(path):
+    pe = pefile.PE(str(path), fast_load=True)
+    try:
+        pe.parse_data_directories(directories=[
+            pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
+            pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT"],
+        ])
+        names = set()
+        for attr in ("DIRECTORY_ENTRY_IMPORT", "DIRECTORY_ENTRY_DELAY_IMPORT"):
+            for item in getattr(pe, attr, ()):
+                if item.dll.decode("ascii").lower() != "libffi-8.dll":
+                    continue
+                for symbol in item.imports:
+                    require(symbol.name is not None, "FFI_ORDINAL_IMPORT_REFUSED")
+                    names.add(symbol.name.decode("ascii"))
+        return names
+    finally:
+        pe.close()
+
+
+def qualify_shared_ffi(root, entries):
+    # Verify exact source closure first, then replace the duplicated runtime
+    # provider with the observed, hash-pinned CPython DLL.
+    require(sys.version_info[:3] == (3, 12, 10), "SHARED_FFI_PYTHON_VERSION_DRIFT")
+    dll = Path(sys.base_prefix).resolve(strict=True) / "DLLs" / "libffi-8.dll"
+    require(ordinary(dll) and digest(dll) == SHARED_FFI_SHA256, "SHARED_FFI_HASH_DRIFT")
+    require(bool(imported_dlls(dll)), "SHARED_FFI_IMPORTS_MISSING")
+    required = set()
+    consumers = []
+    for entry in entries:
+        if "libffi-8.dll" in entry["imports"]:
+            names = imported_ffi_symbols(root / entry["path"])
+            require(bool(names), "FFI_CONSUMER_SYMBOLS_MISSING")
+            required.update(names)
+            consumers.append(entry["path"])
+    ctypes_ext = Path(sys.base_prefix) / "DLLs" / "_ctypes.pyd"
+    ctypes_names = imported_ffi_symbols(ctypes_ext)
+    require(bool(ctypes_names) and bool(consumers), "FFI_CONSUMER_MISSING")
+    required.update(ctypes_names)
+    pe = pefile.PE(str(dll), fast_load=True)
+    try:
+        pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXPORT"]])
+        exported = {sym.name.decode("ascii") for sym in pe.DIRECTORY_ENTRY_EXPORT.symbols
+                    if sym.name and sym.forwarder is None}
+    finally:
+        pe.close()
+    missing = sorted(required - exported)
+    require(not missing, "SHARED_FFI_MISSING_EXPORTS " + ",".join(missing))
+    print("R02_SHARED_FFI_EXPORTS_PASS required=" + str(len(required)) +
+          " consumers=" + str(len(consumers) + 1), flush=True)
+    # Remove only the locked redundant copy after its provenance was verified.
+    redundant = root / "bin" / "libffi-8.dll"
+    require(ordinary(redundant), "REDUNDANT_FFI_MISSING")
+    redundant.unlink()
+    return {"name": "libffi-8.dll", "sha256": SHARED_FFI_SHA256,
+            "provider": "CPython 3.12.10 x64", "required_symbols": sorted(required),
+            "consumers": sorted(consumers + ["_ctypes.pyd"])}
 
 
 def main():
@@ -126,12 +186,18 @@ def main():
             and len(expected) == len(lock["files"]) and actual == expected,
             "NATIVE_BUNDLE_LOCK_DRIFT")
     print("R02_NATIVE_BUNDLE_EXACT_LOCK_PASS count=" + str(len(actual)), flush=True)
+    shared = qualify_shared_ffi(root, entries)
+    manifest["schema"] = 2
+    manifest["shared_runtime"] = shared
+    manifest["files"] = [entry for entry in entries if entry["path"] != "bin/libffi-8.dll"]
     data = json.dumps(manifest, sort_keys=True, indent=2) + "\n"
     (root / "manifest.json").write_text(data, encoding="utf-8")
     # Only non-sensitive public package identity and hash evidence, no binary upload.
     for entry in entries:
         print("R02_NATIVE_BUNDLE_FILE " + json.dumps(entry, sort_keys=True), flush=True)
     print(f"R02_NATIVE_BUNDLE_CLOSURE_PASS dlls={len(processed)} files={len(entries)}", flush=True)
+    print("R02_NATIVE_BUNDLE_RUNTIME_LAYOUT_PASS sidecar_files=" + str(len(manifest["files"])) +
+          " shared_dlls=1", flush=True)
     print("R02_NATIVE_BUNDLE_MANIFEST_SHA256=" + digest(root / "manifest.json"), flush=True)
 
 
