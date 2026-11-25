@@ -1,0 +1,52 @@
+name: R0.2 - Windows native storage packaging rehearsal
+on:
+  push:
+    branches: [ci/r02-packaging-20261125]
+permissions:
+  contents: read
+jobs:
+  native-storage-rehearsal:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install exact native storage slice and qualify source and frozen executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lab = Join-Path $env:RUNNER_TEMP ('dc-native-build-' + [guid]::NewGuid().ToString('N'))
+          try {
+            python -m venv $lab
+            if ($LASTEXITCODE -ne 0) { throw 'VENV_FAILED' }
+            $py = Join-Path $lab 'Scripts\python.exe'
+            & $py -m pip install --disable-pip-version-check --only-binary=:all: 'SQLAlchemy==2.0.28' 'greenlet==3.3.1' 'typing_extensions==4.15.0' 'pydantic==2.6.3' 'pydantic_core==2.16.3' 'annotated-types==0.7.0' 'email-validator==2.3.0' 'dnspython==2.8.0' 'idna==3.11' 'fastapi==0.115.6' 'starlette==0.41.3' 'anyio==4.12.1' 'passlib==1.7.4' 'bcrypt==3.2.2' 'python-dotenv==1.2.1' 'sqlcipher3==0.6.2' 'pyinstaller==6.22.3'
+            if ($LASTEXITCODE -ne 0) { throw 'PINNED_NATIVE_STORAGE_DEPENDENCIES_UNAVAILABLE' }
+            & $py -m pip check
+            if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_CONSISTENCY_FAILED' }
+            & $py -c "import importlib.metadata as m; assert m.version('sqlcipher3')=='0.6.2'; assert m.version('pyinstaller')=='6.22.3'"
+            if ($LASTEXITCODE -ne 0) { throw 'NATIVE_PIN_MISMATCH' }
+            $probe = Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_native_storage_probe.py'
+            $harness = Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_native_storage_harness.py'
+            & $py $harness $py $probe
+            if ($LASTEXITCODE -ne 0) { throw 'SOURCE_NATIVE_STORAGE_FAILED' }
+            Write-Host 'R02_SOURCE_NATIVE_STORAGE_PASS'
+            Push-Location $lab
+            try {
+              & $py -m PyInstaller --noconfirm --clean --onedir --name dc_native_storage_rehearsal --paths "$env:GITHUB_WORKSPACE" --hidden-import sqlalchemy.dialects.sqlite.pysqlcipher --hidden-import sqlcipher3.dbapi2 $probe
+              if ($LASTEXITCODE -ne 0) { throw 'FROZEN_NATIVE_BUILD_FAILED' }
+              $exe = Join-Path $lab 'dist\dc_native_storage_rehearsal\dc_native_storage_rehearsal.exe'
+              & $py $harness $exe
+              if ($LASTEXITCODE -ne 0) { throw 'FROZEN_NATIVE_STORAGE_FAILED' }
+              Write-Host 'R02_FROZEN_NATIVE_STORAGE_PASS'
+            } finally { Pop-Location }
+          } finally {
+            if (Test-Path -LiteralPath $lab) { Remove-Item -LiteralPath $lab -Recurse -Force }
+          }
+          if (Test-Path -LiteralPath $lab) { throw 'BUILD_LAB_CLEANUP_FAILED' }
+          Write-Host 'R02_NATIVE_STORAGE_BUILD_CLEANUP_PASS'
