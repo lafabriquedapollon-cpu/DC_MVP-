@@ -16,6 +16,26 @@ jobs:
         with:
           python-version: '3.12'
           architecture: x64
+      - name: Provision native MinGW64 libraries on disposable GitHub runner
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bash = 'C:\msys64\usr\bin\bash.exe'
+          if (-not (Test-Path -LiteralPath $bash -PathType Leaf)) { throw 'MSYS2_RUNNER_MISSING' }
+          $env:MSYSTEM = 'MINGW64'
+          $env:CHERE_INVOKING = '1'
+          # Do not disable package signatures or use Git's MSYS runtime DLLs.
+          & $bash -lc 'set -e; pacman-conf SigLevel; pacman -Syu --noconfirm'
+          if ($LASTEXITCODE -ne 0) { throw 'MSYS2_UPDATE_FAILED' }
+          & $bash -lc 'set -e; pacman -Syu --noconfirm; pacman -S --needed --noconfirm mingw-w64-x86_64-file mingw-w64-x86_64-pango; pacman -Q mingw-w64-x86_64-file mingw-w64-x86_64-pango; pacman -Qo /mingw64/bin/libmagic-1.dll /mingw64/bin/libpango-1.0-0.dll /mingw64/bin/libgobject-2.0-0.dll /mingw64/bin/libpangoft2-1.0-0.dll /mingw64/share/misc/magic.mgc'
+          if ($LASTEXITCODE -ne 0) { throw 'MINGW_NATIVE_PROVISION_FAILED' }
+          foreach ($dll in @('libmagic-1.dll','libpango-1.0-0.dll','libgobject-2.0-0.dll','libpangoft2-1.0-0.dll')) {
+            $file = Join-Path 'C:\msys64\mingw64\bin' $dll
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "NATIVE_DLL_MISSING $dll" }
+            Write-Host ('R02_NATIVE_DLL_SHA256 ' + $dll + '=' + (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant())
+          }
+          Write-Host 'R02_MINGW_NATIVE_PROVISION_PASS'
       - name: Qualify pinned Windows dependencies without starting the clinical application
         shell: pwsh
         run: |
@@ -85,6 +105,7 @@ jobs:
             $env:USERPROFILE = $lab
             $env:APPDATA = $lab
             $env:LOCALAPPDATA = $lab
+            $env:DC_NATIVE_MINGW_BIN = 'C:\msys64\mingw64\bin'
             $env:HF_HUB_OFFLINE = '1'
             $env:TRANSFORMERS_OFFLINE = '1'
             $env:PYTHONDONTWRITEBYTECODE = '1'

@@ -1,6 +1,9 @@
 """Windows CI-only dependency qualification; no application startup or model execution."""
 from importlib import metadata
 import importlib
+import base64
+import ctypes
+import hashlib
 import faulthandler
 import subprocess
 import tempfile
@@ -64,8 +67,84 @@ def main():
     print("R02_FULL_WINDOWS_INDIVIDUAL_AND_COMBINED_IMPORTS_PASS", flush=True)
 
 
+def configure_native_search():
+    """CI diagnostic only: use native MinGW libraries, never Git's MSYS DLLs."""
+    native = Path(os.environ["DC_NATIVE_MINGW_BIN"]).resolve(strict=True)
+    require(native == Path(r"C:\msys64\mingw64\bin").resolve(strict=True),
+            "UNEXPECTED_MINGW_DLL_ROOT")
+    magic_db = native.parent / "share" / "misc" / "magic.mgc"
+    require(magic_db.is_file() and not magic_db.is_symlink(), "MISSING_MAGIC_DATABASE")
+    win = Path(os.environ["SystemRoot"]).resolve(strict=True)
+    # No Git/MSYS usr/bin, current directory, or arbitrary developer PATH.
+    os.environ["PATH"] = os.pathsep.join(map(str, (
+        native, Path(sys.prefix) / "Scripts", Path(sys.base_prefix),
+        win / "System32", win,
+    )))
+    os.environ["MAGIC"] = str(magic_db)
+    os.environ["WEASYPRINT_DLL_DIRECTORIES"] = str(native)
+    return native, os.add_dll_directory(str(native))
+
+
+def verify_magic_wrapper():
+    dist = metadata.distribution("python-magic")
+    for entry in dist.files or ():
+        if str(entry).replace("\\", "/") in {"magic/__init__.py", "magic/loader.py", "magic/compat.py"}:
+            digest = entry.hash
+            require(digest is not None and digest.mode == "sha256", "MAGIC_WRAPPER_RECORD_MISSING")
+            data = dist.locate_file(entry).read_bytes()
+            actual = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("=")
+            require(actual == digest.value, "MAGIC_WRAPPER_COLLISION")
+    require(dist.version == "0.4.27", "MAGIC_WRAPPER_VERSION_MISMATCH")
+    print("R02_FULL_WINDOWS_MAGIC_WRAPPER_RECORD_PASS", flush=True)
+
+
+def loaded_dll_path(handle):
+    getname = ctypes.windll.kernel32.GetModuleFileNameW
+    getname.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint]
+    getname.restype = ctypes.c_uint
+    buf = ctypes.create_unicode_buffer(32768)
+    size = getname(handle, buf, len(buf))
+    require(0 < size < len(buf), "DLL_PATH_LOOKUP_FAILED")
+    return Path(buf.value).resolve(strict=True)
+
+
+def verify_native_function(module, native):
+    if module == "magic":
+        import magic
+        actual = loaded_dll_path(magic.libmagic._handle)
+        require(actual == (native / "libmagic-1.dll").resolve(strict=True),
+                "UNEXPECTED_LIBMAGIC_DLL")
+        require(magic.from_buffer(b"%PDF-1.7\n% synthetic fixture\n", mime=True) == "application/pdf",
+                "MAGIC_PDF_DETECTION_FAILED")
+        require(magic.from_buffer(b"synthetic plain text only\n", mime=True) == "text/plain",
+                "MAGIC_TEXT_DETECTION_FAILED")
+        print("R02_FULL_WINDOWS_MAGIC_NATIVE_MIME_PASS", flush=True)
+    elif module == "weasyprint":
+        from weasyprint import HTML
+        def deny_external(*args, **kwargs):
+            raise RuntimeError("EXTERNAL_RESOURCE_REFUSED")
+        payload = HTML(string="<html><body><p>Digital Crown synthetic packaging test</p></body></html>",
+                       url_fetcher=deny_external).write_pdf()
+        require(payload.startswith(b"%PDF-") and len(payload) > 100, "WEASYPRINT_PDF_INVALID")
+        import pymupdf
+        with pymupdf.open(stream=payload, filetype="pdf") as doc:
+            require(len(doc) == 1 and "Digital Crown synthetic packaging test" in doc[0].get_text(),
+                    "WEASYPRINT_PDF_CONTENT_INVALID")
+        # Verify actual Windows loader paths, not merely existence of Pango DLLs.
+        getmodule = ctypes.windll.kernel32.GetModuleHandleW
+        getmodule.argtypes = [ctypes.c_wchar_p]
+        getmodule.restype = ctypes.c_void_p
+        for dll in ("libpango-1.0-0.dll", "libgobject-2.0-0.dll", "libpangoft2-1.0-0.dll"):
+            handle = getmodule(dll)
+            require(bool(handle), "EXPECTED_PDF_DLL_NOT_LOADED " + dll)
+            require(loaded_dll_path(handle) == (native / dll).resolve(strict=True),
+                    "UNEXPECTED_PDF_DLL_PATH " + dll)
+        print("R02_FULL_WINDOWS_WEASYPRINT_NATIVE_PDF_PASS", flush=True)
+
+
 def native_worker(name):
     require(name in NATIVE or name == "combined", "UNKNOWN_PROBE")
+    native, dll_scope = configure_native_search()
     faulthandler.dump_traceback_later(15, repeat=False)
     try:
         for module in (NATIVE if name == "combined" else (name,)):
@@ -78,7 +157,10 @@ def native_worker(name):
                     magic_files = sorted(p for p in owned if p.startswith("magic/") or p == "magic.py")
                     print(f"R02_MAGIC_DISTRIBUTION {dist_name} version={dist.version} files={len(magic_files)}", flush=True)
             try:
+                if module == "magic":
+                    verify_magic_wrapper()
                 importlib.import_module(module)
+                verify_native_function(module, native)
             except Exception as exc:
                 missing = getattr(exc, "name", None)
                 if not isinstance(missing, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", missing):
@@ -92,6 +174,7 @@ def native_worker(name):
         return 0
     finally:
         faulthandler.cancel_dump_traceback_later()
+        dll_scope.close()
 
 
 def run_bounded(name, seconds):
@@ -137,7 +220,12 @@ def run_bounded(name, seconds):
                     print(f"R02_FULL_WINDOWS_STACK {basename}:{lineno} {function}", flush=True)
             print(f"R02_FULL_WINDOWS_NATIVE_WORKER_FAIL probe={name} rc={proc.returncode}", flush=True)
             return False
-        return "R02_FULL_WINDOWS_NATIVE_WORKER_PASS probe=" + name in lines
+        required = {"R02_FULL_WINDOWS_NATIVE_WORKER_PASS probe=" + name}
+        if name in {"magic", "combined"}:
+            required.add("R02_FULL_WINDOWS_MAGIC_NATIVE_MIME_PASS")
+        if name in {"weasyprint", "combined"}:
+            required.add("R02_FULL_WINDOWS_WEASYPRINT_NATIVE_PDF_PASS")
+        return required.issubset(lines)
 
 
 def check_cpu():
