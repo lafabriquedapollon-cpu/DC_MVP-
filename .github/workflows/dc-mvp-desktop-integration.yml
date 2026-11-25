@@ -88,6 +88,43 @@ jobs:
           echo LAB_LOOPBACK_ONLY
           "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
           "$DC_PYTHON" -m backend.scripts.ci_desktop_integration seed
+          # Deterministic regression of the receive/deadline contract in the LAB.
+          "$DC_PYTHON" - <<'PY'
+          import asyncio
+          from backend.routers.ai_feedback import _ghost_wait_for_disconnect
+
+          class Socket:
+              def __init__(self, messages=(), flood=False):
+                  self.messages = asyncio.Queue()
+                  for message in messages:
+                      self.messages.put_nowait(message)
+                  self.flood = flood
+              async def receive(self):
+                  if self.flood:
+                      await asyncio.sleep(0)
+                      return {"type": "websocket.receive", "text": "synthetic"}
+                  return await self.messages.get()
+
+          async def check():
+              disconnected = Socket([{"type": "websocket.disconnect", "code": 1001}])
+              assert await asyncio.wait_for(_ghost_wait_for_disconnect(disconnected), 1)
+              mixed = Socket([{"type": "websocket.receive", "text": "synthetic"},
+                              {"type": "websocket.disconnect", "code": 1000}])
+              assert await asyncio.wait_for(_ghost_wait_for_disconnect(mixed), 1)
+              assert not await asyncio.wait_for(_ghost_wait_for_disconnect(Socket(), .03), 1)
+              assert not await asyncio.wait_for(_ghost_wait_for_disconnect(Socket(flood=True), .03), 1)
+              pending = asyncio.create_task(_ghost_wait_for_disconnect(Socket()))
+              await asyncio.sleep(0)
+              pending.cancel()
+              try:
+                  await pending
+              except asyncio.CancelledError:
+                  pass
+              else:
+                  raise AssertionError("Cancellation swallowed")
+              print("GHOST_DISCONNECT_DEADLINE_CANCELLATION_PASS")
+          asyncio.run(check())
+          PY
           # Diagnostic launcher exists only in this isolated LAB.
           cat > "$DC_LAB_ROOT/uvicorn-diagnostic.py" <<'PY'
           import asyncio
@@ -134,6 +171,8 @@ jobs:
                       await app(scope, observed_receive, observed_send)
                   finally:
                       active_requests.pop(task, None)
+                      if getattr(scope.get("endpoint"), "__name__", "") == "websocket_ghost_insights":
+                          print("R02_GHOST_HANDLER_EXIT disconnect=%d" % int(state["disconnect"]), flush=True)
               return observed
 
           class DiagnosticServer(uvicorn.Server):
@@ -184,8 +223,13 @@ jobs:
             kill -TERM "$child" 2>/dev/null || true
             for attempt in $(seq 1 20); do
               if ! kill -0 "$child" 2>/dev/null; then
-                wait "$child" 2>/dev/null || true
-                echo "R02_STOP_DONE_$label"
+                local child_rc=0
+                wait "$child" 2>/dev/null || child_rc=$?
+                echo "R02_STOP_DONE_$label rc=$child_rc"
+                if [ "$label" = BACKEND ]; then
+                  [ "$child_rc" -eq 0 ] || return 1
+                  grep -Fx 'R02_UVICORN_SHUTDOWN_RETURN' "$backend_log" || return 1
+                fi
                 return 0
               fi
               sleep 1
@@ -262,6 +306,8 @@ jobs:
           echo R02_DRIVER_INITIAL_EXIT_PASS
           stop_lab_process BACKEND "$pid"
           pid=
+          grep -Fx 'R02_GHOST_HANDLER_EXIT disconnect=1' "$backend_log"
+          echo R02_REAL_GHOST_DISCONNECT_PASS
           echo R02_PERSISTENCE_VERIFY_BEGIN
           timeout --kill-after=10s 90s "$DC_PYTHON" -m backend.scripts.ci_desktop_integration verify
           echo R02_PERSISTENCE_VERIFY_EXIT_PASS
