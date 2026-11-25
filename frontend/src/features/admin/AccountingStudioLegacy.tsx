@@ -19,7 +19,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../../utils/cn';
 import { PremiumOdontogramSVG } from '../../components/odontogram/PremiumOdontogramSVG';
 import { TreatmentSelector } from '../../components/odontogram/TreatmentSelector';
-import { createPortal } from 'react-dom';
+import 'react-dom';
 import type { SelectedSurfaceData, ToothSurface, ToothTreatment } from '../../components/odontogram/types';
 import { api } from '../../services/api';
 import type { CoherenceWarning } from './DocumentStudio/useDocumentGenerator';

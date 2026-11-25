@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { Download, Share } from 'lucide-react';
-import { cn } from '../utils/cn';
+import '../utils/cn';
 
 export function PWAInstallPrompt() {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();

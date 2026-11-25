@@ -3,7 +3,7 @@ import {
   X, Bot, Check, XCircle, Menu, Plus,
   Archive, BrainCircuit, Zap, ArrowRight, MessageSquare, Crown, Sparkles,
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import 'react-markdown';
 import { useLocation, useNavigate, Link } from 'react-router-dom';
 import { api, API_BASE, getRuntimeAuthToken } from '../../services/api';
 import { mobileFetch } from '../../services/zka/mobileFetch';

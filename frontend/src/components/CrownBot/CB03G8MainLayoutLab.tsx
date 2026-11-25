@@ -1,6 +1,6 @@
 // G8 CI-only entry: actual clinic MainLayout and its genuine CrownBotChat.
 // No mock clinical HTTP. Synthetic account, isolated SQLCipher, localhost only.
-import React from 'react';
+import 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
