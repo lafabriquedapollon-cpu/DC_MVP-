@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../services/api';
-import { Shield, Clock, CalendarRange, UserPlus, Zap, CheckCircle2, XCircle, Mail, Archive, AlertTriangle, MessageSquare, History, Ban, MoreVertical, Search, Filter, Store } from 'lucide-react';
+import { Shield, CalendarRange, UserPlus, Zap, CheckCircle2, XCircle, Mail, Archive, AlertTriangle, MessageSquare, History, Ban, Search, Filter, Store } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { DigitalCrownLoader } from '../../components/DigitalCrownLoader';
 

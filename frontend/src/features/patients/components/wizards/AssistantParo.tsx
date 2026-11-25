@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { HeartPulse, CheckCircle2, AlertTriangle, ArrowRight, Save } from 'lucide-react';
+import { HeartPulse, CheckCircle2 } from 'lucide-react';
 import { cn } from '../../../../utils/cn';
 
 interface AssistantParoProps {

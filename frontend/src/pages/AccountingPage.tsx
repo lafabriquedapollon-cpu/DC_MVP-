@@ -19,7 +19,7 @@ import {
   Mail,
 } from 'lucide-react';
 import { EliteGhostLoader } from '../components/EliteGhostLoader';
-import { cn } from '../utils/cn';
+import '../utils/cn';
 import { 
   AreaChart, 
   Area, 

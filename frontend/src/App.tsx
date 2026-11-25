@@ -15,7 +15,7 @@ import { canViewMigrationStudio } from './features/admin/migration/MappingStudio
 import { Dashboard } from './pages/Dashboard';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
-import { WelcomeScreen } from './pages/WelcomeScreen';
+import './pages/WelcomeScreen';
 import { LandingPage } from './pages/LandingPage';
 import { DownloadPage } from './pages/DownloadPage';
 import { ActivateTrialPage } from './pages/ActivateTrialPage';
