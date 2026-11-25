@@ -34,6 +34,11 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login", auto_error=False
 get_db = database.get_db
 
 
+def is_archived_team_member(user: models.User | None) -> bool:
+    return bool(user is not None and getattr(user, "employer_id", None) is not None
+                and getattr(user, "is_archived", False))
+
+
 def is_superadmin_user(user: models.User | None) -> bool:
     if not user or not getattr(user, "email", None):
         return False
@@ -103,7 +108,7 @@ async def get_current_user(
     except (JWTError, ValueError, KeyError, TypeError):
         raise credentials_exception
 
-    if user is None or not user.is_active:
+    if user is None or not user.is_active or is_archived_team_member(user):
         raise credentials_exception
     approval = getattr(user, "approval_status", "approved") or "approved"
     if getattr(user, "employer_id", None) is not None and approval != "approved":
@@ -272,7 +277,7 @@ async def login_for_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if not user.is_active:
+    if not user.is_active or is_archived_team_member(user):
         audit_service.log(
             db=db,
             user_id=user.id,
@@ -381,7 +386,7 @@ async def refresh_access_token(
         raise credentials_exception
 
     user = db.query(models.User).filter(models.User.email == email).first()
-    if user is None or not user.is_active:
+    if user is None or not user.is_active or is_archived_team_member(user):
         raise credentials_exception
     approval = getattr(user, "approval_status", "approved") or "approved"
     if getattr(user, "employer_id", None) is not None and approval != "approved":
@@ -683,7 +688,7 @@ async def google_callback(
         _google_clear_state_cookie(redirect)
         return redirect
 
-    if not user.is_active:
+    if not user.is_active or is_archived_team_member(user):
         redirect = RedirectResponse(url=f"{frontend_url}/login?error=account_inactive")
         _google_clear_state_cookie(redirect)
         return redirect

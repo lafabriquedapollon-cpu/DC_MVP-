@@ -66,6 +66,7 @@ def _decode_mobile_identity(authorization: str, db: Session):
         if (
             not user
             or not user.is_active
+            or (getattr(user, "employer_id", None) is not None and getattr(user, "is_archived", False))
             or user.get_employer_id() != tenant_id
             or (getattr(user, "employer_id", None) is not None and (approval or "approved") != "approved")
         ):
@@ -337,6 +338,7 @@ def claim_pairing_token(
     if (
         not user
         or not user.is_active
+            or (getattr(user, "employer_id", None) is not None and getattr(user, "is_archived", False))
         or user.get_employer_id() != record.employer_id
         or (getattr(user, "employer_id", None) is not None and (approval or "approved") != "approved")
     ):
