@@ -630,7 +630,7 @@ class ArchiveService:
         return doc
     
     def permanent_delete(self, document_id: int) -> bool:
-        """Supprime définitivement un document sans réactiver ses écritures financières."""
+        """Refuse toute purge runtime non qualifiée; préserve données et médias."""
         doc = self.db.query(models.DocumentArchive).filter(
             models.DocumentArchive.id == document_id
         ).first()
@@ -652,31 +652,15 @@ class ArchiveService:
         if self.db.query(models.Payment.id).filter(models.Payment.notes.in_(notes)).first():
             raise ReferencedArchiveDeletionDenied("Document lié à un paiement : archivage uniquement.")
 
-        # Commit DB deletion before removing media. An FK/commit failure must
-        # never unlink a file still referenced by the database.
-        file_path = self._resolve_archive_storage_path(doc)
-        thumb_path = Path(doc.thumbnail_path) if doc.thumbnail_path else None
-        self.db.delete(doc)
-        self.db.commit()
+        # Runtime filesystem unlink cannot be made atomic with all producers
+        # of archive/media references. Do not silently delete metadata or files.
+        # A separately qualified offline maintenance workflow is required.
+        raise ReferencedArchiveDeletionDenied(
+            "Purge définitive indisponible en fonctionnement normal : "
+            "une maintenance hors ligne sécurisée est nécessaire. "
+            "Le document et son fichier sont conservés."
+        )
 
-        # Do not remove media still shared by another archive/version.
-        for path in (file_path, thumb_path):
-            if path is None:
-                continue
-            try:
-                shared = any(
-                    self._resolve_archive_storage_path(row).resolve() == path.resolve()
-                    or (row.thumbnail_path and Path(row.thumbnail_path).resolve() == path.resolve())
-                    for row in self.db.query(models.DocumentArchive).all()
-                )
-                if not shared and path.exists():
-                    path.unlink()
-            except OSError:
-                # Retain unlinked/orphaned media on cleanup failure rather than
-                # claim a database rollback or destroy another archive.
-                pass
-
-        return True
     
     def cleanup_expired_trash(self) -> int:
         """
