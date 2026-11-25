@@ -36,7 +36,7 @@ ws.addEventListener('message',e=>{
   }
   if(m.method==='Network.responseReceived'){
     const r=m.params.response;
-    if(r.url.startsWith(base+'/api/')) responses.push({path:new URL(r.url).pathname,status:r.status,method:requests.get(m.params.requestId)});
+    if(r.url.startsWith(base+'/api/')) responses.push({path:new URL(r.url).pathname,status:r.status,method:requests.get(m.params.requestId),fromServiceWorker:r.fromServiceWorker===true});
   }
 });
 const call=(method,params={})=>new Promise((resolve,reject)=>{
@@ -46,6 +46,39 @@ const evalPage=async expression=>{
   const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});
   if(r.exceptionDetails) throw new Error('Page evaluation failed: '+(r.exceptionDetails.exception?.className||'unknown'));
   return r.result.value;
+};
+// Only on the compiled R0.2 rehearsal, never on the historical dev-server run.
+const pwaRehearsal=process.env.DC_BUILT_REHEARSAL==='true';
+const pwaState=()=>evalPage(`(async()=>{
+  const registrations=await navigator.serviceWorker.getRegistrations();
+  const registration=await navigator.serviceWorker.getRegistration();
+  const names=await caches.keys();
+  let entries=0, apiEntries=0, foreignEntries=0;
+  for(const name of names){
+    for(const request of await (await caches.open(name)).keys()){
+      const url=new URL(request.url);
+      entries++;
+      if(url.pathname==='/api'||url.pathname.startsWith('/api/'))apiEntries++;
+      if(url.origin!==location.origin)foreignEntries++;
+    }
+  }
+  return {secure:isSecureContext,active:registration?.active?.state==='activated',
+    script:registration?.active?.scriptURL,scope:registration?.scope,
+    controller:navigator.serviceWorker.controller?.scriptURL,entries,apiEntries,foreignEntries,
+    legacy:names.includes('dc-mobile-v10')||registrations.some(r=>[r.active,r.waiting,r.installing].some(w=>w&&new URL(w.scriptURL).pathname==='/sw.js'))};
+})()`);
+const assertPwa=async({controlled=false}={})=>{
+  if(!pwaRehearsal)return;
+  const state=await wait('actual PWA registration and precache',async()=>{
+    const s=await pwaState();
+    return s.secure&&s.active&&s.entries>0&&(!controlled||s.controller===web+'/pwa-sw.js')?s:false;
+  });
+  assert.equal(state.script,web+'/pwa-sw.js');
+  assert.equal(state.scope,web+'/');
+  assert.equal(state.apiEntries,0);
+  assert.equal(state.foreignEntries,0);
+  assert.equal(state.legacy,false);
+  console.log('PWA_BROWSER_ACTIVE_STATIC_ONLY_PASS',JSON.stringify({controlled,entries:state.entries,apiEntries:state.apiEntries,foreignEntries:state.foreignEntries}));
 };
 const capture=async name=>{
   const r=await call('Page.captureScreenshot',{format:'png'});
@@ -113,8 +146,10 @@ try {
     await wait('restart patient identity',verifyIdentity);
     await capture('06-patient-restarted');
     console.log('BACKEND_RESTART_PATIENT_READ_PASS');
+    await assertPwa({controlled:true});
   } else {
   await wait('login form',()=>visible('input[type=email]'));
+  await assertPwa();
   await capture('01-login');
   assert.equal((await api('/api/patients/')).status,401);
   await setField('input[type=email]','ci-owner@example.com');
@@ -147,6 +182,13 @@ try {
   assert.equal(result.status,200);assert.equal(result.data.nom,'CI-SYNTHETIC');assert.equal(result.data.prenom,'Fixture');
   fs.writeFileSync(process.env.DC_LAB_ROOT+'/synthetic-patient-id',String(id));
   console.log('BROWSER_PATIENT_CREATE_READ_PASS');
+  if(pwaRehearsal){
+    await assertPwa({controlled:true});
+    const patientResponses=responses.filter(r=>r.path==='/api/patients/'+id&&r.method==='GET'&&r.status===200);
+    assert(patientResponses.length>0,'No real patient API response');
+    assert(patientResponses.every(r=>!r.fromServiceWorker),'Patient API response intercepted by service worker');
+    console.log('PWA_REAL_PATIENT_API_BYPASS_PASS');
+  }
   const ownerCookie=await workstationCookie();
   const other=await login('ci-other@example.com');
   // A different tenant receives its own first workstation through the real API.
