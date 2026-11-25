@@ -51,15 +51,14 @@ const TEMPLATES = [
 ];
 
 export const Step5Design: React.FC<Props> = ({
-  headerOption, setHeaderOption,
+  headerOption,
   selectedIdentity, setSelectedIdentity,
   selectedFont, setSelectedFont,
   selectedTemplate, setSelectedTemplate,
-  logoPreview, letterheadPreview,
-  logoInputRef, letterheadInputRef,
-  handleLogoChange, handleLetterheadChange,
+  logoPreview,
+  logoInputRef,
+  handleLogoChange,
   margins, setMargins,
-  headerScale, setHeaderScale,
   advanced
 }) => {
   const [advancedOpen, setAdvancedOpen] = useState(false);

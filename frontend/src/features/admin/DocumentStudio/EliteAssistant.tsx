@@ -57,10 +57,8 @@ export const EliteAssistant: React.FC<EliteAssistantProps> = ({
   const {
     insights: storeInsights,
     intelligenceScore: storeScore,
-    isLoading,
     isAssistantExpanded: isExpanded,
     setAssistantExpanded: setIsExpanded,
-    lastFetchTime,
     lastPatientId,
     setInsights,
     setIntelligenceScore
@@ -118,8 +116,6 @@ export const EliteAssistant: React.FC<EliteAssistantProps> = ({
     };
   }, [employerId, isEmbedded, setInsights]);
 
-  // eslint-disable-next-line react-hooks/purity
-  const isStale = lastFetchTime && (Date.now() - lastFetchTime > 86400000); // 24h
 
   const rawInsights = propInsights.length > 0 ? propInsights : storeInsights;
   

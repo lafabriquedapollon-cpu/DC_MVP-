@@ -372,7 +372,7 @@ const SmartRootRouter = () => {
 import { OfflineQueueViewer } from './components/mobile/OfflineQueueViewer';
 
 function App() {
-  const [animatedBg, setAnimatedBg] = useState(() => safeStorage.get('app_background_animated') === 'true');
+  const [, setAnimatedBg] = useState(() => safeStorage.get('app_background_animated') === 'true');
 
   // Application globale du thème (Persistance) et Paramètres IA
   useEffect(() => {

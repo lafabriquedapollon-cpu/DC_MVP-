@@ -23,7 +23,7 @@ export function usePWAInstall() {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [isInstallable, setIsInstallable] = useState(false);
   const [isInstalled, setIsInstalled] = useState(isStandalonePocketRuntime);
-  const [isIOS, setIsIOS] = useState(() => {
+  const [isIOS] = useState(() => {
     if (typeof window === 'undefined') return false;
     return /iphone|ipad|ipod/.test(window.navigator.userAgent.toLowerCase());
   });

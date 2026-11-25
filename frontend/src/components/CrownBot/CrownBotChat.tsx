@@ -254,8 +254,8 @@ export function CrownBotChat({
   const [messages, setMessages] = useState<Message[]>([{
     id: 'welcome', sender: 'bot', text: pageCtx.desc, suggestions: pageCtx.suggestions,
   }]);
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const [, setInput] = useState('');
+  const [, setIsLoading] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);

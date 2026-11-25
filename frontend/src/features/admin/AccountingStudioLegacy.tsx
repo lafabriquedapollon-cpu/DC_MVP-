@@ -58,14 +58,13 @@ interface AccountingStudioProps {
 
 export const AccountingStudio: React.FC<AccountingStudioProps> = ({
   isDevis = false,
-  patientId,
   coherenceWarnings = [],
   validationErrors = [],
 }) => {
   const {
     items, setItems,
     paymentMode, setPaymentMode,
-    showOdontoPanoramique, setShowOdontoPanoramique,
+    showOdontoPanoramique,
     groupSelectedTeeth, setGroupSelectedTeeth,
     actSuggestions, setActSuggestions,
     activeActSearchId, setActiveActSearchId,
@@ -151,7 +150,6 @@ export const AccountingStudio: React.FC<AccountingStudioProps> = ({
   const [isOdontoOpen, setIsOdontoOpen] = useState(items.length === 0);
   const [quickActs, setQuickActs] = useState<{ name: string; price: number; category: string }[]>([]);
   const [suggestedBundles, setSuggestedBundles] = useState<ResolvedAccountingBundle[]>([]);
-  const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [isTreasuryModalOpen, setIsTreasuryModalOpen] = useState(false);
   const [isNewCatalogActOpen, setIsNewCatalogActOpen] = useState(false);
   const [newCatalogActName, setNewCatalogActName] = useState('');

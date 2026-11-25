@@ -115,10 +115,10 @@ export const Step1Cephalo: React.FC<Step1CephaloProps> = ({ P, fileRef, step1Con
   };
 
   const {
-    imageSrc, mode, setMode, imgFilters, setImgFilters, isCalibrated, mmPerPixel, setShowCalibration,
+    imageSrc, imgFilters, setImgFilters, isCalibrated, mmPerPixel, setShowCalibration,
     setCalibrationClickPoints, setCalibrationDistance, setCalibrationStep, magnifierEnabled, setMagnifierEnabled,
     vtoSettings, setVtoSettings, setImageSrc, setLocal, setAnglesData, isStep1Fullscreen, setIsStep1Fullscreen,
-    visionMetadata, autoCalibMessage, showCalibration, calibrationClickPoints,
+    showCalibration, calibrationClickPoints,
     calibrationStep, calibrationDistance, applyCalibration, local, imgDim,
     updateLandmarksOptimistic, activePointId, setActivePointId, anglesData,
     performanceMode, isUploading, uploadError,
@@ -281,7 +281,6 @@ export const Step1Cephalo: React.FC<Step1CephaloProps> = ({ P, fileRef, step1Con
     );
   }
 
-  const isCinematic = true;
   const cbg = P.bgCard;
   const themeVars = {
     '--ceph-ui-panel': P.bgPanel,
