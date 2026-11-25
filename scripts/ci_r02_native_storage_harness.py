@@ -1,5 +1,6 @@
 """Own synthetic test roots, secrets, separate process lifecycles and cleanup."""
 import hashlib
+import re
 import os
 from pathlib import Path
 import secrets
@@ -32,7 +33,8 @@ def run(command):
                    SQLCIPHER_KEY_HEX=secrets.token_hex(32), MOBILE_PAIRING_KEY_HEX=secrets.token_hex(32),
                    PYTHONDONTWRITEBYTECODE="1", PYTHONUTF8="1")
         # Explicit local source path only for the non-frozen subprocess.
-        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        if len(command) == 2 and Path(command[1]).suffix == ".py":
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
         db = root / "synthetic-native.db"
         for stage in ("write", "read", "wrong", "read"):
             child_env = dict(env)
@@ -50,8 +52,11 @@ def run(command):
                 if line in {expected, "R02_NATIVE_PLAINTEXT_DENIED_PASS"}:
                     print(line, flush=True)
             if result.returncode or expected not in result.stdout.splitlines():
-                error_types = [line.split(":", 1)[0] for line in result.stderr.splitlines()
-                               if line.split(":", 1)[0].endswith(("Error", "Exception"))]
+                # Only surface syntactically valid exception/module identifiers;
+                # raw tracebacks can contain ephemeral key material or paths.
+                error_types = re.findall(r"(?m)^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)):", result.stderr)
+                missing = re.findall(r"(?m)^ModuleNotFoundError: No module named '([A-Za-z_][A-Za-z0-9_.]*)'\\s*$", result.stderr)
+                print("R02_NATIVE_MISSING_MODULE=" + (",".join(sorted(set(missing))) or "unidentified"), flush=True)
                 raise RuntimeError(f"NATIVE_PROBE_FAILED stage={stage} rc={result.returncode} types={error_types[-3:]}")
             if stage != "wrong" and "R02_NATIVE_PLAINTEXT_DENIED_PASS" not in result.stdout.splitlines():
                 raise RuntimeError("PLAINTEXT_NEGATIVE_MISSING")
