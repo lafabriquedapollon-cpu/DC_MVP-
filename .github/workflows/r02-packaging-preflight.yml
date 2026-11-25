@@ -126,3 +126,15 @@ jobs:
           }
           if (Test-Path -LiteralPath $lab) { throw 'RECOVERY_LAB_CLEANUP_FAILED' }
           Write-Host 'R02_RECOVERY_LAB_CLEANUP_PASS'
+      - name: Verify proposed authority contract and available CLI flags (no issuance)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -B -m scripts.ci_r02_recovery_authority
+          if ($LASTEXITCODE -ne 0) { throw 'AUTHORITY_CONTRACT_FAILED' }
+          $help = gh attestation verify --help | Out-String
+          if ($LASTEXITCODE -ne 0) { throw 'GH_ATTESTATION_UNAVAILABLE' }
+          foreach ($flag in @('--repo','--signer-workflow','--signer-digest','--source-digest','--source-ref','--cert-oidc-issuer','--predicate-type','--deny-self-hosted-runners','--format','--hostname')) {
+            if (-not $help.Contains($flag)) { throw "GH_FLAG_MISSING: $flag" }
+          }
+          Write-Host 'R02_PROPOSED_AUTHORITY_CONTRACT_PASS_NOT_ACTIVATED'
