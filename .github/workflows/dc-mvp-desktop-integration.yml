@@ -90,7 +90,35 @@ jobs:
           "$DC_PYTHON" -m backend.scripts.ci_desktop_integration seed
           "$DC_PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port 8008 > "$DC_LAB_ROOT/uvicorn.log" 2>&1 &
           pid=$!
-          trap 'rc=$?; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; if [ "$rc" -ne 0 ]; then tail -n 60 "$DC_LAB_ROOT/uvicorn.log" | sed -E "s/([[:xdigit:]]{64})/[MASKED]/g"; fi' EXIT
+          stop_lab_process() {
+            local label="$1" child="$2" attempt
+            echo "R02_STOP_BEGIN_$label"
+            kill -TERM "$child" 2>/dev/null || true
+            for attempt in $(seq 1 20); do
+              if ! kill -0 "$child" 2>/dev/null; then
+                wait "$child" 2>/dev/null || true
+                echo "R02_STOP_DONE_$label"
+                return 0
+              fi
+              sleep 1
+            done
+            echo "R02_STOP_TIMEOUT_$label"
+            kill -KILL "$child" 2>/dev/null || true
+            return 1
+          }
+          vite_pid=
+          chrome_pid=
+          cleanup_lab() {
+            local rc=$?
+            trap - EXIT
+            set +e
+            if [ -n "$pid" ]; then stop_lab_process BACKEND "$pid" || rc=1; fi
+            if [ -n "$vite_pid" ]; then stop_lab_process VITE "$vite_pid" || rc=1; fi
+            if [ -n "$chrome_pid" ]; then stop_lab_process CHROME "$chrome_pid" || rc=1; fi
+            echo "R02_CLEANUP_EXIT=$rc"
+            exit "$rc"
+          }
+          trap cleanup_lab EXIT
           "$DC_PYTHON" - <<'PY'
           import json, time, urllib.request
           opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -123,8 +151,6 @@ jobs:
             exec ./node_modules/.bin/vite --host 127.0.0.1 --port 5173 --strictPort
           ) > "$DC_LAB_ROOT/vite.log" 2>&1 &
           vite_pid=$!
-          chrome_pid=
-          trap 'rc=$?; kill "$pid" "$vite_pid" ${chrome_pid:+"$chrome_pid"} 2>/dev/null || true; wait "$pid" "$vite_pid" ${chrome_pid:+"$chrome_pid"} 2>/dev/null || true; exit "$rc"' EXIT
           ready=false
           for attempt in $(seq 1 100); do
             if curl --noproxy '*' --fail --silent http://127.0.0.1:5173/login >/dev/null; then ready=true; break; fi
@@ -134,10 +160,15 @@ jobs:
           chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser)
           "$chrome" --headless --no-sandbox --disable-dev-shm-usage --disable-background-networking --disable-sync --disable-extensions --no-first-run --no-default-browser-check --window-size=1440,900 --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="$DC_LAB_ROOT/chrome" http://127.0.0.1:5173/login > "$DC_LAB_ROOT/chrome.log" 2>&1 &
           chrome_pid=$!
-          timeout 300s node frontend/scripts/ci-desktop-integration.mjs
-          kill "$pid"
-          wait "$pid" || true
-          "$DC_PYTHON" -m backend.scripts.ci_desktop_integration verify
+          echo R02_DRIVER_INITIAL_BEGIN
+          timeout --kill-after=10s 300s node frontend/scripts/ci-desktop-integration.mjs
+          echo R02_DRIVER_INITIAL_EXIT_PASS
+          stop_lab_process BACKEND "$pid"
+          pid=
+          echo R02_PERSISTENCE_VERIFY_BEGIN
+          timeout --kill-after=10s 90s "$DC_PYTHON" -m backend.scripts.ci_desktop_integration verify
+          echo R02_PERSISTENCE_VERIFY_EXIT_PASS
+          echo R02_BACKEND_RESTART_BEGIN
           "$DC_PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port 8008 > "$DC_LAB_ROOT/uvicorn-restart.log" 2>&1 &
           pid=$!
           "$DC_PYTHON" - <<'PY'
@@ -153,7 +184,9 @@ jobs:
           else:
               raise RuntimeError("Restart health failed")
           PY
-          timeout 150s node frontend/scripts/ci-desktop-integration.mjs --verify-restart
+          echo R02_DRIVER_RESTART_BEGIN
+          timeout --kill-after=10s 150s node frontend/scripts/ci-desktop-integration.mjs --verify-restart
+          echo R02_DRIVER_RESTART_EXIT_PASS
           LAB
       - name: Upload synthetic browser evidence
         if: always()
