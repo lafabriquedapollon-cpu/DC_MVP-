@@ -1,0 +1,82 @@
+name: R0.2 - exact tracked source export
+on:
+  push:
+    branches: [ci/r02-backup-export-20261125]
+permissions:
+  contents: read
+jobs:
+  source-export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: '5f641dab7b18571deb9d43d494a7daf4d91b9d23'
+          persist-credentials: false
+      - name: Verify tracked inventory and export public source only
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(git rev-parse HEAD)" = '5f641dab7b18571deb9d43d494a7daf4d91b9d23'
+          test "$(git rev-parse HEAD^{tree})" = '0784e31f82a605e53dd5648adf1f9b7997804163'
+          python - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess, zipfile
+          root = pathlib.Path(os.environ["RUNNER_TEMP"])
+          files = []
+          forbidden = re.compile(r"(^|/)(\.env[^/]*|[^/]*\.(?:db|sqlite3?|pem|key|p12|pfx|zip|7z|rar|log|dcm|bak|sql|onnx|pt|pth|bin)|uploads|media|backups|node_modules|dist)(/|$)|credential|secret", re.I)
+          allowed = {"yml","md","py","txt","ps1","html","json","js","png","svg","mjs","tsx","css","ts","cjs","sh"}
+          known_png = {"frontend/public/icon-192.png","frontend/public/icon-512-maskable.png","frontend/public/icon-512.png","frontend/public/logo.png","frontend/src/assets/logo-compact.png","frontend/src/assets/logo.png"}
+          # High-confidence credential signatures only. Never print matching values.
+          patterns = [
+              rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----",
+              rb"(?i)gh[pousr]_[A-Za-z0-9]{30,}",
+              rb"github_pat_[A-Za-z0-9_]{50,}",
+              rb"AKIA[0-9A-Z]{16}",
+              rb"AIza[0-9A-Za-z_-]{35}",
+              rb"sk-(?:proj-)?[A-Za-z0-9_-]{30,}",
+              rb"xox[baprs]-[0-9A-Za-z-]{20,}",
+              rb"(?i)postgres(?:ql)?://[^\s/:]+:[^\s/@]+@[^\s/]+",
+          ]
+          rows = subprocess.check_output(["git","ls-tree","-rz","HEAD"]).split(b"\0")
+          for row in rows:
+              if not row:
+                  continue
+              meta, name = row.split(b"\t", 1)
+              mode, kind, oid = meta.decode("ascii").split()
+              path = name.decode("utf-8")
+              p = pathlib.PurePosixPath(path)
+              if kind != "blob" or mode not in {"100644","100755"} or p.is_absolute() or ".." in p.parts or forbidden.search(path) or p.suffix[1:] not in allowed:
+                  raise SystemExit("SOURCE_EXPORT_BLOCKED: inventory policy")
+              if p.suffix == ".png" and path not in known_png:
+                  raise SystemExit("SOURCE_EXPORT_BLOCKED: unapproved binary")
+              data = subprocess.check_output(["git","cat-file","blob",oid])
+              if hashlib.sha1(b"blob "+str(len(data)).encode()+b"\0"+data).hexdigest()!=oid:
+                  raise SystemExit("SOURCE_EXPORT_BLOCKED: blob mismatch")
+              if p.suffix != ".png":
+                  data.decode("utf-8")
+                  if any(re.search(pattern,data) for pattern in patterns):
+                      raise SystemExit("SOURCE_EXPORT_BLOCKED: possible credential in "+path)
+              elif not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                  raise SystemExit("SOURCE_EXPORT_BLOCKED: invalid PNG")
+              files.append((path, mode, oid, data))
+          assert len(files) == 1225
+          manifest = {"lot":"R0.2", "date":"2026-11-25", "commit":"5f641dab7b18571deb9d43d494a7daf4d91b9d23", "tree":"0784e31f82a605e53dd5648adf1f9b7997804163", "files":[{"path":p,"mode":m,"git_blob":o,"size":len(d),"sha256":hashlib.sha256(d).hexdigest()} for p,m,o,d in files]}
+          out = root / "DC_R02_PUBLIC_SOURCE.zip"
+          with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+              for path,mode,oid,data in files:
+                  z.writestr("source/"+path,data)
+              z.writestr("SOURCE_MANIFEST.json",json.dumps(manifest,sort_keys=True,indent=2)+"\n")
+          with zipfile.ZipFile(out) as z:
+              assert z.testzip() is None
+              assert len(z.namelist()) == 1226
+              for entry in manifest["files"]:
+                  assert hashlib.sha256(z.read("source/"+entry["path"])).hexdigest()==entry["sha256"]
+          print("SOURCE_EXPORT_PASS files=1225 sha256="+hashlib.sha256(out.read_bytes()).hexdigest())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r02-public-source-export
+          path: ${{ runner.temp }}/DC_R02_PUBLIC_SOURCE.zip
+          if-no-files-found: error
+          retention-days: 1
