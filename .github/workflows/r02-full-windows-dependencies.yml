@@ -27,7 +27,28 @@ jobs:
             $py = Join-Path $lab 'Scripts\python.exe'
             & $py -m pip --isolated install --disable-pip-version-check --no-cache-dir --only-binary=:all: --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
             if ($LASTEXITCODE -ne 0) { throw 'CPU_WHEEL_INSTALL_FAILED' }
-            & $py -m pip --isolated install --disable-pip-version-check --no-cache-dir --only-binary=:all: --index-url https://pypi.org/simple -r (Join-Path $env:GITHUB_WORKSPACE 'backend\requirements-windows-build.txt')
+            # The pinned svglib 1.5.1 release is source-only on PyPI.
+            # Verify the published source SHA-256 before invoking any build code.
+            & $py -m pip --isolated install --disable-pip-version-check --no-cache-dir --only-binary=:all: --index-url https://pypi.org/simple 'setuptools==82.0.0' 'wheel==0.46.3'
+            if ($LASTEXITCODE -ne 0) { throw 'PINNED_WHEEL_BUILDER_INSTALL_FAILED' }
+            $sdist = Join-Path $lab 'svglib-1.5.1.tar.gz'
+            $wheelhouse = Join-Path $lab 'verified-wheelhouse'
+            New-Item -ItemType Directory -Path $wheelhouse | Out-Null
+            $release = Invoke-RestMethod -Uri 'https://pypi.org/pypi/svglib/1.5.1/json'
+            $source = @($release.urls | Where-Object { $_.filename -ceq 'svglib-1.5.1.tar.gz' -and $_.packagetype -ceq 'sdist' })
+            $expected = '3ae765d3a9409ee60c0fb4d24c2deb6a80617aa927054f5bcd7fc98f0695e587'
+            if ($source.Count -ne 1 -or $source[0].digests.sha256 -cne $expected) { throw 'SVGLIB_SOURCE_IDENTITY_MISMATCH' }
+            $uri = [uri]$source[0].url
+            if ($uri.Scheme -cne 'https' -or $uri.Host -cne 'files.pythonhosted.org' -or $uri.UserInfo) { throw 'SVGLIB_SOURCE_ORIGIN_REFUSED' }
+            Invoke-WebRequest -Uri $uri -OutFile $sdist
+            if ((Get-FileHash -LiteralPath $sdist -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expected) { throw 'SVGLIB_SOURCE_HASH_MISMATCH' }
+            Write-Host 'R02_SVGLIB_SOURCE_SHA256_PASS'
+            & $py -m pip --isolated wheel --disable-pip-version-check --no-cache-dir --no-index --no-deps --no-build-isolation --wheel-dir $wheelhouse $sdist
+            if ($LASTEXITCODE -ne 0) { throw 'SVGLIB_LOCAL_WHEEL_BUILD_FAILED' }
+            $wheels = @(Get-ChildItem -LiteralPath $wheelhouse -File)
+            if ($wheels.Count -ne 1 -or $wheels[0].Name -cne 'svglib-1.5.1-py3-none-any.whl') { throw 'SVGLIB_WHEEL_IDENTITY_MISMATCH' }
+            Write-Host ('R02_SVGLIB_LOCAL_WHEEL_SHA256=' + (Get-FileHash -LiteralPath $wheels[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant())
+            & $py -m pip --isolated install --disable-pip-version-check --no-cache-dir --only-binary=:all: --index-url https://pypi.org/simple --find-links $wheelhouse -r (Join-Path $env:GITHUB_WORKSPACE 'backend\requirements-windows-build.txt')
             if ($LASTEXITCODE -ne 0) { throw 'FULL_WINDOWS_WHEEL_INSTALL_FAILED' }
             & $py -m pip check
             if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_CONSISTENCY_FAILED' }
