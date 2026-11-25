@@ -120,7 +120,7 @@ def _open_database_for_validation(path: Path, driver: str):
     return sqlite3.connect(str(path))
 
 
-def _validate_database_file(path: Path, driver: str) -> None:
+def _validate_database_file(path: Path, driver: str, *, require_referential_integrity: bool = True) -> None:
     if not path.exists() or path.stat().st_size <= 0:
         raise ValueError("Sauvegarde base de données vide")
 
@@ -129,6 +129,8 @@ def _validate_database_file(path: Path, driver: str) -> None:
         row = conn.execute("PRAGMA integrity_check").fetchone()
         if not row or str(row[0]).lower() != "ok":
             raise ValueError("Intégrité SQLite invalide")
+        if require_referential_integrity and conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise ValueError("Intégrité référentielle SQLite invalide")
         tables = {
             str(row[0])
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()

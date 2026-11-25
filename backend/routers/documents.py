@@ -15,7 +15,7 @@ from backend import models, schemas, database
 from backend.routers.auth import get_current_user, has_permission, is_superadmin_user
 from backend.utils.access_control import assert_patient_access
 from backend.services.document_factory import DocumentFactory
-from backend.services.archive_service import get_archive_service
+from backend.services.archive_service import get_archive_service, ReferencedArchiveDeletionDenied
 from backend.services.far_ordonnance_archive_service import archive_far_ordonnance_from_source
 from backend.services.far_ordonnance_bridge import patient_requires_far_ordonnance
 from backend.services.generators.report_gen import ReportGenerator
@@ -879,7 +879,11 @@ def permanent_delete(document_id: str, confirm: bool = False, db: Session = Depe
     assert_patient_access(doc.patient_id, current_user, db)
     
     archive_service = get_archive_service(db)
-    if archive_service.permanent_delete(doc_id): return {"status": "deleted"}
+    try:
+        if archive_service.permanent_delete(doc_id): return {"status": "deleted"}
+    except ReferencedArchiveDeletionDenied as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     raise HTTPException(status_code=500, detail="Erreur suppression")
 
 @router.post("/patients/{patient_id}/report")

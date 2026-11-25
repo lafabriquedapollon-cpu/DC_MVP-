@@ -49,14 +49,8 @@ def restore_db(backup_path: str, confirm: bool = False, target_db: str = None):
         decrypted_data = cipher.decrypt(f.read())
 
     if db_url.startswith("sqlite"):
-        if target_db:
-            logger.error("--target-db non supporté pour SQLite (fichier unique).")
-            sys.exit(1)
-        db_path = db_url.replace("sqlite:///", "").replace("./", f"{BASE_DIR}/")
-        logger.warning(f"Écrasement du fichier SQLite : {db_path}")
-        with open(db_path, "wb") as f:
-            f.write(decrypted_data)
-        logger.info("✅ Restore SQLite terminé.")
+        logger.error("Restore SQLite direct refusé : utilisez la restauration guidée hors ligne, avec préflight et secours.")
+        sys.exit(1)
 
     elif db_url.startswith(("postgresql://", "postgres://", "postgresql+")):
         try:

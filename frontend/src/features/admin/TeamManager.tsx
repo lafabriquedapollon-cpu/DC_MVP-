@@ -30,6 +30,7 @@ interface TeamMember {
   nom_complet: string | null;
   telephone_mobile: string | null;
   is_active: boolean;
+  is_archived?: boolean;
   approval_status?: string | null;
   approval_note?: string | null;
   created_at: string | null;
@@ -247,15 +248,15 @@ export const TeamManager: React.FC = () => {
 
   const deleteMember = async (member: TeamMember) => {
     if (mutationKey) return;
-    if (!confirm(`Supprimer définitivement le compte de ${member.nom_complet || member.email} ?`)) return;
+    if (!confirm(`Archiver le compte de ${member.nom_complet || member.email} ? Son accès sera révoqué et son historique conservé.`)) return;
     setMutationKey(`delete:${member.id}`);
     try {
       await api.delete(`/team/${member.id}`);
-      setSuccess("Compte supprimé.");
+      setSuccess("Compte archivé. Historique conservé.");
       await fetchMembers();
       setTimeout(() => setSuccess(null), 3000);
     } catch {
-      setError("Erreur lors de la suppression.");
+      setError("Erreur lors de l’archivage.");
     } finally {
       setMutationKey(null);
     }
@@ -584,9 +585,9 @@ export const TeamManager: React.FC = () => {
                 </button>
                 <button
                   onClick={() => deleteMember(member)}
-                  disabled={mutationKey !== null}
+                  disabled={mutationKey !== null || !!member.is_archived}
                   className="p-2.5 bg-background text-text-muted hover:text-danger hover:bg-danger-surface border border-border-main rounded-xl transition-all"
-                  title="Supprimer définitivement"
+                  title="Archiver le compte"
                 >
                   <Trash2 size={16} />
                 </button>
@@ -655,7 +656,7 @@ export const TeamManager: React.FC = () => {
                     </span>
                     {member.approval_status === 'rejected' && (
                       <span className="text-[9px] font-black bg-danger-surface text-danger px-2 py-0.5 rounded-full uppercase tracking-wider">
-                        Refusé
+                        {member.is_archived ? "Archivé" : "Refusé"}
                       </span>
                     )}
                     {!member.is_active && member.approval_status !== 'rejected' && (
@@ -685,6 +686,7 @@ export const TeamManager: React.FC = () => {
               {/* Actions */}
               <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                 <button
+                  disabled={!!member.is_archived}
                   onClick={() => setEditingPermissionsMember(member)}
                   className="p-2.5 bg-background text-text-muted hover:bg-input-field border border-border-main rounded-xl transition-all text-xs font-bold flex items-center gap-2"
                   title="Gérer les permissions"
@@ -710,9 +712,9 @@ export const TeamManager: React.FC = () => {
                 )}
                 <button
                   onClick={() => deleteMember(member)}
-                  disabled={mutationKey !== null}
+                  disabled={mutationKey !== null || !!member.is_archived}
                   className="p-2.5 bg-danger-surface text-danger hover:bg-danger-surface border border-danger-border rounded-xl transition-all"
-                  title="Supprimer définitivement"
+                  title="Archiver le compte"
                 >
                   <Trash2 size={16} />
                 </button>

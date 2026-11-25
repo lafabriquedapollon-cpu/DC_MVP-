@@ -16,7 +16,7 @@ Pending + approved comptent dans le quota (evite le gaming).
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, update
 
 from backend import models, schemas, database
 from backend.routers.auth import get_current_user, is_superadmin_user
@@ -169,8 +169,8 @@ def create_team_member(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    "Ce collaborateur existe deja dans votre equipe. "
-                    "Utilisez la liste des membres pour le reactiver ou modifier ses droits."
+                    "Compte archive : cette adresse est conservee pour la tracabilite." if existing.is_archived else
+                    "Ce collaborateur existe deja dans votre equipe. Utilisez la liste des membres pour le reactiver ou modifier ses droits."
                 )
             )
         raise HTTPException(
@@ -228,6 +228,26 @@ def create_team_member(
     return new_user
 
 
+def _write_unarchived_member(db: Session, member: models.User, values: dict, *, action: str, expected_approval=None):
+    # Check archive state at the actual SQL write, not only at the earlier read.
+    stmt = update(models.User).where(
+        models.User.id == member.id,
+        models.User.employer_id == member.employer_id,
+        models.User.is_archived.is_(False),
+    )
+    if expected_approval is not None:
+        stmt = stmt.where(models.User.approval_status == expected_approval)
+    result = db.execute(stmt.values(**values).execution_options(
+        synchronize_session=False, dc_team_mutation=action,
+    ))
+    if result.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Compte archive ou modifie concurremment.")
+    db.commit()
+    db.refresh(member)
+    return member
+
+
 @router.post("/{member_id}/approve", response_model=schemas.TeamMemberOut)
 def approve_team_member(
     member_id: int,
@@ -241,6 +261,8 @@ def approve_team_member(
     ).first()
     if not member:
         raise HTTPException(status_code=404, detail="Membre introuvable dans votre equipe.")
+    if member.is_archived:
+        raise HTTPException(status_code=409, detail="Compte archive : reactivation interdite.")
     if getattr(member, "approval_status", "approved") != "pending":
         raise HTTPException(status_code=400, detail="Ce membre n'est pas en attente d'approbation.")
 
@@ -264,11 +286,10 @@ def approve_team_member(
             detail=f"Quota {role_label} depasse ({role_used}/{role_limit}) pour le plan {plan}. Passez a un plan superieur.",
         )
 
-    member.approval_status = "approved"
-    member.is_active = True
-    db.commit()
-    db.refresh(member)
-    return member
+    return _write_unarchived_member(
+        db, member, {"approval_status": "approved", "is_active": True},
+        action="approve", expected_approval="pending",
+    )
 
 
 @router.post("/{member_id}/reject", response_model=schemas.TeamMemberOut)
@@ -288,12 +309,10 @@ def reject_team_member(
     if getattr(member, "approval_status", "approved") not in ("pending", "approved"):
         raise HTTPException(status_code=400, detail="Ce membre est deja refuse.")
 
-    member.approval_status = "rejected"
-    member.is_active = False
-    member.approval_note = note
-    db.commit()
-    db.refresh(member)
-    return member
+    return _write_unarchived_member(
+        db, member, {"approval_status": "rejected", "is_active": False, "approval_note": note},
+        action="reject", expected_approval=member.approval_status,
+    )
 
 
 @router.put("/{member_id}", response_model=schemas.TeamMemberOut)
@@ -311,8 +330,12 @@ def update_team_member(
     if not member:
         raise HTTPException(status_code=404, detail="Membre introuvable dans votre equipe.")
 
+    if member.is_archived:
+        raise HTTPException(status_code=409, detail="Compte archive : modification interdite.")
+
+    values = {}
     if updates.nom_complet is not None:
-        member.nom_complet = updates.nom_complet
+        values["nom_complet"] = updates.nom_complet
     if updates.email is not None:
         normalized_email = updates.email.lower()
         conflict = db.query(models.User).filter(
@@ -321,9 +344,9 @@ def update_team_member(
         ).first()
         if conflict:
             raise HTTPException(status_code=409, detail=f"L'email '{updates.email}' est deja utilise.")
-        member.email = normalized_email
+        values["email"] = normalized_email
     if updates.telephone_mobile is not None:
-        member.telephone_mobile = updates.telephone_mobile
+        values["telephone_mobile"] = updates.telephone_mobile
     if updates.is_active is not None:
         approval_status = getattr(member, "approval_status", "approved") or "approved"
         if updates.is_active and approval_status != "approved":
@@ -334,15 +357,18 @@ def update_team_member(
                     "d'approbation n'est pas 'approved'."
                 ),
             )
-        member.is_active = updates.is_active
+        values["is_active"] = updates.is_active
     if updates.new_password is not None:
-        member.hashed_password = get_password_hash(updates.new_password)
+        values["hashed_password"] = get_password_hash(updates.new_password)
     if updates.permissions is not None:
-        member.permissions = sanitize_permissions(updates.permissions, member.permissions or {})
+        values["permissions"] = sanitize_permissions(updates.permissions, member.permissions or {})
 
-    db.commit()
-    db.refresh(member)
-    return member
+    if not values:
+        return member
+    return _write_unarchived_member(
+        db, member, values, action="update",
+        expected_approval=member.approval_status if updates.is_active is True else None,
+    )
 
 
 @router.delete("/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -351,7 +377,7 @@ def delete_team_member(
     db: Session = Depends(database.get_db),
     current_user: models.User = Depends(require_employer),
 ):
-    """Supprime definitivement un sous-compte de l'equipe."""
+    """Archive le sous-compte et revoque son acces sans supprimer son historique."""
     member = db.query(models.User).filter(
         models.User.id == member_id,
         models.User.employer_id == current_user.id,
@@ -359,5 +385,12 @@ def delete_team_member(
     if not member:
         raise HTTPException(status_code=404, detail="Membre introuvable dans votre equipe.")
 
-    db.delete(member)
+    # Preserve historical principal and clinical/financial references.
+    # Rejected members no longer reserve a seat; archived addresses remain reserved.
+    # Explicitly write all three values even when the stale ORM snapshot
+    # already shows one of them (e.g. pending/inactive before approval).
+    db.execute(update(models.User).where(
+        models.User.id == member_id, models.User.employer_id == current_user.id,
+    ).values(is_active=False, is_archived=True, approval_status="rejected")
+        .execution_options(synchronize_session=False, dc_team_mutation="archive"))
     db.commit()

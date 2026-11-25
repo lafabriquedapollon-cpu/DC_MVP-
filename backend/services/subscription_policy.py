@@ -63,6 +63,7 @@ def count_reserved_team_usage(db: Session, employer_id: int) -> TeamUsage:
     """
     members = db.query(models.User).filter(
         models.User.employer_id == employer_id,
+        models.User.is_archived.is_(False),
         models.User.approval_status.in_([
             models.ApprovalStatus.APPROVED.value,
             models.ApprovalStatus.PENDING.value,
