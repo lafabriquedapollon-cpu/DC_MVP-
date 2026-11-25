@@ -1,0 +1,48 @@
+name: R0.2 - Windows full dependency rehearsal
+on:
+  push:
+    branches: [ci/r02-packaging-20261125]
+permissions:
+  contents: read
+jobs:
+  full-runtime-dependencies:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Qualify pinned Windows dependencies without starting the clinical application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lab = Join-Path $env:RUNNER_TEMP ('dc-full-deps-' + [guid]::NewGuid().ToString('N'))
+          try {
+            python -m venv $lab
+            if ($LASTEXITCODE -ne 0) { throw 'VENV_FAILED' }
+            $py = Join-Path $lab 'Scripts\python.exe'
+            & $py -m pip --isolated install --disable-pip-version-check --no-cache-dir --only-binary=:all: --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+            if ($LASTEXITCODE -ne 0) { throw 'CPU_WHEEL_INSTALL_FAILED' }
+            & $py -m pip --isolated install --disable-pip-version-check --no-cache-dir --only-binary=:all: --index-url https://pypi.org/simple -r (Join-Path $env:GITHUB_WORKSPACE 'backend\requirements-windows-build.txt')
+            if ($LASTEXITCODE -ne 0) { throw 'FULL_WINDOWS_WHEEL_INSTALL_FAILED' }
+            & $py -m pip check
+            if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_CONSISTENCY_FAILED' }
+            $probe = Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_full_windows_dependencies.py'
+            $env:HOME = $lab
+            $env:USERPROFILE = $lab
+            $env:APPDATA = $lab
+            $env:LOCALAPPDATA = $lab
+            $env:HF_HUB_OFFLINE = '1'
+            $env:TRANSFORMERS_OFFLINE = '1'
+            $env:PYTHONDONTWRITEBYTECODE = '1'
+            & $py -I $probe
+            if ($LASTEXITCODE -ne 0) { throw 'FULL_WINDOWS_NATIVE_QUALIFICATION_FAILED' }
+          } finally {
+            if (Test-Path -LiteralPath $lab) { Remove-Item -LiteralPath $lab -Recurse -Force }
+          }
+          if (Test-Path -LiteralPath $lab) { throw 'FULL_WINDOWS_LAB_CLEANUP_FAILED' }
+          Write-Host 'R02_FULL_WINDOWS_DEPENDENCY_REHEARSAL_CLEANUP_PASS'
