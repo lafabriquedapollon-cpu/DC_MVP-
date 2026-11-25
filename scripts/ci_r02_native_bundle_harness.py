@@ -39,10 +39,14 @@ def main():
            "--add-binary", str(ffi) + ";.",
            "--name", "dc_native_bundle_rehearsal", "--collect-data", "weasyprint",
            "--collect-submodules", "weasyprint", "--hidden-import", "magic", str(script)]
+    # os.environ is case-insensitive on Windows; a plain dict is not.
     env = dict(os.environ)
-    win = Path(env["SystemRoot"])
+    win = Path(os.environ["SystemRoot"]).resolve(strict=True)
+    if not (win / "System32").is_dir():
+        raise RuntimeError("INVALID_WINDOWS_SYSTEM_ROOT")
     env["PATH"] = os.pathsep.join(map(str, (lab / "Scripts", Path(sys.base_prefix),
                                            win / "System32", win)))
+    print("R02_NATIVE_BUNDLE_BUILD_ENV_PASS", flush=True)
     built = subprocess.run(cmd, cwd=lab, env=env, stdin=subprocess.DEVNULL, timeout=300)
     if built.returncode:
         raise RuntimeError("NATIVE_BUNDLE_BUILD_FAILED")
