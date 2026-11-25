@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { usePWAInstall } from '../hooks/usePWAInstall';
-import { Download, Share, X } from 'lucide-react';
+import { Download, Share } from 'lucide-react';
 import { cn } from '../utils/cn';
 
 export function PWAInstallPrompt() {

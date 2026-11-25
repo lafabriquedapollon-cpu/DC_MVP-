@@ -160,7 +160,7 @@ export const PatientCompanionEmergencyPhoto = ({
     setError(null);
 
     try {
-      const result = await uploadEmergencyPhoto(
+      await uploadEmergencyPhoto(
         pairing,
         uploadId,
         source,
