@@ -111,6 +111,11 @@ jobs:
             $env:PYTHONDONTWRITEBYTECODE = '1'
             & $py -I $probe
             if ($LASTEXITCODE -ne 0) { throw 'FULL_WINDOWS_NATIVE_QUALIFICATION_FAILED' }
+            # Build only the closed native MIME/PDF sidecar, not the clinical launcher.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_stage_native_bundle.py')
+            if ($LASTEXITCODE -ne 0) { throw 'NATIVE_BUNDLE_CLOSURE_FAILED' }
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_native_bundle_harness.py')
+            if ($LASTEXITCODE -ne 0) { throw 'NATIVE_BUNDLE_REHEARSAL_FAILED' }
           } finally {
             if (Test-Path -LiteralPath $lab) { Remove-Item -LiteralPath $lab -Recurse -Force }
           }
