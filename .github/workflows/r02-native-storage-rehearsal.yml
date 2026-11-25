@@ -33,12 +33,19 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'NATIVE_PIN_MISMATCH' }
             $probe = Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_native_storage_probe.py'
             $harness = Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_native_storage_harness.py'
+            $env:DC_NATIVE_IMPORT_MANIFEST = Join-Path $lab 'observed-imports.json'
             & $py $harness $py $probe
             if ($LASTEXITCODE -ne 0) { throw 'SOURCE_NATIVE_STORAGE_FAILED' }
             Write-Host 'R02_SOURCE_NATIVE_STORAGE_PASS'
             Push-Location $lab
             try {
-              & $py -m PyInstaller --noconfirm --clean --onedir --name dc_native_storage_rehearsal --paths "$env:GITHUB_WORKSPACE" --hidden-import sqlalchemy.dialects.sqlite.pysqlcipher --hidden-import sqlcipher3.dbapi2 $probe
+              $observed = Get-Content -LiteralPath $env:DC_NATIVE_IMPORT_MANIFEST -Raw | ConvertFrom-Json
+              $hidden = @()
+              foreach ($module in $observed) {
+                if ($module -notmatch '^[A-Za-z_][A-Za-z0-9_.]*$') { throw 'INVALID_OBSERVED_MODULE' }
+                $hidden += @('--hidden-import', $module)
+              }
+              & $py -m PyInstaller --noconfirm --clean --onedir --name dc_native_storage_rehearsal --paths "$env:GITHUB_WORKSPACE" --hidden-import sqlalchemy.dialects.sqlite.pysqlcipher --hidden-import sqlcipher3.dbapi2 @hidden $probe
               if ($LASTEXITCODE -ne 0) { throw 'FROZEN_NATIVE_BUILD_FAILED' }
               $exe = Join-Path $lab 'dist\dc_native_storage_rehearsal\dc_native_storage_rehearsal.exe'
               & $py $harness $exe
@@ -46,6 +53,7 @@ jobs:
               Write-Host 'R02_FROZEN_NATIVE_STORAGE_PASS'
             } finally { Pop-Location }
           } finally {
+            Remove-Item Env:DC_NATIVE_IMPORT_MANIFEST -ErrorAction SilentlyContinue
             if (Test-Path -LiteralPath $lab) { Remove-Item -LiteralPath $lab -Recurse -Force }
           }
           if (Test-Path -LiteralPath $lab) { throw 'BUILD_LAB_CLEANUP_FAILED' }

@@ -7,6 +7,8 @@ before importing any backend package.
 from pathlib import Path
 from types import SimpleNamespace
 import os
+import re
+import json
 import sqlite3
 import stat
 import sys
@@ -112,5 +114,33 @@ def main():
         raise RuntimeError("PLAINTEXT_READ_ACCEPTED")
 
 
+def observed_imports():
+    """Record names of actual source imports, not data, paths or credentials."""
+    roots = (Path(sys.prefix).resolve(), Path(__file__).resolve().parents[1] / "backend")
+    names = set()
+    for name, module in tuple(sys.modules.items()):
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", name):
+            continue
+        spec = getattr(module, "__spec__", None)
+        origin = getattr(spec, "origin", None)
+        if getattr(spec, "name", None) != name or not isinstance(origin, str):
+            continue
+        if not Path(origin).is_absolute():
+            continue
+        resolved = Path(origin).resolve()
+        if any(resolved.is_relative_to(root) for root in roots):
+            names.add(name)
+    return sorted(names)
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ModuleNotFoundError as exc:
+        name = exc.name or ""
+        print("R02_NATIVE_MISSING_MODULE=" + (
+            name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", name) else "unidentified"
+        ), flush=True)
+        raise SystemExit(1) from None
+    if not getattr(sys, "frozen", False):
+        print("R02_NATIVE_OBSERVED_IMPORTS=" + json.dumps(observed_imports()), flush=True)
