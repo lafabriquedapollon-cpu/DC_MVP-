@@ -1,0 +1,3 @@
+# Exact Windows build lock from the public dependency contract.
+-r requirements.txt
+pyinstaller==6.22.3

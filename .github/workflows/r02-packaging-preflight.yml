@@ -1,0 +1,72 @@
+name: R0.2 - Windows packaging preflight (not a release)
+on:
+  push:
+    branches: [ci/r02-packaging-20261125]
+permissions:
+  contents: read
+jobs:
+  windows-packaging-preflight:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Check exact lock contracts and negative release gates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m backend.scripts.windows_build_dependency_contract
+          if ($LASTEXITCODE -ne 0) { throw 'LOCK_CONTRACT_FAILED' }
+          python -m backend.scripts.ci_r02_packaging_preflight
+          if ($LASTEXITCODE -ne 0) { throw 'NEGATIVE_GUARDS_FAILED' }
+          Write-Host 'R02_PACKAGING_NEGATIVE_GUARDS_PASS'
+      - name: Qualify pinned PyInstaller on an inert synthetic program only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lab = Join-Path $env:RUNNER_TEMP ('dc-packaging-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $lab | Out-Null
+          try {
+            python -m venv (Join-Path $lab 'venv')
+            if ($LASTEXITCODE -ne 0) { throw 'VENV_FAILED' }
+            $py = Join-Path $lab 'venv\Scripts\python.exe'
+            & $py -m pip install --disable-pip-version-check --only-binary=:all: 'pyinstaller==6.22.3'
+            if ($LASTEXITCODE -ne 0) { throw 'PINNED_TOOLCHAIN_UNAVAILABLE' }
+            & $py -c "import PyInstaller; assert PyInstaller.__version__ == '6.22.3'"
+            if ($LASTEXITCODE -ne 0) { throw 'TOOLCHAIN_PIN_MISMATCH' }
+            $probe = Join-Path $lab 'probe.py'
+            Set-Content -LiteralPath $probe -Value 'print("R02_SYNTHETIC_PE_EXECUTION_PASS")' -Encoding ascii
+            Push-Location $lab
+            try {
+              & $py -m PyInstaller --noconfirm --clean --onedir --name dc_synthetic_probe $probe
+              if ($LASTEXITCODE -ne 0) { throw 'SYNTHETIC_PE_BUILD_FAILED' }
+              $exe = Join-Path $lab 'dist\dc_synthetic_probe\dc_synthetic_probe.exe'
+              $out = & $exe
+              if ($LASTEXITCODE -ne 0 -or $out -ne 'R02_SYNTHETIC_PE_EXECUTION_PASS') { throw 'SYNTHETIC_PE_EXECUTION_FAILED' }
+              Write-Host $out
+              # The real publisher gate must reject this deliberately unsigned probe.
+              $unsigned = Join-Path $lab 'unsigned'
+              New-Item -ItemType Directory -Path $unsigned | Out-Null
+              $installer = Join-Path $unsigned 'DigitalCrownSetup-INSTALLABLE-CERTIFIED.exe'
+              $app = Join-Path $unsigned 'DigitalCrown.exe'
+              Copy-Item -LiteralPath $exe -Destination $installer
+              Copy-Item -LiteralPath $exe -Destination $app
+              $pin = Join-Path $lab 'synthetic-untrusted-pin.txt'
+              Set-Content -LiteralPath $pin -Value ('0' * 64) -Encoding ascii
+              $denied = $false
+              try {
+                & "$env:GITHUB_WORKSPACE\backend\scripts\verify_lot05_windows_publisher_preflight.ps1" -InstallerPath $installer -ApplicationPath $app -PublisherCertSha256PinFile $pin
+              } catch {
+                if ($_.Exception.Message -notmatch '05G_PUBLISHER_DENIED_INSTALLER_AUTHENTICODE_NOT_VALID') { throw }
+                $denied = $true
+              }
+              if (-not $denied) { throw 'UNSIGNED_PUBLISHER_ACCEPTED' }
+              Write-Host 'R02_UNSIGNED_PUBLISHER_DENIED_PASS'
+            } finally { Pop-Location }
+          } finally { Remove-Item -LiteralPath $lab -Recurse -Force }
+          Write-Host 'R02_PACKAGING_PREFLIGHT_ONLY_PASS (NOT CODE_CERTIFIED OR INSTALLABLE_CERTIFIED)'
