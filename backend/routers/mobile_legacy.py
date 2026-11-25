@@ -649,6 +649,8 @@ def get_mobile_dentists(
             models.User.employer_id == employer_id,
             models.User.role == models.UserRole.DENTISTE,
             models.User.is_active == True,  # noqa: E712
+            models.User.is_archived.is_(False),
+            models.User.approval_status == "approved",
         )
         .all()
     )

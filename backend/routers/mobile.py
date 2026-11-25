@@ -14,7 +14,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, contains_eager
 
 from backend import database, models, schemas
-from backend.routers.auth import has_permission, is_superadmin_user, require_permission
+from backend.routers.auth import has_permission, is_superadmin_user, require_permission, is_archived_team_member
 from backend.security import ALGORITHM, SECRET_KEY, token_blacklist
 from . import admin_legacy as _admin_legacy
 from . import mobile_legacy as _legacy
@@ -148,7 +148,7 @@ def _bridge_target_users(db: Session, current_user: models.User) -> list[models.
     ).order_by(models.User.id.asc()).all()
     result = []
     for user in users:
-        if not user.is_active:
+        if not user.is_active or is_archived_team_member(user):
             continue
         if user.id != employer_id and _approval_value(user) != "approved":
             continue
@@ -163,7 +163,7 @@ def _resolve_bridge_target(db: Session, current_user: models.User, target_user_i
     target = db.query(models.User).filter(models.User.id == target_user_id).first()
     if not target or target.get_employer_id() != employer_id:
         raise HTTPException(status_code=404, detail="Utilisateur introuvable dans ce cabinet.")
-    if not target.is_active or (target.id != employer_id and _approval_value(target) != "approved"):
+    if not target.is_active or is_archived_team_member(target) or (target.id != employer_id and _approval_value(target) != "approved"):
         raise HTTPException(status_code=403, detail="Utilisateur inactif ou non approuvé.")
     if not _allowed_bridge_destinations(target):
         raise HTTPException(status_code=403, detail="Cet utilisateur ne peut pas ouvrir l'expérience mobile.")
@@ -524,6 +524,7 @@ def refresh_mobile_credentials(
         not device
         or not user
         or not user.is_active
+        or is_archived_team_member(user)
         or user.get_employer_id() != tenant_id
         or (getattr(user, "employer_id", None) is not None and (approval or "approved") != "approved")
     ):
