@@ -20,11 +20,28 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          python -m backend.scripts.windows_build_dependency_contract
+          # The lock checker is a standalone stdlib script; avoid backend package initialization.
+          python backend/scripts/windows_build_dependency_contract.py
           if ($LASTEXITCODE -ne 0) { throw 'LOCK_CONTRACT_FAILED' }
-          python -m backend.scripts.ci_r02_packaging_preflight
-          if ($LASTEXITCODE -ne 0) { throw 'NEGATIVE_GUARDS_FAILED' }
-          Write-Host 'R02_PACKAGING_NEGATIVE_GUARDS_PASS'
+          # Real backend imports need the locked model/schema dependencies. Rehearsal
+          # explicitly suppresses runtime/media initialization in backend/__init__.py.
+          $guardLab = Join-Path $env:RUNNER_TEMP ('dc-guard-' + [guid]::NewGuid().ToString('N'))
+          try {
+            python -m venv $guardLab
+            if ($LASTEXITCODE -ne 0) { throw 'GUARD_VENV_FAILED' }
+            $guardPy = Join-Path $guardLab 'Scripts\python.exe'
+            & $guardPy -m pip install --disable-pip-version-check --only-binary=:all: 'SQLAlchemy==2.0.28' 'greenlet==3.3.1' 'typing_extensions==4.15.0' 'pydantic==2.6.3' 'pydantic_core==2.16.3' 'annotated-types==0.7.0' 'email-validator==2.3.0' 'dnspython==2.8.0' 'idna==3.11' 'fastapi==0.115.6' 'starlette==0.41.3' 'anyio==4.12.1'
+            if ($LASTEXITCODE -ne 0) { throw 'GUARD_DEPENDENCIES_FAILED' }
+            & $guardPy -m pip check
+            if ($LASTEXITCODE -ne 0) { throw 'GUARD_DEPENDENCIES_INCONSISTENT' }
+            $env:ENVIRONMENT = 'packaging-rehearsal'
+            & $guardPy -m backend.scripts.ci_r02_packaging_preflight
+            if ($LASTEXITCODE -ne 0) { throw 'NEGATIVE_GUARDS_FAILED' }
+            Write-Host 'R02_PACKAGING_NEGATIVE_GUARDS_PASS'
+          } finally {
+            Remove-Item Env:ENVIRONMENT -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $guardLab) { Remove-Item -LiteralPath $guardLab -Recurse -Force }
+          }
       - name: Qualify pinned PyInstaller on an inert synthetic program only
         shell: pwsh
         run: |
