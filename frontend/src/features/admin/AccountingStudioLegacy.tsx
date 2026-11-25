@@ -11,10 +11,8 @@ import {
   Brain,
   History,
   LayoutGrid,
-  ArrowLeft,
   ArrowUp,
   ArrowDown,
-  Sparkles,
   Wand2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -24,9 +22,9 @@ import { TreatmentSelector } from '../../components/odontogram/TreatmentSelector
 import { createPortal } from 'react-dom';
 import type { SelectedSurfaceData, ToothSurface, ToothTreatment } from '../../components/odontogram/types';
 import { api } from '../../services/api';
-import type { ValidationError, CoherenceWarning } from './DocumentStudio/useDocumentGenerator';
+import type { CoherenceWarning } from './DocumentStudio/useDocumentGenerator';
 import { PriceBrain } from '../../components/odontogram/PriceBrain';
-import { useAccountingStore, type PriceItem, type InstallmentItem } from './store/useAccountingStore';
+import { useAccountingStore, type PriceItem } from './store/useAccountingStore';
 import { useCatalogStore } from './Settings/hooks/useCatalogStore';
 import { AccountingQuickActions } from './DocumentStudio/AccountingQuickActions';
 import { groupAccountingItemsByPhase, isAccountingPhaseSeparator } from './DocumentStudio/AccountingPhasePolicy';

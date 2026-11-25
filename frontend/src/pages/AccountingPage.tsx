@@ -27,11 +27,7 @@ import {
   YAxis, 
   CartesianGrid, 
   Tooltip, 
-  ResponsiveContainer,
-  BarChart,
-  Cell,
-  PieChart,
-  Pie
+  ResponsiveContainer
 } from 'recharts';
 import type { HonoraireItem } from '../features/accounting/types';
 import { getHonoraireTrashTarget, groupByPatientDate } from '../features/accounting/utils';

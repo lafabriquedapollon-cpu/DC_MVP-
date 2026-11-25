@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Image as ImageIcon, FileImage, Type, Palette, Upload, MousePointer2, Check, ChevronDown, ChevronUp } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp } from 'lucide-react';
 import { cn } from '../../../../utils/cn';
 import { BRAND_IDENTITIES, PREMIUM_FONTS } from '../../constants';
 import type { HeaderOption, TemplateOption } from '../../types';

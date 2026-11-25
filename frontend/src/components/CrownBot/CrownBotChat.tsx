@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  Send, X, Bot, User, Check, XCircle, Loader2, Menu, Plus,
+  X, Bot, Check, XCircle, Menu, Plus,
   Archive, BrainCircuit, Zap, ArrowRight, MessageSquare, Crown, Sparkles,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';

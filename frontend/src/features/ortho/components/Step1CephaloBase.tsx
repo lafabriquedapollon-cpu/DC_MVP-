@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
-  Upload, Loader2, AlertCircle, Sun, Target, RefreshCw, Maximize2, Minimize2, ZoomIn, ZoomOut, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, X, Activity, CheckCircle2, Info, Aperture, MousePointer2, Settings2, SlidersHorizontal, Wand2
+  Upload, Loader2, AlertCircle, Sun, Target, RefreshCw, Maximize2, Minimize2, ZoomIn, ZoomOut, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, X, Activity, CheckCircle2, Info, Aperture, MousePointer2, Wand2
 } from 'lucide-react';
 import { CephaloTracingLayer } from '../CephaloTracingLayer';
 import type { 
-  UIMode, VTOSettings, ImageFilters 
+  VTOSettings, ImageFilters 
 } from '../cephaloShared';
 import { useOrthoStore } from '../stores/useOrthoStore';
 import { cephaloRepository } from '../cephaloRepository';
