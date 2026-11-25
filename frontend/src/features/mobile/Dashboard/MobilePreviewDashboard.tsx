@@ -39,10 +39,10 @@ function buildSnapshot(selectedDate: string): Snapshot {
   return {
     generated_at: new Date().toISOString(), role: 'DENTISTE', is_superadmin: false,
     appointments: [
-      { id: 9101, $10, time: '09:00', date: selectedDate, patient_name: null, phone: null, motif: 'Contrôle ortho', status: 'TERMINE', duration_minutes: 30 },
-      { id: 9102, $10, time: '10:15', date: selectedDate, patient_name: null, phone: null, motif: 'Endodontie 16', status: 'EN_COURS', duration_minutes: 45 },
-      { id: 9103, $10, time: '11:30', date: selectedDate, patient_name: null, phone: null, motif: 'Empreinte', status: 'EN_ATTENTE', duration_minutes: 30, ticket_number: 12 },
-      { id: 9104, $10, time: '14:00', date: selectedDate, patient_name: null, phone: null, motif: 'Couronne 26', status: 'PLANIFIE', duration_minutes: 45 },
+      { id: 9101, patient_id: 101, time: '09:00', date: selectedDate, patient_name: 'Patient Démo A', phone: null, motif: 'Contrôle ortho', status: 'TERMINE', duration_minutes: 30 },
+      { id: 9102, patient_id: 102, time: '10:15', date: selectedDate, patient_name: 'Patient Démo B', phone: null, motif: 'Endodontie 16', status: 'EN_COURS', duration_minutes: 45 },
+      { id: 9103, patient_id: null, time: '11:30', date: selectedDate, patient_name: 'Patient fictif C', phone: null, motif: 'Empreinte', status: 'EN_ATTENTE', duration_minutes: 30, ticket_number: 12 },
+      { id: 9104, patient_id: null, time: '14:00', date: selectedDate, patient_name: 'Patient fictif D', phone: null, motif: 'Couronne 26', status: 'PLANIFIE', duration_minutes: 45 },
     ],
     finance: { today_revenue: 7850, month_revenue: 126400, month_variation: 8.2, appointments_count: 84, weekly_revenue: [], total_patients: 642, total_debt: 12750 },
     debtors: [],
@@ -63,17 +63,17 @@ const DEMO_PATIENT_COCKPIT: MobilePatientsPreviewData = {
   resources: { documents: [], panoramics: [] },
 };
 
-const DEMO_LAB_JOBS: LabJob[] = [{ id: 7001, $10, act_id: 8001, material: 'Zircone', shade: 'A2', type: 'Couronne', tooth_number: '26', notes: 'Données fictives Preview', deadline: isoDay(3), status: LabJobStatus.PRESCRIPTION, is_remake: false, is_late: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }];
+const DEMO_LAB_JOBS: LabJob[] = [{ id: 7001, patient_id: 101, act_id: 8001, material: 'Zircone', shade: 'A2', type: 'Couronne', tooth_number: '26', notes: 'Données fictives Preview', deadline: isoDay(3), status: LabJobStatus.PRESCRIPTION, is_remake: false, is_late: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }];
 
 const DEMO_FRONTDESK: PendingRequest[] = [
-  { id: 8101, patient_name: null, phone: 'REDACTED_PHONE', datetime_start: `${isoDay(0)}T15:30:00`, duration_minutes: 30, motif: 'Douleur molaire', status: 'EN_ATTENTE_DEMANDE', source: 'frontdesk', expires_at: `${isoDay(0)}T16:00:00`, created_at: new Date().toISOString() },
-  { id: 8102, patient_name: null, phone: 'REDACTED_PHONE', datetime_start: `${isoDay(1)}T10:00:00`, duration_minutes: 45, motif: 'Contrôle implant', status: 'EN_ATTENTE_CONFIRM', source: 'frontdesk', expires_at: `${isoDay(0)}T17:30:00`, created_at: new Date().toISOString() },
+  { id: 8101, patient_name: 'Patient fictif E', phone: 'REDACTED_PHONE', datetime_start: `${isoDay(0)}T15:30:00`, duration_minutes: 30, motif: 'Douleur molaire', status: 'EN_ATTENTE_DEMANDE', source: 'frontdesk', expires_at: `${isoDay(0)}T16:00:00`, created_at: new Date().toISOString() },
+  { id: 8102, patient_name: 'Patient fictif F', phone: 'REDACTED_PHONE', datetime_start: `${isoDay(1)}T10:00:00`, duration_minutes: 45, motif: 'Contrôle implant', status: 'EN_ATTENTE_CONFIRM', source: 'frontdesk', expires_at: `${isoDay(0)}T17:30:00`, created_at: new Date().toISOString() },
 ];
 
 const DEMO_NOTIFICATIONS: MobileAlert[] = [
-  { id: 8201, $10, patient_name: null, type: 'OVERDUE_PAYMENT', title: 'Paiement à régulariser', message: 'Un règlement patient nécessite une vérification aujourd’hui.', priority: 'HIGH', created_at: new Date(Date.now() - 12 * 60_000).toISOString() },
-  { id: 8202, $10, patient_name: null, type: 'PATIENT_FOLLOWUP', title: 'Suivi clinique', message: 'Le contrôle prévu cette semaine mérite une vérification du dossier.', priority: 'MEDIUM', created_at: new Date(Date.now() - 75 * 60_000).toISOString() },
-  { id: 8203, $10, patient_name: null, type: 'PATIENT_INFO', title: 'Information patient', message: 'Une information non urgente est disponible dans le dossier.', priority: 'LOW', created_at: new Date(Date.now() - 26 * 60 * 60_000).toISOString() },
+  { id: 8201, patient_id: 101, patient_name: null, type: 'OVERDUE_PAYMENT', title: 'Paiement à régulariser', message: 'Un règlement patient nécessite une vérification aujourd’hui.', priority: 'HIGH', created_at: new Date(Date.now() - 12 * 60_000).toISOString() },
+  { id: 8202, patient_id: 102, patient_name: null, type: 'PATIENT_FOLLOWUP', title: 'Suivi clinique', message: 'Le contrôle prévu cette semaine mérite une vérification du dossier.', priority: 'MEDIUM', created_at: new Date(Date.now() - 75 * 60_000).toISOString() },
+  { id: 8203, patient_id: null, patient_name: null, type: 'PATIENT_INFO', title: 'Information patient', message: 'Une information non urgente est disponible dans le dossier.', priority: 'LOW', created_at: new Date(Date.now() - 26 * 60 * 60_000).toISOString() },
 ];
 
 const DEMO_STOCK: MobileStockItem[] = [

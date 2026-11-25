@@ -78,7 +78,7 @@ interface OrthoState {
   layerOpacity: OrthoLayerOpacity;
   landmarkEditTimeline: LandmarkEditTimeline;
   dateConsultation: string;
-  sexePatient: 'Synthetic Patient' | 'F' | null;
+  sexePatient: 'M' | 'F' | null;
   setStep: (step: StepId) => void;
   setCompletedSteps: (updater: Set<number> | ((prev: Set<number>) => Set<number>)) => void;
   setPhotos: (updater: PhotoUpload[] | ((prev: PhotoUpload[]) => PhotoUpload[])) => void;

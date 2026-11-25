@@ -74,7 +74,7 @@ export const EliteAssistant: React.FC<EliteAssistantProps> = ({
     if (!employerId || !isEmbedded) return;
     
     let ws: WebSocket;
-    let reconnectTimer: NodeJS.Timeout;
+    let reconnectTimer: ReturnType<typeof setTimeout>;
 
     const connectWS = () => {
       const wsUrl = buildGhostBrainWsUrl(employerId);

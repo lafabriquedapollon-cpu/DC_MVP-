@@ -32,7 +32,7 @@ export const PatientList = () => {
     rect: DOMRect;
   } | null>(null);
 
-  const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleMouseEnter = (
     e: React.MouseEvent<HTMLElement>,
