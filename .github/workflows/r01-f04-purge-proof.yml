@@ -1,0 +1,95 @@
+name: R0.1 F04 purge residual proof
+on:
+  push:
+    branches: [ci/r01-f04-purge-proof-20261125]
+    paths: ['.github/workflows/r01-f04-purge-proof.yml', 'backend/**', 'frontend/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: r01-f04-purge-proof
+  cancel-in-progress: false
+jobs:
+  clinical-retention:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Validate integration driver syntax
+        run: node --check frontend/scripts/ci-desktop-integration.mjs
+      - name: Validate all Python source syntax
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          files = sorted(Path('backend').rglob('*.py'))
+          for p in files:
+              ast.parse(p.read_text(encoding='utf-8-sig'), filename=str(p))
+          print(f'BACKEND_AST_PASS files={len(files)}')
+          PY
+      - name: Install native runtime prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsqlcipher-dev libmagic1 libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libgl1 libglib2.0-0t64
+      - name: Install pinned Python dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+          python -m pip install --no-cache-dir --index-url https://pypi.org/simple -r backend/requirements.txt
+          python -m pip check
+          echo PYTHON_DEPENDENCIES_PASS
+      - name: Create fresh encrypted LAB and run actual FastAPI without external network
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-rehearsal.XXXXXXXX")
+          ns="dc-rehearsal-$GITHUB_RUN_ID"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          export DC_LAB_ROOT="$lab"
+          export DC_PYTHON="$(command -v python)"
+          export DC_CHECKOUT="$GITHUB_WORKSPACE"
+          export DC_EVIDENCE="$RUNNER_TEMP/dc-integration-evidence"
+          mkdir -p "$DC_EVIDENCE"
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" bash -s <<'LAB'
+          set -euo pipefail
+          umask 077
+          cd "$DC_CHECKOUT"
+          export HOME="$DC_LAB_ROOT/home"
+          export XDG_CONFIG_HOME="$HOME/config" XDG_RUNTIME_DIR="$HOME/runtime" XDG_DATA_HOME="$HOME/data"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME" "$DC_LAB_ROOT/rehearsal-media"
+          export ENVIRONMENT=e2e_install_rehearsal
+          export ALLOWED_ORIGINS=http://127.0.0.1:5173
+          export DC_SYNTH_PASSWORD="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          export VITE_API_URL=http://127.0.0.1:8008 VITE_ENABLE_HTTPS=false
+          export DATABASE_URL="sqlite:///$DC_LAB_ROOT/fresh-rehearsal.db"
+          export MEDIA_ROOT="$DC_LAB_ROOT/rehearsal-media"
+          export SECRET_KEY="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export CABINET_MASTER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export SQLCIPHER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export MOBILE_PAIRING_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export DIGITALCROWN_ISOLATED_RUNTIME=true TELEMETRY_ENABLED=false
+          export GOOGLE_CLIENT_ID='' GOOGLE_CLIENT_SECRET='' SMTP_HOST='' PATIENT_COMPANION_RELAY_URL='' PATIENT_COMPANION_RELAY_BOOTSTRAP_SECRET=''
+          export DIGITALCROWN_ISOLATION_DB_FINGERPRINT="$("$DC_PYTHON" -c 'import os; from backend.core.runtime_safety import database_target_fingerprint; print(database_target_fingerprint(os.environ["DATABASE_URL"]))')"
+          test ! -e "$DC_LAB_ROOT/fresh-rehearsal.db"
+          test "$(ip -o link show | wc -l)" -eq 1
+          echo LAB_LOOPBACK_ONLY
+          "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
+          "$DC_PYTHON" -m backend.scripts.ci_fk_runtime_probe
+          "$DC_PYTHON" -m backend.scripts.ci_clinical_retention_probe
+          "$DC_PYTHON" -m backend.scripts.ci_f04_business_cascade_probe
+          "$DC_PYTHON" -m backend.scripts.ci_f04_purge_residual_probe
+          LAB
