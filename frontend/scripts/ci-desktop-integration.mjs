@@ -1,6 +1,7 @@
 // CI-only real Chromium + local API; no auth storage injection or request mocks.
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
+import { certifyCompanionVault } from './ci-r02-vault.mjs';
 import {setTimeout as sleep} from 'node:timers/promises';
 const base = 'http://127.0.0.1:8008';
 const web = 'http://127.0.0.1:5173';
@@ -147,6 +148,7 @@ try {
     await capture('06-patient-restarted');
     console.log('BACKEND_RESTART_PATIENT_READ_PASS');
     await assertPwa({controlled:true});
+    if(pwaRehearsal) await certifyCompanionVault(call,evalPage,wait);
   } else {
   await wait('login form',()=>visible('input[type=email]'));
   await assertPwa();
@@ -163,6 +165,17 @@ try {
   assert.equal(me.status,200);assert.equal(me.email,'ci-owner@example.com');
   await capture('02-dashboard');
   console.log('BROWSER_LOGIN_SESSION_PASS');
+  if(pwaRehearsal){
+    await wait('CrownBot launcher',()=>visible('button[aria-label="Ouvrir CrownBot"]'));
+    assert(await evalPage('(()=>{const b=document.querySelector(\'button[aria-label="Ouvrir CrownBot"]\');if(!b)return false;b.click();return true})()'));
+    await wait('CrownBot chat tab',()=>visible('#cb01-tab-chat'));
+    assert(await evalPage('(()=>{const b=document.querySelector("#cb01-tab-chat");if(!b)return false;b.click();return true})()'));
+    await wait('default-off chat',()=>evalPage('Boolean(document.querySelector("#cb01-panel-chat")?.innerText.includes("Cette fonction n’est pas accessible depuis cet écran."))'));
+    assert(await evalPage('!document.querySelector("#cb01-panel-chat textarea, #cb01-panel-chat input")'));
+    await capture('02b-crownbot-default-off');
+    assert(await evalPage('(()=>{const b=document.querySelector(\'button[aria-label="Fermer Crown Bot"]\');if(!b)return false;b.click();return true})()'));
+    console.log('CROWNBOT_DEFAULT_OFF_REAL_UI_PASS');
+  }
   await call('Page.navigate',{url:web+'/patients/new'});
   await wait('patient form',()=>visible('input[name=nom]'));
   await setField('input[name=nom]','CI-SYNTHETIC');
