@@ -40,13 +40,11 @@ const SetupWizard     = lazy(() => import('./features/admin/SetupWizard').then(m
 const EliteLibrary    = lazy(() => import('./features/clinical-ref/EliteLibrary').then(m => ({ default: m.EliteLibrary })));
 const EliteScienceHub = lazy(() => import('./features/clinical-ref/EliteScienceHub').then(m => ({ default: m.EliteScienceHub })));
 const SuperAdminDashboard = lazy(() => import('./features/superadmin/SuperAdminDashboard').then(m => ({ default: m.SuperAdminDashboard })));
-const LabJobsBoard    = lazy(() => import('./components/LabJobsBoard').then(m => ({ default: m.LabJobsBoard })));
 const StockPage       = lazy(() => import('./pages/StockPage').then(m => ({ default: m.StockPage })));
 const PartnerMarketplacePage = lazy(() => import('./pages/PartnerMarketplacePage').then(m => ({ default: m.PartnerMarketplacePage })));
 const PartnerCatalogAdminPage = lazy(() => import('./pages/PartnerCatalogAdminPage').then(m => ({ default: m.PartnerCatalogAdminPage })));
 const PartnerSupplierPage = lazy(() => import('./pages/PartnerSupplierPage').then(m => ({ default: m.PartnerSupplierPage })));
 const PartnerProductPage = lazy(() => import('./pages/PartnerProductPage').then(m => ({ default: m.PartnerProductPage })));
-const WaitingRoomPage  = lazy(() => import('./pages/WaitingRoomPage').then(m => ({ default: m.WaitingRoomPage })));
 const LegalPage        = lazy(() => import('./pages/LegalPage').then(m => ({ default: m.LegalPage })));
 const PatientCompanionApp = lazy(() => import('./features/patient-companion/PatientCompanionApp').then(m => ({ default: m.PatientCompanionApp })));
 const HubPage = lazy(() => import('./features/hub/HubPage').then(m => ({ default: m.HubPage })));

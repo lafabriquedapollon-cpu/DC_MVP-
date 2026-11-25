@@ -23,11 +23,6 @@ export type PatientNotificationPreferences = {
   consents: boolean;
 };
 
-type NotificationResponse = {
-  items: PatientNotification[];
-  preferences: PatientNotificationPreferences;
-};
-
 const defaultPreferences: PatientNotificationPreferences = {
   appointments: true,
   documents: true,

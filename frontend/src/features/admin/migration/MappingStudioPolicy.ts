@@ -16,7 +16,6 @@ const SHA = /^[a-f0-9]{64}$/;
 const IDENTIFIER = /^[^\x00-\x1F\x7F]{1,255}$/u;
 const MAX_SIZE = 1024 * 1024;
 const SECRET = /password|passwd|pwd|secret|token|credential|api[_ -]?key|private[_ -]?key|hash|salt|oauth|session[_ -]?key|otp|authentication/i;
-const hasOwn = (record: object, key: string) => Object.prototype.hasOwnProperty.call(record, key);
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const fail = (code: string): never => { throw new Error(code); };
 

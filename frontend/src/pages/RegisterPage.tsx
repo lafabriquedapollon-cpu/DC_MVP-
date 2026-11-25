@@ -16,7 +16,7 @@ export const RegisterPage: React.FC = () => {
   const [success, setSuccess] = useState(false);
   const [acceptTerms, setAcceptTerms] = useState(false);
   const [acceptPrivacy, setAcceptPrivacy] = useState(false);
-  const navigate = useNavigate();
+  useNavigate();
 
   // Capture des paramètres URL pour pré-remplir le formulaire
   useEffect(() => {

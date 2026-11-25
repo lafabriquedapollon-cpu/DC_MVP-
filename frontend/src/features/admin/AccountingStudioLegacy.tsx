@@ -36,18 +36,6 @@ import { accountingDocumentTotal } from './DocumentStudio/AccountingTotalPolicy'
 import { resolveNamedDevisActPrice } from './DocumentStudio/AccountingNamedActPricePolicy';
 import { searchableCatalogActs, suggestedCatalogActs } from './DocumentStudio/AccountingActApplicabilityPolicy';
 
-const detectRegion = (teeth: number[]): string => {
-  if (teeth.length === 0) return 'Général';
-  const first = teeth[0];
-  const q = Math.floor(first / 10);
-  const qName = q === 1 ? 'Sup. Droit' : q === 2 ? 'Sup. Gauche' : q === 3 ? 'Inf. Gauche' : q === 4 ? 'Inf. Droit' : q === 5 ? 'Prim. Sup. Droit' : q === 6 ? 'Prim. Sup. Gauche' : q === 7 ? 'Prim. Inf. Gauche' : 'Prim. Inf. Droit';
-  const isAnterior = teeth.every(t => [1,2,3].includes(t % 10));
-  if (isAnterior) return q <= 2 || q === 5 || q === 6 ? 'Sextant Antérieur Sup.' : 'Sextant Antérieur Inf.';
-  const isPosterior = teeth.every(t => [4,5,6,7,8].includes(t % 10));
-  if (isPosterior) return `Sextant ${qName}`;
-  return `Quadrant ${q}`;
-};
-
 interface AccountingStudioProps {
   isDevis?: boolean;
   patientId: string;
@@ -693,7 +681,7 @@ export const AccountingStudio: React.FC<AccountingStudioProps> = ({
                             toothNumber={activeTooth}
                             currentTreatments={activeToothTreatments}
                             allowEmptyConfirm={activeToothTreatments.length > 0}
-                            onConfirm={(treatments, surfaces, notes) => {
+                            onConfirm={(treatments, surfaces) => {
                               replaceToothTreatmentsFromSelector(activeTooth, treatments, surfaces);
                               treatments.forEach(t => {
                                 if (t.price && t.price > 0) {
