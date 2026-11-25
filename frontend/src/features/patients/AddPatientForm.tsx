@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Save, User, Phone, Mail, Activity, AlertTriangle, UserCheck, FileDigit, RefreshCw, Search, FolderOpen, CheckCircle2 } from 'lucide-react';
 import { api } from '../../services/api';
-import type { Patient } from '../../types';
+
 import { cn } from '../../utils/cn';
 import { MotifSelector } from './components/MotifSelector';
 import { createPatientIdentityFormData, patientIdentityToApiPayload, validatePatientIdentity, type DossierStatus } from './PatientIdentityContract';

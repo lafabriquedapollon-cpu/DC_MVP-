@@ -9,9 +9,7 @@ import { cn } from '../../../utils/cn';
 import {
   SPECIALTIES_DICT, STEPS, CROWN_MESSAGES, BRAND_IDENTITIES,
 } from '../constants';
-import type {
-  IdentityState, HeaderOption, TemplateOption, ContactConfig,
-} from '../types';
+import type { IdentityState, TemplateOption, ContactConfig } from '../types';
 import { LiveDocumentStudio } from '../components/LiveDocumentStudio';
 import { CrownGuide } from '../components/CrownGuide';
 import { ArabicKeyboard } from '../components/ArabicKeyboard';

@@ -1,6 +1,6 @@
 // G5 CI screenshot lab: REAL CrownBotChat component with an isolated
 // floating shell, NOT a screenshot of the clinic's MainLayout or live data.
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { CrownBotChat } from './CrownBotChat';

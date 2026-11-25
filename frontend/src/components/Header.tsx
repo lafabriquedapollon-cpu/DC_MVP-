@@ -14,7 +14,7 @@ type ConnectHubItem = { id:string; source:'proactive_alert'|'treasury_hub'|strin
 type ConnectHubPayload = { total:number; requires_attention:number; items:ConnectHubItem[]; delivery_semantics:string; };
 
 export const Header = ({ isCrownBotOpen=false, crownBotUnreadCount=0, onToggleCrownBot }: HeaderProps) => {
-  const [cabinetName,setCabinetName]=useState('Votre cabinet'); const [praticienName,setPraticienName]=useState('Praticien');
+  const [cabinetName,setCabinetName]=useState('Votre cabinet'); const [,setPraticienName]=useState('Praticien');
   const [connectHub,setConnectHub]=useState<ConnectHubPayload>({total:0,requires_attention:0,items:[],delivery_semantics:'source_state_only'});
   const [showNotifs,setShowNotifs]=useState(false); const [showLogoutConfirm,setShowLogoutConfirm]=useState(false); const {user}=useAuthStore(); const notifRef=useRef<HTMLDivElement>(null);
   useEffect(()=>{const handleClickOutside=(event:MouseEvent)=>{if(notifRef.current&&!notifRef.current.contains(event.target as Node))setShowNotifs(false)};document.addEventListener('mousedown',handleClickOutside);return()=>document.removeEventListener('mousedown',handleClickOutside)},[]);

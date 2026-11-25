@@ -220,7 +220,6 @@ export const OdontogramSVG: React.FC<OdontogramSVGProps> = ({
   selectedSurface,
   onSurfaceClick,
   onSurfaceHover,
-  showNumbers = false,
   readOnly = false,
   className = '',
   multiSelectedTeeth = [],

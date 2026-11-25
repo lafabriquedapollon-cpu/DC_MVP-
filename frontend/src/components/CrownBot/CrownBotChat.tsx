@@ -1,12 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  Send, X, Bot, User, Check, XCircle, Loader2, Menu, Plus,
-  Archive, BrainCircuit, Zap, ArrowRight, MessageSquare, Crown, Sparkles,
+  X, Bot, Check, Menu, Plus,
+  Archive, BrainCircuit, Zap, ArrowRight, MessageSquare, Sparkles,
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import 'react-markdown';
 import { useLocation, useNavigate, Link } from 'react-router-dom';
 import { api, API_BASE, getRuntimeAuthToken } from '../../services/api';
-import { mobileFetch } from '../../services/zka/mobileFetch';
+import '../../services/zka/mobileFetch';
 import { useAuthStore } from '../../stores/useAuthStore';
 import { cn } from '../../utils/cn';
 import { CrownBotWorkflowPreview } from './CrownBotWorkflowPreview';
@@ -44,123 +44,6 @@ const buildGhostBrainWsUrl = (employerId: number | string) => {
   const token = getRuntimeAuthToken();
   return token ? `${baseUrl}?token=${encodeURIComponent(token)}` : baseUrl;
 };
-
-function PendingActionCard({
-  action,
-  onConfirm,
-  onCancel,
-}: {
-  action: any;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  const p = action?.params ?? {};
-  const type = action?.type ?? '';
-
-  const rows: { label: string; value: string }[] = [];
-
-  if (type === 'CREATE_APPOINTMENT') {
-    if (p.patient_name || p.patient_id) rows.push({ label: 'Patient', value: p.patient_name || `#${p.patient_id}` });
-    if (p.datetime_start) {
-      const d = new Date(p.datetime_start);
-      rows.push({ label: 'Date', value: d.toLocaleDateString('fr-FR', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' }) });
-      rows.push({ label: 'Heure', value: d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) });
-    }
-    if (p.motif) rows.push({ label: 'Motif', value: p.motif });
-    if (p.duration_minutes) rows.push({ label: 'Durée', value: `${p.duration_minutes} min` });
-  } else if (type === 'OPEN_PRESCRIPTION_EDITOR') {
-    if (p.patient_id || p.patient_name) rows.push({ label: 'Patient', value: p.patient_name || `#${p.patient_id}` });
-    if (p.procedure) rows.push({ label: 'Acte', value: p.procedure });
-    if (p.suggested_drugs?.length) {
-      rows.push({ label: 'Médicaments', value: p.suggested_drugs.map((d: any) => d.name || d).join(', ') });
-    }
-  } else if (type === 'OPEN_DEVIS_EDITOR') {
-    if (p.patient_id || p.patient_name) rows.push({ label: 'Patient', value: p.patient_name || `#${p.patient_id}` });
-    if (p.procedure) rows.push({ label: 'Acte', value: p.procedure });
-    if (p.tooth_number) rows.push({ label: 'Dent', value: p.tooth_number });
-  }
-
-  const label = type === 'CREATE_APPOINTMENT' ? '📅 Créer ce rendez-vous ?'
-    : type === 'OPEN_PRESCRIPTION_EDITOR' ? '💊 Ouvrir l\'éditeur d\'ordonnance ?'
-    : type === 'OPEN_DEVIS_EDITOR' ? '📄 Ouvrir le module devis ?'
-    : '✅ Confirmer cette action ?';
-
-  return (
-    <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-[12px]">
-      <p className="text-xs font-bold text-amber-800 mb-2">{label}</p>
-      {rows.length > 0 && (
-        <div className="space-y-1 mb-3">
-          {rows.map((row, i) => (
-            <div key={i} className="flex items-start gap-2 text-xs">
-              <span className="text-amber-600 font-bold w-20 shrink-0">{row.label}</span>
-              <span className="text-slate-700 font-medium">{row.value}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      <div className="flex gap-2">
-        <button onClick={onConfirm}
-          className="flex-1 flex items-center justify-center gap-1.5 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold rounded-[8px] transition-colors">
-          <Check size={14} /> Confirmer
-        </button>
-        <button onClick={onCancel}
-          className="flex-1 flex items-center justify-center gap-1.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold rounded-[8px] transition-colors">
-          <XCircle size={14} /> Annuler
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function PremiumUpsellCard({ onClose }: { onClose: () => void }) {
-  return (
-    <div className="mt-4 rounded-[16px] overflow-hidden border border-amber-200 shadow-lg">
-      {/* Header gradient */}
-      <div className="bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-3 flex items-center gap-2">
-        <div className="w-7 h-7 rounded-full bg-white/20 flex items-center justify-center shrink-0">
-          <Crown size={14} className="text-white" />
-        </div>
-        <div>
-          <p className="text-white font-black text-xs tracking-wide leading-none">Crown Bot Premium</p>
-          <p className="text-white/75 text-xs mt-0.5">Limite de l’assistant atteinte</p>
-        </div>
-      </div>
-
-      {/* Body */}
-      <div className="bg-amber-50 px-4 py-3">
-        <p className="text-amber-900 text-xs font-semibold mb-2 leading-relaxed">
-          Vous avez utilisé vos <strong>3 échanges</strong> gratuits. Passez à Premium pour des conversations illimitées.
-        </p>
-        <ul className="space-y-1 mb-3">
-          {[
-            'Conversations avec l’assistant',
-            'Mémoire contextuelle étendue',
-            'Actions avancées (ordonnances et devis)',
-          ].map((item) => (
-            <li key={item} className="flex items-start gap-1.5 text-xs text-amber-800 font-medium">
-              <Sparkles size={10} className="text-amber-500 mt-0.5 shrink-0" />
-              {item}
-            </li>
-          ))}
-        </ul>
-        <div className="flex gap-2">
-          <a
-            href="/settings?tab=license"
-            className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white text-xs font-black rounded-[8px] transition-all shadow-md shadow-amber-500/30"
-          >
-            <Crown size={12} /> Passer à Premium
-          </a>
-          <button
-            onClick={onClose}
-            className="px-3 py-2 bg-amber-100 hover:bg-amber-200 text-amber-700 text-xs font-bold rounded-[8px] transition-colors"
-          >
-            Plus tard
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 const TypewriterText = ({ text, delay = 5 }: { text: string; delay?: number }) => {
   const [current, setCurrent] = useState('');
@@ -254,8 +137,6 @@ export function CrownBotChat({
   const [messages, setMessages] = useState<Message[]>([{
     id: 'welcome', sender: 'bot', text: pageCtx.desc, suggestions: pageCtx.suggestions,
   }]);
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -440,139 +321,6 @@ export function CrownBotChat({
       if (currentSessionId === id) startNewSession();
     } catch (err) {
       console.error('Session archive error:', err);
-    }
-  };
-
-  const handleSend = async (text: string) => {
-    if (!text.trim()) return;
-    setMessages(prev => [...prev, { id: Date.now().toString(), sender: 'user', text }]);
-    setInput('');
-    setIsLoading(true);
-
-    const botId = (Date.now() + 1).toString();
-    let botText = '';
-    let placeholderAdded = false;
-
-    const ensurePlaceholder = () => {
-      if (placeholderAdded) return;
-      placeholderAdded = true;
-      setIsLoading(false);
-      setMessages(prev => [...prev, { id: botId, sender: 'bot', text: '' }]);
-    };
-    const updateBot = (patch: Partial<Message>) =>
-      setMessages(prev => prev.map(m => (m.id === botId ? { ...m, ...patch } : m)));
-
-    // Contexte patient : si on est sur un dossier patient, on rattache la conversation
-    const patientMatch = location.pathname.match(/^\/patients\/(\d+)/);
-    const patientId = patientMatch ? Number(patientMatch[1]) : undefined;
-
-    try {
-      const token = getRuntimeAuthToken();
-      const requestInit: RequestInit = {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        credentials: location.pathname.startsWith('/mobile') ? 'omit' : 'include',
-        body: JSON.stringify({
-          message: text,
-          ...(currentSessionId ? { session_id: currentSessionId } : {}),
-          ...(patientId ? { patient_id: patientId } : {}),
-        }),
-      };
-      const res = location.pathname.startsWith('/mobile')
-        ? await mobileFetch(`${API_BASE}/api/bot/chat/stream`, requestInit)
-        : await fetch(`${API_BASE}/api/bot/chat/stream`, requestInit);
-      if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const parts = buf.split('\n\n');
-        buf = parts.pop() || '';
-        for (const part of parts) {
-          const line = part.split('\n').find(l => l.startsWith('data:'));
-          if (!line) continue;
-          let evt: any;
-          try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
-
-          if (evt.type === 'session') {
-            if (evt.session_id && evt.session_id !== currentSessionId) setCurrentSessionId(evt.session_id);
-          } else if (evt.type === 'token') {
-            ensurePlaceholder();
-            botText += evt.content;
-            updateBot({ text: botText });
-          } else if (evt.type === 'final') {
-            ensurePlaceholder();
-            updateBot({
-              text: evt.message ?? botText,
-              actionType: evt.action_type,
-              pendingAction: evt.pending_action,
-              pendingActionId: evt.pending_action_id,
-              suggestions: evt.suggestions,
-              showUpsell: evt.show_upsell === true,
-            });
-            if (evt.session_id && evt.session_id !== currentSessionId) setCurrentSessionId(evt.session_id);
-            fetchSessions();
-          } else if (evt.type === 'error') {
-            ensurePlaceholder();
-            botText = evt.message || "Désolé, une erreur est survenue.";
-            updateBot({ text: botText });
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Bot stream error:', err);
-      if (!placeholderAdded) {
-        setMessages(prev => [...prev, { id: botId, sender: 'bot', text: "Désolé, je n'ai pas pu traiter votre demande." }]);
-      } else {
-        updateBot({ text: botText || "Désolé, je n'ai pas pu traiter votre demande." });
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const dismissUpsell = (msgId: string) => {
-    setMessages(prev => prev.map(m => m.id === msgId ? { ...m, showUpsell: false } : m));
-  };
-
-  const handleConfirmAction = async (msgId: string, _actionData: any, actionId?: string) => {
-    if (!actionId) {
-      setMessages(prev => [...prev, { id: Date.now().toString(), sender: 'bot', text: "Action expirée ou non retrouvée. Veuillez reformuler votre demande." }]);
-      return;
-    }
-    setMessages(prev => prev.map(m =>
-      m.id === msgId ? { ...m, pendingAction: null, pendingActionId: undefined, text: m.text + '\n\n*Action confirmée en cours...*' } : m,
-    ));
-    setIsLoading(true);
-    try {
-      const res = await api.post('/bot/execute', { pending_action_id: actionId });
-      const data = res.data;
-
-      // Redirect si l'action ouvre un module (prescription, devis)
-      if (data.action_type === 'redirect' && data.data?.redirect_url) {
-        navigate(data.data.redirect_url);
-        onClose?.();
-        return;
-      }
-
-      setMessages(prev => [...prev, {
-        id: Date.now().toString(), sender: 'bot',
-        text: data.message || "Action exécutée avec succès.",
-      }]);
-    } catch {
-      setMessages(prev => [...prev, {
-        id: Date.now().toString(), sender: 'bot',
-        text: "Erreur lors de l'exécution de l'action.",
-      }]);
-    } finally {
-      setIsLoading(false);
     }
   };
 

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Activity, CheckCircle2, HeartPulse } from 'lucide-react';
+import { Activity, CheckCircle2 } from 'lucide-react';
 import { cn } from '../../../../utils/cn';
 
 interface AssistantEndoProps {

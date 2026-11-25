@@ -19,7 +19,7 @@ import { cn } from '../utils/cn';
 import { hasAccess as userHasAccess } from '../utils/accessControl';
 import { canViewMigrationStudio } from '../features/admin/migration/MappingStudioPolicy';
 import { api } from '../services/api';
-import { authService } from '../services/auth';
+import '../services/auth';
 import { useSettingsStore } from '../features/admin/Settings/hooks/useSettingsStore';
 import { useAuthStore } from '../stores/useAuthStore';
 

@@ -8,7 +8,6 @@ import { Skeleton } from '../components/Skeleton';
 export function FinanceView({
   snapshot,
   syncStatus,
-  selectedDate,
   openWhatsApp,
   handleExportPDF,
   pocketSummaryOnly = false,

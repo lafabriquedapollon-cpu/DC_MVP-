@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
-  Upload, Loader2, AlertCircle, Sun, Target, RefreshCw, Maximize2, Minimize2, ZoomIn, ZoomOut, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, X, Activity, CheckCircle2, Info, Aperture, MousePointer2, Settings2, SlidersHorizontal, Wand2
+  Upload, Loader2, AlertCircle, Sun, Target, RefreshCw, Maximize2, Minimize2, ZoomIn, ZoomOut, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, X, Activity, CheckCircle2, Info, Aperture, MousePointer2, Wand2
 } from 'lucide-react';
 import { CephaloTracingLayer } from '../CephaloTracingLayer';
 import type { 
-  UIMode, VTOSettings, ImageFilters 
+  VTOSettings, ImageFilters 
 } from '../cephaloShared';
 import { useOrthoStore } from '../stores/useOrthoStore';
 import { cephaloRepository } from '../cephaloRepository';
@@ -115,10 +115,10 @@ export const Step1Cephalo: React.FC<Step1CephaloProps> = ({ P, fileRef, step1Con
   };
 
   const {
-    imageSrc, mode, setMode, imgFilters, setImgFilters, isCalibrated, mmPerPixel, setShowCalibration,
+    imageSrc, imgFilters, setImgFilters, isCalibrated, mmPerPixel, setShowCalibration,
     setCalibrationClickPoints, setCalibrationDistance, setCalibrationStep, magnifierEnabled, setMagnifierEnabled,
     vtoSettings, setVtoSettings, setImageSrc, setLocal, setAnglesData, isStep1Fullscreen, setIsStep1Fullscreen,
-    visionMetadata, autoCalibMessage, showCalibration, calibrationClickPoints,
+    showCalibration, calibrationClickPoints,
     calibrationStep, calibrationDistance, applyCalibration, local, imgDim,
     updateLandmarksOptimistic, activePointId, setActivePointId, anglesData,
     performanceMode, isUploading, uploadError,
@@ -281,7 +281,6 @@ export const Step1Cephalo: React.FC<Step1CephaloProps> = ({ P, fileRef, step1Con
     );
   }
 
-  const isCinematic = true;
   const cbg = P.bgCard;
   const themeVars = {
     '--ceph-ui-panel': P.bgPanel,

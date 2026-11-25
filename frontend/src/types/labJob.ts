@@ -1,11 +1,12 @@
-export enum LabJobStatus {
-  PRESCRIPTION = "PRESCRIPTION",
-  SENT = "SENT",
-  IN_PROGRESS = "IN_PROGRESS",
-  TRY_IN = "TRY_IN",
-  READY = "READY",
-  DELIVERED = "DELIVERED"
-}
+export const LabJobStatus = {
+  PRESCRIPTION: "PRESCRIPTION",
+  SENT: "SENT",
+  IN_PROGRESS: "IN_PROGRESS",
+  TRY_IN: "TRY_IN",
+  READY: "READY",
+  DELIVERED: "DELIVERED",
+} as const;
+export type LabJobStatus = typeof LabJobStatus[keyof typeof LabJobStatus];
 
 export interface LabJob {
   id: number;

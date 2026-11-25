@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { ShieldCheck, AlertCircle, Sparkles, Clock, CheckCircle2, Check } from 'lucide-react';
 import { cn } from '../../../utils/cn';
 import { useEliteStore } from '../../../stores/useEliteStore';

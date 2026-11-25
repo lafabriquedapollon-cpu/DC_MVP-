@@ -1,26 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import {
-  Activity,
-  AlertTriangle,
-  Baby,
-  CheckCircle2,
-  ChevronRight,
-  Clock,
-  Diamond,
-  HeartPulse,
-  History,
-  Microscope,
-  RefreshCcw,
-  Save,
-  Scissors,
-  ShieldCheck,
-  Smile,
-  Sparkles,
-  Stethoscope,
-  Trash2,
-  Zap,
-} from 'lucide-react';
+import { Activity, Baby, ChevronRight, Clock, Diamond, HeartPulse, History, Microscope, RefreshCcw, Save, Scissors, ShieldCheck, Smile, Sparkles, Stethoscope, Trash2, Zap } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { api } from '../../../services/api';
 import {

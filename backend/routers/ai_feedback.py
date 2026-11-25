@@ -232,6 +232,27 @@ def _ghost_snapshot_if_changed(logs, unread_count: int, previous_signature):
     }, signature
 
 
+async def _ghost_wait_for_disconnect(websocket: WebSocket, interval: float = 5.0) -> bool:
+    """Wait for the next authorization tick or an ASGI disconnect, whichever comes first.
+
+    Incoming client messages are ignored: this is a server-push-only channel.
+    A fixed monotonic deadline prevents client traffic from postponing the
+    existing session, permission and workstation revalidation.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + interval
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        try:
+            message = await asyncio.wait_for(websocket.receive(), timeout=remaining)
+        except asyncio.TimeoutError:
+            return False
+        if message["type"] == "websocket.disconnect":
+            return True
+
+
 @router.websocket("/ws/ghost-insights/{employer_id}")
 async def websocket_ghost_insights(websocket: WebSocket, employer_id: int):
     """
@@ -322,6 +343,7 @@ async def websocket_ghost_insights(websocket: WebSocket, employer_id: int):
             if payload is not None:
                 await websocket.send_json(payload)
                 last_signature = next_signature
-            await asyncio.sleep(5)  # Latence max ~5 s pour un insight proactif
-    except (WebSocketDisconnect, asyncio.CancelledError):
+            if await _ghost_wait_for_disconnect(websocket):
+                return
+    except WebSocketDisconnect:
         pass

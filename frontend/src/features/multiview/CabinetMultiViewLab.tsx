@@ -10,7 +10,7 @@ import { OrthoLongitudinalComparePanel } from '../ortho/OrthoLongitudinalCompare
 import { StudioLayoutFrame } from './StudioLayoutFrame';
 import { R3SplitWorkspace } from './R3SplitWorkspace';
 import { HistoricBilanReadonlyPanel } from './HistoricBilanReadonlyPanel';
-import { authorizeLayout, PRESETS, type Geometry, type Layout, type ModuleKey, type WorkspaceContext } from './studioLayouts';
+import { authorizeLayout, PRESETS, type Layout, type ModuleKey, type WorkspaceContext } from './studioLayouts';
 import { geometryGridStyle, geometrySlotStyle } from './studioGeometry';
 import {R5MultiViewPreferencesPanel} from './R5MultiViewPreferencesPanel';
 import './CabinetMultiViewLab.css';

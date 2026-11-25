@@ -197,21 +197,6 @@ async function writeValue(key: string, value: unknown): Promise<void> {
   }
 }
 
-async function deleteValue(key: string): Promise<void> {
-  const db = await openDb();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).delete(key);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error || new Error('Suppression du coffre impossible.'));
-      tx.onabort = () => reject(tx.error || new Error('Suppression du coffre interrompue.'));
-    });
-  } finally {
-    db.close();
-  }
-}
-
 type MediaEnvelope = {
   version: 1;
   iv: Uint8Array<ArrayBuffer>;

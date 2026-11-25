@@ -43,9 +43,6 @@ export const useAccountingController = () => {
 
   // États pour Visual Insights
   const [loadingInsights, setLoadingInsights] = useState(false);
-  const [projections, setProjections] = useState<any>(null);
-  const [conversions, setConversions] = useState<any>(null);
-  const [distributions, setDistributions] = useState<any[]>([]);
 
   const [financialData, setFinancialData] = useState<any>(null);
 

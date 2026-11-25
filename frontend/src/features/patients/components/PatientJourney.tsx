@@ -128,7 +128,7 @@ const MILESTONE_TYPES = ['DIAGNOSTIC', 'DEVIS_VALIDE', 'CONTROLE', 'CLOTURE'] as
 
 export const PatientJourney = ({ patientId }: PatientJourneyProps) => {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const [fullHistory, setFullHistory] = useState(false);
   const [expandedPhases, setExpandedPhases] = useState<Set<string> | null>(null);

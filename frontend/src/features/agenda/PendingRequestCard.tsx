@@ -4,7 +4,7 @@
  */
 import React, { useState } from 'react';
 import { api } from '../../services/api';
-import { AlertCircle, CheckCircle, XCircle, Clock } from 'lucide-react';
+import { AlertCircle, Clock } from 'lucide-react';
 
 export interface PendingRequest {
   id: number;
@@ -43,7 +43,7 @@ export const PendingRequestCard: React.FC<PendingRequestCardProps> = ({ request,
   const handleRequestConfirm = async () => {
     setLoading(true);
     try {
-      const res = await api.post(`/appointments/${request.id}/request-confirmation`);
+      await api.post(`/appointments/${request.id}/request-confirmation`);
       setShowConfirmTemplate(true);
       onAction();
     } catch (err: any) {

@@ -1,7 +1,7 @@
 name: DC MVP - isolated desktop integration
 on:
   push:
-    branches: [ci/dc-mvp-integration-20261124]
+    branches: [ci/dc-mvp-integration-20261124, ci/r02-conservative-cleanup-20261125]
   workflow_dispatch:
 permissions:
   contents: read
@@ -63,7 +63,7 @@ jobs:
           export DC_CHECKOUT="$GITHUB_WORKSPACE"
           export DC_EVIDENCE="$RUNNER_TEMP/dc-integration-evidence"
           mkdir -p "$DC_EVIDENCE"
-          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" bash -s <<'LAB'
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" DC_BUILT_REHEARSAL="$([ "$GITHUB_REF_NAME" = ci/r02-conservative-cleanup-20261125 ] && echo true || echo false)" bash -s <<'LAB'
           set -euo pipefail
           umask 077
           cd "$DC_CHECKOUT"
@@ -88,9 +88,178 @@ jobs:
           echo LAB_LOOPBACK_ONLY
           "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
           "$DC_PYTHON" -m backend.scripts.ci_desktop_integration seed
-          "$DC_PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port 8008 > "$DC_LAB_ROOT/uvicorn.log" 2>&1 &
+          # Deterministic regression of the receive/deadline contract in the LAB.
+          "$DC_PYTHON" - <<'PY'
+          import asyncio
+          from backend.routers.ai_feedback import _ghost_wait_for_disconnect
+
+          class Socket:
+              def __init__(self, messages=(), flood=False):
+                  self.messages = asyncio.Queue()
+                  for message in messages:
+                      self.messages.put_nowait(message)
+                  self.flood = flood
+              async def receive(self):
+                  if self.flood:
+                      await asyncio.sleep(0)
+                      return {"type": "websocket.receive", "text": "synthetic"}
+                  return await self.messages.get()
+
+          async def check():
+              disconnected = Socket([{"type": "websocket.disconnect", "code": 1001}])
+              assert await asyncio.wait_for(_ghost_wait_for_disconnect(disconnected), 1)
+              mixed = Socket([{"type": "websocket.receive", "text": "synthetic"},
+                              {"type": "websocket.disconnect", "code": 1000}])
+              assert await asyncio.wait_for(_ghost_wait_for_disconnect(mixed), 1)
+              assert not await asyncio.wait_for(_ghost_wait_for_disconnect(Socket(), .03), 1)
+              assert not await asyncio.wait_for(_ghost_wait_for_disconnect(Socket(flood=True), .03), 1)
+              pending = asyncio.create_task(_ghost_wait_for_disconnect(Socket()))
+              await asyncio.sleep(0)
+              pending.cancel()
+              try:
+                  await pending
+              except asyncio.CancelledError:
+                  pass
+              else:
+                  raise AssertionError("Cancellation swallowed")
+              print("GHOST_DISCONNECT_DEADLINE_CANCELLATION_PASS")
+          asyncio.run(check())
+          PY
+          # Diagnostic launcher exists only in this isolated LAB.
+          cat > "$DC_LAB_ROOT/uvicorn-diagnostic.py" <<'PY'
+          import asyncio
+          import faulthandler
+          import os
+          import signal
+          import re
+          import uvicorn
+
+          active_requests = {}
+
+          def safe_name(value):
+              return re.sub(r"[^a-zA-Z0-9_.<>-]", "_", str(value))[:120]
+
+          def await_chain(task):
+              coro = task.get_coro()
+              seen = set()
+              frames = []
+              while coro is not None and id(coro) not in seen and len(frames) < 30:
+                  seen.add(id(coro))
+                  code = getattr(coro, "cr_code", None) or getattr(coro, "gi_code", None)
+                  frame = getattr(coro, "cr_frame", None) or getattr(coro, "gi_frame", None)
+                  if code is not None:
+                      frames.append("%s:%s:%s" % (safe_name(os.path.basename(code.co_filename)),
+                                    frame.f_lineno if frame else 0, safe_name(code.co_name)))
+                  coro = getattr(coro, "cr_await", None) or getattr(coro, "gi_yieldfrom", None) or getattr(coro, "ag_await", None)
+              return ">".join(frames) or "unknown"
+
+          def observe_app(app):
+              async def observed(scope, receive, send):
+                  task = asyncio.current_task()
+                  state = {"scope": scope, "disconnect": False, "response_complete": False}
+                  active_requests[task] = state
+                  async def observed_receive():
+                      message = await receive()
+                      if message["type"] in {"http.disconnect", "websocket.disconnect"}:
+                          state["disconnect"] = True
+                      return message
+                  async def observed_send(message):
+                      await send(message)
+                      if message["type"] == "http.response.body" and not message.get("more_body", False):
+                          state["response_complete"] = True
+                  try:
+                      await app(scope, observed_receive, observed_send)
+                  finally:
+                      active_requests.pop(task, None)
+                      if getattr(scope.get("endpoint"), "__name__", "") == "websocket_ghost_insights":
+                          print("R02_GHOST_HANDLER_EXIT disconnect=%d" % int(state["disconnect"]), flush=True)
+              return observed
+
+          class DiagnosticServer(uvicorn.Server):
+              async def shutdown(self, sockets=None):
+                  print("R02_UVICORN_SHUTDOWN_ENTER", flush=True)
+                  async def monitor():
+                      while True:
+                          print("R02_UVICORN_STATE connections=%d tasks=%d" %
+                                (len(self.server_state.connections), len(self.server_state.tasks)), flush=True)
+                          for pending in list(self.server_state.tasks):
+                              state = active_requests.get(pending, {})
+                              scope = state.get("scope", {})
+                              endpoint = scope.get("endpoint")
+                              print("R02_PENDING endpoint=%s method=%s disconnect=%s response_complete=%s chain=%s" %
+                                    (safe_name(getattr(endpoint, "__name__", "unresolved")),
+                                     scope.get("method") if scope.get("method") in {"GET","POST","PUT","PATCH","DELETE","OPTIONS","HEAD"} else "other",
+                                     int(state.get("disconnect", False)), int(state.get("response_complete", False)),
+                                     await_chain(pending)), flush=True)
+                          # Include child coroutines: Starlette task groups can hide the actual handler.
+                          if self.server_state.tasks:
+                              for child in sorted(asyncio.all_tasks(), key=lambda t: t.get_name()):
+                                  if child is not asyncio.current_task() and not child.done():
+                                      print("R02_ASYNC_CHAIN " + await_chain(child), flush=True)
+                          await asyncio.sleep(2)
+                  task = asyncio.create_task(monitor())
+                  try:
+                      await super().shutdown(sockets=sockets)
+                      print("R02_UVICORN_SHUTDOWN_RETURN", flush=True)
+                  finally:
+                      task.cancel()
+                      await asyncio.gather(task, return_exceptions=True)
+
+          if __name__ == "__main__":
+              with open(os.path.join(os.environ["DC_LAB_ROOT"], "shutdown-stacks.log"), "a") as stacks:
+                  faulthandler.register(signal.SIGUSR1, file=stacks, all_threads=True)
+                  config = uvicorn.Config("backend.main:app", host="127.0.0.1", port=8008)
+                  config.load()
+                  config.loaded_app = observe_app(config.loaded_app)
+                  DiagnosticServer(config).run()
+          PY
+          export PYTHONPATH="$DC_CHECKOUT"
+          backend_log="$DC_LAB_ROOT/uvicorn.log"
+          "$DC_PYTHON" "$DC_LAB_ROOT/uvicorn-diagnostic.py" > "$backend_log" 2>&1 &
           pid=$!
-          trap 'rc=$?; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; if [ "$rc" -ne 0 ]; then tail -n 60 "$DC_LAB_ROOT/uvicorn.log" | sed -E "s/([[:xdigit:]]{64})/[MASKED]/g"; fi' EXIT
+          stop_lab_process() {
+            local label="$1" child="$2" attempt
+            echo "R02_STOP_BEGIN_$label"
+            kill -TERM "$child" 2>/dev/null || true
+            for attempt in $(seq 1 20); do
+              if ! kill -0 "$child" 2>/dev/null; then
+                local child_rc=0
+                wait "$child" 2>/dev/null || child_rc=$?
+                echo "R02_STOP_DONE_$label rc=$child_rc"
+                if [ "$label" = BACKEND ]; then
+                  [ "$child_rc" -eq 0 ] || return 1
+                  grep -Fx 'R02_UVICORN_SHUTDOWN_RETURN' "$backend_log" || return 1
+                fi
+                return 0
+              fi
+              sleep 1
+            done
+            echo "R02_STOP_TIMEOUT_$label"
+            if [ "$label" = BACKEND ]; then
+              grep -E '^(R02_UVICORN_(SHUTDOWN_(ENTER|RETURN)|STATE connections=[0-9]+ tasks=[0-9]+)|INFO: +(Shutting down|Waiting for application shutdown[.]|Application shutdown complete[.]|Waiting for connections to close[.] \(CTRL\+C to force quit\)|Waiting for background tasks to complete[.] \(CTRL\+C to force quit\)))$' "$backend_log" | tail -n 25 || true
+              grep -E '^R02_(PENDING endpoint=[a-zA-Z0-9_.<>-]+ method=(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|other) disconnect=[01] response_complete=[01] chain=[a-zA-Z0-9_.:<>-]+|ASYNC_CHAIN [a-zA-Z0-9_.:<>-]+)$' "$backend_log" | sort -u | head -n 60 || true
+              kill -USR1 "$child" 2>/dev/null || true
+              sleep 1
+              if [ -f "$DC_LAB_ROOT/shutdown-stacks.log" ]; then
+                sed -nE 's@^  File "([^"]*/)?([^/" ]+)", line ([0-9]+) in ([[:alnum:]_<>.-]+)$@R02_STACK \2:\3 \4@p' "$DC_LAB_ROOT/shutdown-stacks.log" | head -n 60 || true
+              fi
+            fi
+            kill -KILL "$child" 2>/dev/null || true
+            return 1
+          }
+          vite_pid=
+          chrome_pid=
+          cleanup_lab() {
+            local rc=$?
+            trap - EXIT
+            set +e
+            if [ -n "$pid" ]; then stop_lab_process BACKEND "$pid" || rc=1; fi
+            if [ -n "$vite_pid" ]; then stop_lab_process VITE "$vite_pid" || rc=1; fi
+            if [ -n "$chrome_pid" ]; then stop_lab_process CHROME "$chrome_pid" || rc=1; fi
+            echo "R02_CLEANUP_EXIT=$rc"
+            exit "$rc"
+          }
+          trap cleanup_lab EXIT
           "$DC_PYTHON" - <<'PY'
           import json, time, urllib.request
           opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -116,13 +285,15 @@ jobs:
           PY
           (
             cd frontend
+            if [ "$DC_BUILT_REHEARSAL" = true ]; then
+              npm run build:rehearsal
+              exec ./node_modules/.bin/vite preview --outDir dist-rehearsal --host 127.0.0.1 --port 5173 --strictPort
+            fi
             exec ./node_modules/.bin/vite --host 127.0.0.1 --port 5173 --strictPort
           ) > "$DC_LAB_ROOT/vite.log" 2>&1 &
           vite_pid=$!
-          chrome_pid=
-          trap 'rc=$?; kill "$pid" "$vite_pid" ${chrome_pid:+"$chrome_pid"} 2>/dev/null || true; wait "$pid" "$vite_pid" ${chrome_pid:+"$chrome_pid"} 2>/dev/null || true; exit "$rc"' EXIT
           ready=false
-          for attempt in $(seq 1 40); do
+          for attempt in $(seq 1 100); do
             if curl --noproxy '*' --fail --silent http://127.0.0.1:5173/login >/dev/null; then ready=true; break; fi
             sleep 1
           done
@@ -130,11 +301,20 @@ jobs:
           chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser)
           "$chrome" --headless --no-sandbox --disable-dev-shm-usage --disable-background-networking --disable-sync --disable-extensions --no-first-run --no-default-browser-check --window-size=1440,900 --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="$DC_LAB_ROOT/chrome" http://127.0.0.1:5173/login > "$DC_LAB_ROOT/chrome.log" 2>&1 &
           chrome_pid=$!
-          timeout 300s node frontend/scripts/ci-desktop-integration.mjs
-          kill "$pid"
-          wait "$pid" || true
-          "$DC_PYTHON" -m backend.scripts.ci_desktop_integration verify
-          "$DC_PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port 8008 > "$DC_LAB_ROOT/uvicorn-restart.log" 2>&1 &
+          echo R02_DRIVER_INITIAL_BEGIN
+          timeout --kill-after=10s 300s node frontend/scripts/ci-desktop-integration.mjs
+          echo R02_DRIVER_INITIAL_EXIT_PASS
+          stop_lab_process BACKEND "$pid"
+          pid=
+          grep -Fx 'R02_GHOST_HANDLER_EXIT disconnect=1' "$backend_log"
+          echo R02_REAL_GHOST_DISCONNECT_PASS
+          echo R02_PERSISTENCE_VERIFY_BEGIN
+          timeout --kill-after=10s 90s "$DC_PYTHON" -m backend.scripts.ci_desktop_integration verify
+          echo R02_PERSISTENCE_VERIFY_EXIT_PASS
+          echo R02_BACKEND_RESTART_BEGIN
+          : > "$DC_LAB_ROOT/shutdown-stacks.log"
+          backend_log="$DC_LAB_ROOT/uvicorn-restart.log"
+          "$DC_PYTHON" "$DC_LAB_ROOT/uvicorn-diagnostic.py" > "$backend_log" 2>&1 &
           pid=$!
           "$DC_PYTHON" - <<'PY'
           import json, time, urllib.request
@@ -149,7 +329,9 @@ jobs:
           else:
               raise RuntimeError("Restart health failed")
           PY
-          timeout 150s node frontend/scripts/ci-desktop-integration.mjs --verify-restart
+          echo R02_DRIVER_RESTART_BEGIN
+          timeout --kill-after=10s 150s node frontend/scripts/ci-desktop-integration.mjs --verify-restart
+          echo R02_DRIVER_RESTART_EXIT_PASS
           LAB
       - name: Upload synthetic browser evidence
         if: always()
