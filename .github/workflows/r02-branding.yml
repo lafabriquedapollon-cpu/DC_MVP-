@@ -31,6 +31,7 @@ jobs:
           if [ "$VARIANT" = before ]; then
             git show cb7895543a9f2b76e763813fa6470b025304d3b3:frontend/src/assets/logo.png > frontend/src/assets/logo.png
             git show cb7895543a9f2b76e763813fa6470b025304d3b3:frontend/src/assets/logo-compact.png > frontend/src/assets/logo-compact.png
+            git show cb7895543a9f2b76e763813fa6470b025304d3b3:frontend/src/pages/LoginPage.tsx > frontend/src/pages/LoginPage.tsx
             test "$(git hash-object frontend/src/assets/logo.png)" = c527c443a6a80338c2acea27188cd961232457dd
             test "$(git hash-object frontend/src/assets/logo-compact.png)" = 1247c7548a242cf75c97abf3345f2e38b5f6d226
           fi

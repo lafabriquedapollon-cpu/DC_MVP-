@@ -118,8 +118,8 @@ export const LoginPage: React.FC = () => {
       >
         <div className={`bg-card/80 backdrop-blur-xl border border-white p-8 rounded-3xl shadow-2xl ${isLocked ? 'shadow-red-500/10' : 'shadow-primary/10'}`}>
           <div className="flex flex-col items-center mb-8">
-            <div className="mb-4">
-              <img src={Logo} alt="Digital Crown" className="h-16 w-auto" />
+            <div className="mb-4 relative h-20 w-36 overflow-hidden">
+              <img src={Logo} alt="Digital Crown" className="absolute left-1/2 top-[-28px] w-[260px] max-w-none -translate-x-1/2" />
             </div>
             {isLocked ? (
               <>
