@@ -13,7 +13,7 @@ assert(!config.error);
 const parsed=ts.parseJsonConfigFileContent(config.config,ts.sys,root);
 assert.equal(parsed.errors.length,0);
 const versions=new Map();
-const host={...ts.sys,getScriptFileNames:()=>parsed.fileNames,getScriptVersion:f=>String(versions.get(f)||0),getScriptSnapshot:f=>{const s=ts.sys.readFile(f);return s===undefined?undefined:ts.ScriptSnapshot.fromString(s)},getCurrentDirectory:()=>root,getCompilationSettings:()=>parsed.options,getDefaultLibFileName:o=>ts.getDefaultLibFilePath(o)};
+const host={...ts.sys,useCaseSensitiveFileNames:()=>ts.sys.useCaseSensitiveFileNames,getNewLine:()=>ts.sys.newLine,getScriptFileNames:()=>parsed.fileNames,getScriptVersion:f=>String(versions.get(f)||0),getScriptSnapshot:f=>{const s=ts.sys.readFile(f);return s===undefined?undefined:ts.ScriptSnapshot.fromString(s)},getCurrentDirectory:()=>root,getCompilationSettings:()=>parsed.options,getDefaultLibFileName:o=>ts.getDefaultLibFilePath(o)};
 const service=ts.createLanguageService(host);
 const isUnused=d=>[6133,6196,6192].includes(d.code);
 for(let pass=1;pass<=5;pass++){
@@ -22,10 +22,8 @@ for(let pass=1;pass<=5;pass++){
     if(!file.startsWith(path.join(root,'src')+path.sep))continue;
     const diag=service.getSemanticDiagnostics(file).filter(isUnused);
     if(!diag.length)continue;
-    const fixes=diag.flatMap(d=>service.getCodeFixesAtPosition(file,d.start,d.start+d.length,[d.code],{},{ }));
-    const fix=fixes.find(f=>f.fixId==='unusedIdentifier_delete');
-    if(!fix)continue;
-    const result=service.getCombinedCodeFix({type:'file',fileName:file},fix.fixId,{},{});
+    // A single diagnostic may not advertise a fixId; the combined deletion fix still applies.
+    const result=service.getCombinedCodeFix({type:'file',fileName:file},'unusedIdentifier_delete',{},{});
     for(const change of result.changes){
       assert.equal(path.resolve(change.fileName),path.resolve(file),'cross-file fix refused');
       let body=fs.readFileSync(file,'utf8');
