@@ -145,27 +145,34 @@ try {
   await wait('team settings tab',()=>evalPage('Array.from(document.querySelectorAll("nav button")).some(b=>b.innerText.includes("Mon Équipe"))'));
   assert(await evalPage('(()=>{const b=Array.from(document.querySelectorAll("nav button")).find(b=>b.innerText.includes("Mon Équipe"));if(!b)return false;b.click();return true})()'));
   const readCard=()=>evalPage('('+(() => {
-    const c=Array.from(document.querySelectorAll(".settings-team-surface .group")).find(x=>x.innerText.includes("ci-fue-team-ui@example.com")&&x.querySelector('button[title="Archiver le compte"]'));
+    const c=Array.from(document.querySelectorAll(".settings-team-surface .group")).find(x=>x.textContent.includes("ci-fue-team-ui@example.com")&&x.querySelector('button[title="Archiver le compte"]'));
     if(!c)return null;
     const archive=c.querySelector('button[title="Archiver le compte"]');
     const perms=c.querySelector('button[title="Gérer les permissions"]');
-    return {text:c.innerText,archiveDisabled:archive.disabled,permsDisabled:perms?.disabled,activationButton:Array.from(c.querySelectorAll("button")).some(b=>/^(Réactiver|Suspendre)/.test(b.title))};
+    return {text:c.textContent,archiveDisabled:archive.disabled,permsDisabled:perms?.disabled,activationButton:Array.from(c.querySelectorAll("button")).some(b=>/^(Réactiver|Suspendre)/.test(b.title))};
   }).toString()+')()');
-  await wait('active member UI',async()=>{const c=await readCard();return c&&!c.archiveDisabled&&c.text.includes('Actif')});
+  await wait('active member UI',async()=>{const c=await readCard();return c&&!c.archiveDisabled&&/\bactif\b/iu.test(c.text)});
+  console.log('FUE_TEAM_UI_ACTIVE_RENDER_PASS');
+  const scrollCard=()=>evalPage('('+(() => {
+    const c=Array.from(document.querySelectorAll(".settings-team-surface .group")).find(x=>x.textContent.includes("ci-fue-team-ui@example.com")&&x.querySelector('button[title="Archiver le compte"]'));
+    if(!c)return false;
+    c.scrollIntoView({block:"center",inline:"nearest"});
+    return true;
+  }).toString()+')()');
   const widths=[390,430,768,1280];
-  const viewport=async width=>{await call('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});await sleep(350);};
+  const viewport=async width=>{await call('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});await sleep(350);assert(await scrollCard());await sleep(350);};
   for(const width of widths){await viewport(width);await capture('team-before-'+width);}
   let dialog=false;
   ws.addEventListener('message',e=>{const msg=JSON.parse(e.data);if(msg.method==='Page.javascriptDialogOpening'){dialog=msg.params.type==='confirm'&&msg.params.message.includes('Archiver le compte');void call('Page.handleJavaScriptDialog',{accept:dialog});}});
   assert(await evalPage('('+(() => {
-    const c=Array.from(document.querySelectorAll(".settings-team-surface .group")).find(x=>x.innerText.includes("ci-fue-team-ui@example.com")&&x.querySelector('button[title="Archiver le compte"]'));
+    const c=Array.from(document.querySelectorAll(".settings-team-surface .group")).find(x=>x.textContent.includes("ci-fue-team-ui@example.com")&&x.querySelector('button[title="Archiver le compte"]'));
     if(!c)return false;
     c.querySelector('button[title="Archiver le compte"]').click();
     return true;
   }).toString()+')()'));
   await wait('archive API DELETE',()=>responses.some(r=>r.path==='/api/team/'+memberId&&r.method==='DELETE'&&r.status===204));
   assert(dialog,'Expected archive confirmation');
-  await wait('archived member UI',async()=>{const c=await readCard();return c&&c.archiveDisabled&&c.permsDisabled&&c.text.includes('Archivé')&&!c.activationButton;});
+  await wait('archived member UI',async()=>{const c=await readCard();return c&&c.archiveDisabled&&c.permsDisabled&&/\barchivé/iu.test(c.text)&&!c.activationButton;});
   for(const width of widths){await viewport(width);await capture('team-after-'+width);}
   const teamRows=await api('/api/team/',{headers:teamHeaders});
   assert.equal(teamRows.status,200);
@@ -177,7 +184,8 @@ try {
   await call('Page.reload');
   await wait('team settings tab after reload',()=>evalPage('Array.from(document.querySelectorAll("nav button")).some(b=>b.innerText.includes("Mon Équipe"))'));
   await evalPage('(()=>{const b=Array.from(document.querySelectorAll("nav button")).find(b=>b.innerText.includes("Mon Équipe"));if(!b)return false;b.click();return true})()');
-  await wait('archived member persisted',async()=>{const c=await readCard();return c&&c.archiveDisabled&&c.permsDisabled&&c.text.includes('Archivé')&&!c.activationButton;});
+  await wait('archived member persisted',async()=>{const c=await readCard();return c&&c.archiveDisabled&&c.permsDisabled&&/\barchivé/iu.test(c.text)&&!c.activationButton;});
+  await viewport(1280);
   await capture('team-reloaded-1280');
   console.log('FUE_TEAM_UI_ARCHIVE_BEFORE_AFTER_PASS widths=390,430,768,1280');
   await call('Emulation.clearDeviceMetricsOverride');
