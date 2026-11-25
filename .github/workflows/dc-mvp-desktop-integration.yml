@@ -94,7 +94,47 @@ jobs:
           import faulthandler
           import os
           import signal
+          import re
           import uvicorn
+
+          active_requests = {}
+
+          def safe_name(value):
+              return re.sub(r"[^a-zA-Z0-9_.<>-]", "_", str(value))[:120]
+
+          def await_chain(task):
+              coro = task.get_coro()
+              seen = set()
+              frames = []
+              while coro is not None and id(coro) not in seen and len(frames) < 30:
+                  seen.add(id(coro))
+                  code = getattr(coro, "cr_code", None) or getattr(coro, "gi_code", None)
+                  frame = getattr(coro, "cr_frame", None) or getattr(coro, "gi_frame", None)
+                  if code is not None:
+                      frames.append("%s:%s:%s" % (safe_name(os.path.basename(code.co_filename)),
+                                    frame.f_lineno if frame else 0, safe_name(code.co_name)))
+                  coro = getattr(coro, "cr_await", None) or getattr(coro, "gi_yieldfrom", None) or getattr(coro, "ag_await", None)
+              return ">".join(frames) or "unknown"
+
+          def observe_app(app):
+              async def observed(scope, receive, send):
+                  task = asyncio.current_task()
+                  state = {"scope": scope, "disconnect": False, "response_complete": False}
+                  active_requests[task] = state
+                  async def observed_receive():
+                      message = await receive()
+                      if message["type"] in {"http.disconnect", "websocket.disconnect"}:
+                          state["disconnect"] = True
+                      return message
+                  async def observed_send(message):
+                      await send(message)
+                      if message["type"] == "http.response.body" and not message.get("more_body", False):
+                          state["response_complete"] = True
+                  try:
+                      await app(scope, observed_receive, observed_send)
+                  finally:
+                      active_requests.pop(task, None)
+              return observed
 
           class DiagnosticServer(uvicorn.Server):
               async def shutdown(self, sockets=None):
@@ -103,6 +143,20 @@ jobs:
                       while True:
                           print("R02_UVICORN_STATE connections=%d tasks=%d" %
                                 (len(self.server_state.connections), len(self.server_state.tasks)), flush=True)
+                          for pending in list(self.server_state.tasks):
+                              state = active_requests.get(pending, {})
+                              scope = state.get("scope", {})
+                              endpoint = scope.get("endpoint")
+                              print("R02_PENDING endpoint=%s method=%s disconnect=%s response_complete=%s chain=%s" %
+                                    (safe_name(getattr(endpoint, "__name__", "unresolved")),
+                                     scope.get("method") if scope.get("method") in {"GET","POST","PUT","PATCH","DELETE","OPTIONS","HEAD"} else "other",
+                                     int(state.get("disconnect", False)), int(state.get("response_complete", False)),
+                                     await_chain(pending)), flush=True)
+                          # Include child coroutines: Starlette task groups can hide the actual handler.
+                          if self.server_state.tasks:
+                              for child in sorted(asyncio.all_tasks(), key=lambda t: t.get_name()):
+                                  if child is not asyncio.current_task() and not child.done():
+                                      print("R02_ASYNC_CHAIN " + await_chain(child), flush=True)
                           await asyncio.sleep(2)
                   task = asyncio.create_task(monitor())
                   try:
@@ -115,7 +169,10 @@ jobs:
           if __name__ == "__main__":
               with open(os.path.join(os.environ["DC_LAB_ROOT"], "shutdown-stacks.log"), "a") as stacks:
                   faulthandler.register(signal.SIGUSR1, file=stacks, all_threads=True)
-                  DiagnosticServer(uvicorn.Config("backend.main:app", host="127.0.0.1", port=8008)).run()
+                  config = uvicorn.Config("backend.main:app", host="127.0.0.1", port=8008)
+                  config.load()
+                  config.loaded_app = observe_app(config.loaded_app)
+                  DiagnosticServer(config).run()
           PY
           export PYTHONPATH="$DC_CHECKOUT"
           backend_log="$DC_LAB_ROOT/uvicorn.log"
@@ -136,6 +193,7 @@ jobs:
             echo "R02_STOP_TIMEOUT_$label"
             if [ "$label" = BACKEND ]; then
               grep -E '^(R02_UVICORN_(SHUTDOWN_(ENTER|RETURN)|STATE connections=[0-9]+ tasks=[0-9]+)|INFO: +(Shutting down|Waiting for application shutdown[.]|Application shutdown complete[.]|Waiting for connections to close[.] \(CTRL\+C to force quit\)|Waiting for background tasks to complete[.] \(CTRL\+C to force quit\)))$' "$backend_log" | tail -n 25 || true
+              grep -E '^R02_(PENDING endpoint=[a-zA-Z0-9_.<>-]+ method=(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|other) disconnect=[01] response_complete=[01] chain=[a-zA-Z0-9_.:<>-]+|ASYNC_CHAIN [a-zA-Z0-9_.:<>-]+)$' "$backend_log" | sort -u | head -n 60 || true
               kill -USR1 "$child" 2>/dev/null || true
               sleep 1
               if [ -f "$DC_LAB_ROOT/shutdown-stacks.log" ]; then
