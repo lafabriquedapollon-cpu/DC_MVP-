@@ -144,14 +144,25 @@ try {
   await call('Page.navigate',{url:web+'/settings'});
   await wait('team settings tab',()=>evalPage('Array.from(document.querySelectorAll("nav button")).some(b=>b.innerText.includes("Mon Équipe"))'));
   assert(await evalPage('(()=>{const b=Array.from(document.querySelectorAll("nav button")).find(b=>b.innerText.includes("Mon Équipe"));if(!b)return false;b.click();return true})()'));
-  const readCard=()=>evalPage('(()=>{const c=Array.from(document.querySelectorAll(".settings-team-surface .group")).find(x=>x.innerText.includes("ci-fue-team-ui@example.com")&&x.querySelector("button[title=\\\"Archiver le compte\\\"]"));if(!c)return null;const archive=c.querySelector("button[title=\\\"Archiver le compte\\\"]");const perms=c.querySelector("button[title=\\\"Gérer les permissions\\\"]");return {text:c.innerText,archiveDisabled:archive.disabled,permsDisabled:perms?.disabled,activationButton:!!Array.from(c.querySelectorAll("button")).find(b=>b.title.includes("activer l’accès")||b.title.includes("activer l'accès")||b.title.includes("Suspendre"))}})()');
+  const readCard=()=>evalPage('('+(() => {
+    const c=Array.from(document.querySelectorAll(".settings-team-surface .group")).find(x=>x.innerText.includes("ci-fue-team-ui@example.com")&&x.querySelector('button[title="Archiver le compte"]'));
+    if(!c)return null;
+    const archive=c.querySelector('button[title="Archiver le compte"]');
+    const perms=c.querySelector('button[title="Gérer les permissions"]');
+    return {text:c.innerText,archiveDisabled:archive.disabled,permsDisabled:perms?.disabled,activationButton:Array.from(c.querySelectorAll("button")).some(b=>/^(Réactiver|Suspendre)/.test(b.title))};
+  }).toString()+')()');
   await wait('active member UI',async()=>{const c=await readCard();return c&&!c.archiveDisabled&&c.text.includes('Actif')});
   const widths=[390,430,768,1280];
   const viewport=async width=>{await call('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});await sleep(350);};
   for(const width of widths){await viewport(width);await capture('team-before-'+width);}
   let dialog=false;
   ws.addEventListener('message',e=>{const msg=JSON.parse(e.data);if(msg.method==='Page.javascriptDialogOpening'){dialog=msg.params.type==='confirm'&&msg.params.message.includes('Archiver le compte');void call('Page.handleJavaScriptDialog',{accept:dialog});}});
-  await evalPage('(()=>{const c=Array.from(document.querySelectorAll(".settings-team-surface .group")).find(x=>x.innerText.includes("ci-fue-team-ui@example.com")&&x.querySelector("button[title=\\\"Archiver le compte\\\"]"));if(!c)return false;c.querySelector("button[title=\\\"Archiver le compte\\\"]").click();return true})()');
+  assert(await evalPage('('+(() => {
+    const c=Array.from(document.querySelectorAll(".settings-team-surface .group")).find(x=>x.innerText.includes("ci-fue-team-ui@example.com")&&x.querySelector('button[title="Archiver le compte"]'));
+    if(!c)return false;
+    c.querySelector('button[title="Archiver le compte"]').click();
+    return true;
+  }).toString()+')()'));
   await wait('archive API DELETE',()=>responses.some(r=>r.path==='/api/team/'+memberId&&r.method==='DELETE'&&r.status===204));
   assert(dialog,'Expected archive confirmation');
   await wait('archived member UI',async()=>{const c=await readCard();return c&&c.archiveDisabled&&c.permsDisabled&&c.text.includes('Archivé')&&!c.activationButton;});
