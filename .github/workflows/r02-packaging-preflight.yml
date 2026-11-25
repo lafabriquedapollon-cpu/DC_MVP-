@@ -23,6 +23,9 @@ jobs:
           # The lock checker is a standalone stdlib script; avoid backend package initialization.
           python backend/scripts/windows_build_dependency_contract.py
           if ($LASTEXITCODE -ne 0) { throw 'LOCK_CONTRACT_FAILED' }
+          python -m scripts.ci_r02_early_release_gate
+          if ($LASTEXITCODE -ne 0) { throw 'EARLY_RELEASE_GATE_FAILED' }
+          Write-Host 'R02_EARLY_GATE_NO_BACKEND_IMPORT_OR_WRITE_PASS'
           # Real backend imports need the locked model/schema dependencies. Rehearsal
           # explicitly suppresses runtime/media initialization in backend/__init__.py.
           $guardLab = Join-Path $env:RUNNER_TEMP ('dc-guard-' + [guid]::NewGuid().ToString('N'))

@@ -27,6 +27,13 @@ class PackagingGuards(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
+    def test_legacy_imports_same_implementation(self):
+        import backend.release_certification as legacy_code
+        import backend.runtime_asset_certification as legacy_assets
+        from dc_release_gate import release_certification, runtime_asset_certification
+        self.assertIs(legacy_code, release_certification)
+        self.assertIs(legacy_assets, runtime_asset_certification)
+
     def test_missing_code_certificate(self):
         with self.assertRaisesRegex(ReleaseCertificationError, "Missing release-certification.json"):
             verify_release_directory(self.root)
