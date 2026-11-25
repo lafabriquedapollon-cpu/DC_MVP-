@@ -51,4 +51,5 @@ jobs:
           sha256sum -c "$HOME/dist.sha256"
           test "$(find dist -type f | wc -l)" -eq 1
           node --input-type=module -e 'import fs from "node:fs"; import assert from "node:assert/strict"; const m=JSON.parse(fs.readFileSync("dist-rehearsal/build-manifest.json")); assert.equal(m.commit,process.env.GITHUB_SHA);assert.equal(m.mode,"rehearsal");assert.equal(m.outputDir,"dist-rehearsal");assert(fs.existsSync("dist-rehearsal/index.html"));console.log("REHEARSAL_BUILD_EXACT_HEAD_PASS")'
+          node scripts/ci-pwa-assets.mjs
           LAB
