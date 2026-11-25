@@ -115,14 +115,14 @@ jobs:
               $env:DIGITALCROWN_LOG_DIR = $sandbox
               $env:DIGITALCROWN_RUNTIME_DIR = $sandbox
               $env:MEDIA_ROOT = $sandbox
-              $ErrorActionPreference = 'Continue'
-              $out = & $exe --initialize-new-cabinet 2>&1
-              $rc = $LASTEXITCODE
-              $ErrorActionPreference = 'Stop'
-              if ($rc -ne 2 -or (($out | Out-String) -notmatch 'R02_LAUNCH_REFUSED_UNVERIFIED_RELEASE') -or (Test-Path -LiteralPath $sandbox)) { throw 'RECOVERY_PE_GATE_FAILED' }
+              # Convert only the explicitly verified child refusal into test success.
+              & $py -c "import subprocess,sys,pathlib; r=subprocess.run([sys.argv[1],'--initialize-new-cabinet'],capture_output=True,text=True,timeout=30); print('R02_FROZEN_CHILD_EXIT='+str(r.returncode)); sys.exit(0 if r.returncode==2 and 'R02_LAUNCH_REFUSED_UNVERIFIED_RELEASE' in r.stderr and not pathlib.Path(sys.argv[2]).exists() else 1)" $exe $sandbox
+              if ($LASTEXITCODE -ne 0) { throw 'RECOVERY_PE_GATE_FAILED' }
               Write-Host 'R02_REAL_FROZEN_ENTRYPOINT_REFUSED_NO_DATA_WRITE_PASS'
             } finally { Pop-Location }
           } finally {
             foreach ($name in @('DIGITALCROWN_USER_DATA_DIR','DIGITALCROWN_CONFIG_DIR','DIGITALCROWN_LOG_DIR','DIGITALCROWN_RUNTIME_DIR','MEDIA_ROOT')) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
             Remove-Item -LiteralPath $lab -Recurse -Force
           }
+          if (Test-Path -LiteralPath $lab) { throw 'RECOVERY_LAB_CLEANUP_FAILED' }
+          Write-Host 'R02_RECOVERY_LAB_CLEANUP_PASS'
