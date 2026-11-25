@@ -1,7 +1,7 @@
 name: R0.2 - strict type recovery diagnostics
 on:
   push:
-    branches: [ci/r02-build-type-recovery-20261125]
+    branches: [ci/r02-conservative-cleanup-20261125]
   workflow_dispatch:
 permissions:
   contents: read
@@ -19,7 +19,7 @@ jobs:
       - name: Prepare pinned compiler
         working-directory: frontend
         run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Record strict diagnostics and propose cleanup in disposable tree
+      - name: Record strict diagnostics without modifying source
         shell: bash
         run: |
           set -euo pipefail
@@ -40,22 +40,14 @@ jobs:
           set -e
           echo "STRICT_COMMITTED_SOURCE_EXIT=$before"
           cat "$DC_EVIDENCE/strict-before.txt"
-          node scripts/ci-propose-unused-cleanup.mjs
-          git diff -- src > "$DC_EVIDENCE/unused-review-only.patch"
-          git diff --stat -- src
-          set +e
-          ./node_modules/.bin/tsc -b --force --pretty false > "$DC_EVIDENCE/strict-proposal.txt" 2>&1
-          after=$?
-          set -e
-          echo "STRICT_UNCOMMITTED_PROPOSAL_EXIT=$after"
-          cat "$DC_EVIDENCE/strict-proposal.txt"
-          echo 'REVIEW_ONLY: no build certification or merge'
+          git diff --exit-code -- src
+          exit "$before"
           LAB
-      - name: Upload review-only proposal
+      - name: Upload strict diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dc-type-recovery-review-only
+          name: dc-type-recovery-strict
           path: ${{ runner.temp }}/type-evidence/
           if-no-files-found: error
           retention-days: 3
