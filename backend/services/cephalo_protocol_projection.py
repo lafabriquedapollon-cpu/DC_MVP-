@@ -5,6 +5,7 @@ The frozen protocol profile JSON is the source of composition/reference metadata
 """
 from __future__ import annotations
 import json
+import hashlib
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -27,18 +28,52 @@ _LABELS = {
 }
 
 
-def _load_profile() -> dict[str, Any]:
-    data=json.loads(_PROFILE_PATH.read_text(encoding="utf-8"))
-    if data.get("status")!="SOURCE_LOCKED" or data.get("pre_code_gate",{}).get("status")!="SATISFIED":
-        raise ValueError("Steiner protocol profile is not source-locked")
+# Historical byte pins identify recovered references, not a clinical approval.
+_STEINER_PIN = "e79fd5a9e27c3f4e0dbbeae2e8f0b8ba1e45b2c5fe90dda483d832a2dce217ad"
+_TWEED_PIN = "07b4dd3a8d1af6ea0c2fe371e014d94478402b1d40271571e9759459b0b50d4c"
+
+
+def _admit_profile(path: Path, digest: str, identity: str, context_key: str) -> dict[str, Any]:
+    with path.open("rb") as stream:
+        raw = stream.read(65537)
+    if len(raw) > 65536 or hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("Protocol profile integrity mismatch")
+    data = json.loads(raw)
+    if (not isinstance(data, dict)
+            or data.get("schema_version") != "ORTHO_ANALYSIS_PROTOCOL_PROFILE_V1"
+            or data.get("protocol_profile_id") != identity
+            or data.get("scientific_authority") != "LOT06_CANONICAL_MEASUREMENT_REGISTRY"
+            or data.get("status") != "SOURCE_LOCKED"
+            or data.get("pre_code_gate") != {
+                "gate": "ORTHO_ANALYSIS_PROTOCOLS_SOURCE_LOCKED",
+                "scope": identity, "status": "SATISFIED"}
+            or data.get("scope_resolutions", {}).get("AUTONOMOUS_TREATMENT") != "FORBIDDEN"
+            or data.get("scope_resolutions", {}).get("EXTRACTION_NON_EXTRACTION") != "CLINICIAN_ONLY"):
+        raise ValueError("Protocol profile contract mismatch")
+    contexts = data.get(context_key)
+    if (not isinstance(contexts, list) or not contexts
+            or any(not isinstance(item, dict)
+                   or item.get("classification_authority") is not False
+                   for item in contexts)):
+        raise ValueError("Classification authority forbidden")
+    if context_key == "reference_contexts" and any(
+            item.get("runtime_delta_authority") is not False for item in contexts):
+        raise ValueError("Runtime delta authority forbidden")
     return data
+
+
+def _load_profile() -> dict[str, Any]:
+    return _admit_profile(_PROFILE_PATH, _STEINER_PIN,
+                          "STEINER_STATIC_PROTOCOL_PROFILE_V1", "norm_sets")
 
 
 def _load_tweed_merrifield_profile() -> dict[str, Any]:
-    data=json.loads(_TWEED_MERRIFIELD_PROFILE_PATH.read_text(encoding="utf-8"))
-    if data.get("status")!="SOURCE_LOCKED" or data.get("pre_code_gate",{}).get("status")!="SATISFIED":
-        raise ValueError("Tweed-Merrifield protocol profile is not source-locked")
-    return data
+    return _admit_profile(_TWEED_MERRIFIELD_PROFILE_PATH, _TWEED_PIN,
+                          "TWEED_MERRIFIELD_DC_PROTOCOL_PROFILE_V1", "reference_contexts")
+
+
+def _uncertified_final_gate() -> dict[str, str]:
+    return {"gate": "ORTHO_ANALYSIS_PROTOCOLS_VERIFIED", "status": "OPEN"}
 
 
 def project_steiner_static_protocol(canonical_measurements: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -68,13 +103,13 @@ def project_steiner_static_protocol(canonical_measurements: Sequence[Mapping[str
                 "historical_reference":reference,
                 "reference_delta":delta,
                 "reference_authority":ref_set["authority"],
-                "classification_authority":bool(ref_set["classification_authority"]),
+                "classification_authority":False,
                 "interpretation_status":"REFERENCE_DISPLAY_ONLY_NO_CLASSIFICATION",
             })
     return {
         "protocol_profile_id":profile["protocol_profile_id"],
         "source_lock_gate":dict(profile["pre_code_gate"]),
-        "final_gate":dict(profile["final_gate"]),
+        "final_gate":_uncertified_final_gate(),
         "norm_set":{
             "norm_set_id":ref_set["norm_set_id"],
             "authority":ref_set["authority"],
@@ -127,7 +162,7 @@ def project_tweed_merrifield_protocol(
     return {
         "protocol_profile_id": profile["protocol_profile_id"],
         "source_lock_gate": dict(profile["pre_code_gate"]),
-        "final_gate": dict(profile["final_gate"]),
+        "final_gate": _uncertified_final_gate(),
         "rows": rows,
         "reference_contexts": list(profile["reference_contexts"]),
         "historical_geometry_resolution": dict(profile["historical_geometry_resolution"]),
