@@ -1,0 +1,186 @@
+name: R0.2 - nonclinical Windows installer rehearsal
+on:
+  push:
+    branches: [ci/r02-installer-rehearsal-20261126]
+permissions:
+  contents: read
+jobs:
+  installer-smoke:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+          architecture: x64
+      - name: Verify preinstalled Inno compiler version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) { throw 'INNO_COMPILER_MISSING' }
+          $v = (Get-Item -LiteralPath $iscc).VersionInfo.ProductVersion
+          if ($v -notmatch '^6\.7\.1(?:\.0)?$') { throw ('INNO_COMPILER_VERSION_DRIFT ' + $v) }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value 'DC_INNO_VERSION=6.7.1' -Encoding utf8
+          Write-Host 'R02_INNO_COMPILER_VERSION_PASS 6.7.1'
+      - name: Real installer admission and uninstall on tiny synthetic fixture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:GITHUB_SHA) { throw 'HEAD_MISMATCH' }
+          python -I -B scripts/ci_r02_installer_rehearsal.py --synthetic-smoke
+          if ($LASTEXITCODE -ne 0) { throw 'INSTALLER_SMOKE_FAILED' }
+  installed-runtime:
+    needs: installer-smoke
+    runs-on: windows-2025
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+          architecture: x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.3'
+      - name: Build guarded same-origin synthetic frontend
+        working-directory: frontend
+        shell: pwsh
+        env:
+          VITE_API_URL: http://127.0.0.1:8008
+          VITE_ENABLE_HTTPS: 'false'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($file in @('.env','.env.local','.env.production','.env.production.local')) {
+            if (Test-Path -LiteralPath $file) { throw 'PRIVATE_FRONTEND_ENV_REFUSED' }
+          }
+          npm ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'FRONTEND_DEPS_FAILED' }
+          npm run build:rehearsal
+          if ($LASTEXITCODE -ne 0) { throw 'FRONTEND_BUILD_FAILED' }
+          node scripts/ci-pwa-assets.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'PWA_ASSET_CONTRACT_FAILED' }
+          node --check scripts/ci-desktop-integration.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'BROWSER_DRIVER_SYNTAX_FAILED' }
+      - name: Verify preinstalled Inno compiler version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) { throw 'INNO_COMPILER_MISSING' }
+          $v = (Get-Item -LiteralPath $iscc).VersionInfo.ProductVersion
+          if ($v -notmatch '^6\.7\.1(?:\.0)?$') { throw ('INNO_COMPILER_VERSION_DRIFT ' + $v) }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value 'DC_INNO_VERSION=6.7.1' -Encoding utf8
+          Write-Host 'R02_INNO_COMPILER_VERSION_PASS 6.7.1'
+      - name: Provision native MinGW64 libraries on disposable GitHub runner
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bash = 'C:\msys64\usr\bin\bash.exe'
+          if (-not (Test-Path -LiteralPath $bash -PathType Leaf)) { throw 'MSYS2_RUNNER_MISSING' }
+          $env:MSYSTEM = 'MINGW64'
+          $env:CHERE_INVOKING = '1'
+          # Do not disable package signatures or use Git's MSYS runtime DLLs.
+          & $bash -lc 'set -e; pacman-conf SigLevel; pacman -Syu --noconfirm'
+          if ($LASTEXITCODE -ne 0) { throw 'MSYS2_UPDATE_FAILED' }
+          & $bash -lc 'set -e; pacman -Syu --noconfirm; pacman -S --needed --noconfirm mingw-w64-x86_64-file mingw-w64-x86_64-pango; pacman -Q mingw-w64-x86_64-file mingw-w64-x86_64-pango; pacman -Qo /mingw64/bin/libmagic-1.dll /mingw64/bin/libpango-1.0-0.dll /mingw64/bin/libgobject-2.0-0.dll /mingw64/bin/libpangoft2-1.0-0.dll /mingw64/share/misc/magic.mgc'
+          if ($LASTEXITCODE -ne 0) { throw 'MINGW_NATIVE_PROVISION_FAILED' }
+          foreach ($dll in @('libmagic-1.dll','libpango-1.0-0.dll','libgobject-2.0-0.dll','libpangoft2-1.0-0.dll')) {
+            $file = Join-Path 'C:\msys64\mingw64\bin' $dll
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "NATIVE_DLL_MISSING $dll" }
+            Write-Host ('R02_NATIVE_DLL_SHA256 ' + $dll + '=' + (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant())
+          }
+          Write-Host 'R02_MINGW_NATIVE_PROVISION_PASS'
+      - name: Reconstruct exact qualified inputs and exercise installed PE only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lab = Join-Path $env:RUNNER_TEMP ('dc-full-deps-' + [guid]::NewGuid().ToString('N'))
+          try {
+            python -m venv $lab
+            if ($LASTEXITCODE -ne 0) { throw 'VENV_FAILED' }
+            $py = Join-Path $lab 'Scripts\python.exe'
+            & $py -m pip --isolated install --disable-pip-version-check --no-cache-dir --only-binary=:all: --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+            if ($LASTEXITCODE -ne 0) { throw 'CPU_WHEEL_INSTALL_FAILED' }
+            # Build only explicitly reviewed, hash-pinned source-only distributions.
+            & $py -m pip --isolated install --disable-pip-version-check --no-cache-dir --only-binary=:all: --index-url https://pypi.org/simple 'setuptools==82.0.0' 'wheel==0.46.3'
+            if ($LASTEXITCODE -ne 0) { throw 'PINNED_WHEEL_BUILDER_INSTALL_FAILED' }
+            $wheelhouse = Join-Path $lab 'verified-wheelhouse'
+            New-Item -ItemType Directory -Path $wheelhouse | Out-Null
+            $approved = @(
+              @{ project='svglib'; version='1.5.1'; file='svglib-1.5.1.tar.gz'; sha='3ae765d3a9409ee60c0fb4d24c2deb6a80617aa927054f5bcd7fc98f0695e587'; wheelPattern='^svglib-1\.5\.1-py3-none-any\.whl$' },
+              @{ project='http-ece'; version='1.2.1'; file='http_ece-1.2.1.tar.gz'; sha='8c6ab23116bbf6affda894acfd5f2ca0fb8facbcbb72121c11c75c33e7ce8cff'; wheelPattern='^http_ece-1\.2\.1-(py3|py2\.py3)-none-any\.whl$' }
+            )
+            $constraints = Join-Path $lab 'reviewed-source-constraints.txt'
+            foreach ($entry in $approved) {
+              $sdist = Join-Path $lab $entry.file
+              $release = Invoke-RestMethod -Uri ("https://pypi.org/pypi/{0}/{1}/json" -f $entry.project,$entry.version)
+              $source = @($release.urls | Where-Object { $_.filename -ceq $entry.file -and $_.packagetype -ceq 'sdist' })
+              if ($source.Count -ne 1 -or $source[0].digests.sha256 -cne $entry.sha -or $source[0].yanked) { throw ("SOURCE_IDENTITY_MISMATCH " + $entry.project) }
+              $uri = [uri]$source[0].url
+              if ($uri.Scheme -cne 'https' -or $uri.Host -cne 'files.pythonhosted.org' -or $uri.UserInfo) { throw 'SOURCE_ORIGIN_REFUSED' }
+              Invoke-WebRequest -Uri $uri -OutFile $sdist
+              if ((Get-FileHash -LiteralPath $sdist -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha) { throw ("SOURCE_HASH_MISMATCH " + $entry.project) }
+              Write-Host ("R02_REVIEWED_SOURCE_SHA256_PASS " + $entry.project)
+              & $py -m pip --isolated wheel --disable-pip-version-check --no-cache-dir --no-index --no-deps --no-build-isolation --wheel-dir $wheelhouse $sdist
+              if ($LASTEXITCODE -ne 0) { throw ("LOCAL_WHEEL_BUILD_FAILED " + $entry.project) }
+              $wheels = @(Get-ChildItem -LiteralPath $wheelhouse -File | Where-Object { $_.Name -cmatch $entry.wheelPattern })
+              if ($wheels.Count -ne 1) { throw ("WHEEL_IDENTITY_MISMATCH " + $entry.project) }
+              Write-Host ("R02_REVIEWED_LOCAL_WHEEL_SHA256 " + $entry.project + "=" + (Get-FileHash -LiteralPath $wheels[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant())
+              Add-Content -LiteralPath $constraints -Value ($entry.project + '==' + $entry.version) -Encoding ascii
+            }
+            if (@(Get-ChildItem -LiteralPath $wheelhouse -File).Count -ne $approved.Count) { throw 'UNEXPECTED_WHEELHOUSE_CONTENT' }
+            # Resolve the entire dependency graph before mutating the full environment.
+            # No generic source fallback, including transitive packages.
+            $report = Join-Path $lab 'wheel-resolution.json'
+            $requirements = Join-Path $env:GITHUB_WORKSPACE 'backend\requirements-windows-build.txt'
+            $resolver = @('--disable-pip-version-check','--no-cache-dir','--only-binary=:all:','--index-url','https://pypi.org/simple','--find-links',$wheelhouse,'-c',$constraints,'-r',$requirements)
+            & $py -m pip --isolated install @resolver --dry-run --report $report
+            if ($LASTEXITCODE -ne 0) { throw 'FULL_WINDOWS_BINARY_GRAPH_RESOLUTION_FAILED' }
+            $plan = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+            foreach ($item in $plan.install) {
+              $url = [uri]$item.download_info.url
+              if (-not $url.AbsolutePath.EndsWith('.whl',[StringComparison]::OrdinalIgnoreCase)) { throw 'NON_WHEEL_IN_RESOLUTION' }
+              if ($url.Scheme -eq 'file') {
+                if ((Split-Path -Parent $url.LocalPath) -ne $wheelhouse) { throw 'UNAPPROVED_LOCAL_WHEEL' }
+              } elseif ($url.Scheme -cne 'https' -or $url.Host -cne 'files.pythonhosted.org') {
+                throw 'UNAPPROVED_RESOLVER_ORIGIN'
+              }
+              # Constrain resolved versions so actual installation cannot silently re-resolve.
+              if ($item.metadata.name -notmatch '^[A-Za-z0-9_.-]+$' -or $item.metadata.version -notmatch '^[A-Za-z0-9.+!_-]+$') { throw 'INVALID_RESOLVER_METADATA' }
+              Add-Content -LiteralPath $constraints -Value ($item.metadata.name + '==' + $item.metadata.version) -Encoding ascii
+            }
+            Write-Host ("R02_FULL_WINDOWS_BINARY_GRAPH_RESOLUTION_PASS count=" + @($plan.install).Count)
+            & $py -m pip --isolated install @resolver
+            if ($LASTEXITCODE -ne 0) { throw 'FULL_WINDOWS_WHEEL_INSTALL_FAILED' }
+            & $py -m pip check
+            if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_CONSISTENCY_FAILED' }
+            $env:HOME = $lab
+            $env:USERPROFILE = $lab
+            $env:APPDATA = $lab
+            $env:LOCALAPPDATA = $lab
+            $env:DC_NATIVE_MINGW_BIN = 'C:\msys64\mingw64\bin'
+            $env:HF_HUB_OFFLINE = '1'
+            $env:TRANSFORMERS_OFFLINE = '1'
+            $env:PYTHONDONTWRITEBYTECODE = '1'
+            # Capitalize the previous independent qualification; fail on version drift.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_desktop_proven_versions.py')
+            if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_REQUALIFICATION_REQUIRED' }
+            # Reconstruct the sidecar using the existing exact native hash lock.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_stage_native_bundle.py')
+            if ($LASTEXITCODE -ne 0) { throw 'NATIVE_BUNDLE_CLOSURE_FAILED' }
+            # No separate native bundle, storage or preflight reruns.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_backend_rehearsal_harness.py') --installer-only
+            if ($LASTEXITCODE -ne 0) { throw 'BACKEND_FROZEN_REHEARSAL_FAILED' }
+          } finally {
+            if (Test-Path -LiteralPath $lab) { Remove-Item -LiteralPath $lab -Recurse -Force }
+          }
+          if (Test-Path -LiteralPath $lab) { throw 'FULL_WINDOWS_LAB_CLEANUP_FAILED' }
+          Write-Host 'R02_FULL_WINDOWS_DEPENDENCY_REHEARSAL_CLEANUP_PASS'

@@ -13,6 +13,7 @@ from importlib import metadata
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ci_r02_windows_desktop import stage_assets, desktop_cycle
+from ci_r02_installer_rehearsal import installed_bundle
 
 
 def require(ok, marker):
@@ -30,7 +31,7 @@ def run(command, env, cwd, expected, timeout):
             values = json.loads(line.split("=", 1)[1])
             require(all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", v) for v in values), "INVALID_IMPORT_NAME")
             observed.update(values)
-        elif re.fullmatch(r"(?:R02_BACKEND_[A-Z_-]+|R02_DESKTOP_[A-Z_]+|R02_RELOCATED_NATIVE_[A-Z_]+)(?: [A-Za-z0-9_.=+-]+)*", line) or re.fullmatch(r"(?:FASTAPI_IMPORT_PASS|OPERATOR_BASELINE_METADATA_PASS|PRINT_AUDIT_[A-Z_]+|SQLCIPHER_WRONG_KEY_DENIED_PASS|NONEMPTY_BASELINE_REFUSED_PASS|SYNTHETIC_FIXTURE_FK_INTEGRITY_PASS|FRESH_SQLCIPHER_BASELINE_PASS|SYNTHETIC_FIXTURE_PASS)(?: [A-Za-z0-9_.=+-]+)*", line):
+        elif re.fullmatch(r"(?:R02_BACKEND_[A-Z_-]+|R02_DESKTOP_[A-Z_]+|R02_INSTALLER_[A-Z_]+|R02_RELOCATED_NATIVE_[A-Z_]+)(?: [A-Za-z0-9_.=+-]+)*", line) or re.fullmatch(r"(?:FASTAPI_IMPORT_PASS|OPERATOR_BASELINE_METADATA_PASS|PRINT_AUDIT_[A-Z_]+|SQLCIPHER_WRONG_KEY_DENIED_PASS|NONEMPTY_BASELINE_REFUSED_PASS|SYNTHETIC_FIXTURE_FK_INTEGRITY_PASS|FRESH_SQLCIPHER_BASELINE_PASS|SYNTHETIC_FIXTURE_PASS)(?: [A-Za-z0-9_.=+-]+)*", line):
             print(line, flush=True)
     require(out.returncode == 0 and expected in lines, "BACKEND_CHILD_FAILED " + expected)
     return observed
@@ -100,7 +101,11 @@ def main():
     script = Path(__file__).resolve().with_name("ci_r02_backend_rehearsal_probe.py")
     native = lab / "native-bundle"
     final_only = sys.argv[1:] == ["--desktop-final-only"]
-    require(not sys.argv[1:] or final_only, "UNEXPECTED_HARNESS_ARGUMENT")
+    installer_only = sys.argv[1:] == ["--installer-only"]
+    require(not sys.argv[1:] or final_only or installer_only, "UNEXPECTED_HARNESS_ARGUMENT")
+    if installer_only:
+        require(os.environ.get("GITHUB_REF_NAME") == "ci/r02-installer-rehearsal-20261126",
+                "INSTALLER_BRANCH_REQUIRED")
     if final_only:
         require(os.environ.get("GITHUB_REF_NAME") == "ci/r02-desktop-final-20261126",
                 "FINAL_ONLY_BRANCH_REQUIRED")
@@ -153,6 +158,31 @@ def main():
                     and file.suffix.lower() not in {".db", ".sqlite", ".sqlite3", ".onnx", ".pt", ".pth"},
                     "FORBIDDEN_BUNDLE_PAYLOAD")
     print("R02_BACKEND_REAL_PE_BUILD_PASS", flush=True)
+    if installer_only:
+        with installed_bundle(bundle, runner) as installed:
+            installed_exe = installed / exe.name
+            with tempfile.TemporaryDirectory(prefix="dc-backend-rehearsal-", dir=runner) as temp:
+                root = Path(temp).resolve(strict=True)
+                env = child_env(root, lab)
+                env["DC_INSTALLER_REHEARSAL"] = "true"
+                env["DC_DESKTOP_HEAD"] = os.environ["GITHUB_SHA"]
+                # Normal execution without the CI gate must refuse before creating DB.
+                denied = dict(env)
+                denied["GITHUB_ACTIONS"] = "false"
+                before = set(root.iterdir())
+                result = subprocess.run([str(installed_exe), "init"], env=denied, cwd=root,
+                                        stdin=subprocess.DEVNULL, capture_output=True,
+                                        encoding="utf-8", errors="replace", timeout=60)
+                require(result.returncode == 1 and "marker=WINDOWS_CI_ONLY" in result.stdout
+                        and set(root.iterdir()) == before, "INSTALLED_NON_CI_ADMISSION_FAILED")
+                print("R02_INSTALLER_NON_CI_RUNTIME_DENIAL_PASS", flush=True)
+                for stage in ("init", "serve", "restart"):
+                    run([str(installed_exe), stage], env, root,
+                        "R02_BACKEND_FROZEN_" + stage.upper() + "_PASS", 180)
+                print("R02_INSTALLER_INSTALLED_BACKEND_RESTART_PASS", flush=True)
+            require(not root.exists(), "INSTALLED_DATA_LAB_RESIDUE")
+        print("R02_INSTALLER_INTEGRATED_PASS", flush=True)
+        return
     if not final_only:
         with tempfile.TemporaryDirectory(prefix="dc-backend-rehearsal-", dir=runner) as temp:
             root = Path(temp)

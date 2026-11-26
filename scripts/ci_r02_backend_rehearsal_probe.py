@@ -145,6 +145,25 @@ async def exercise_http(app, desktop=False, stop_file=None):
                 return False
             require(await asyncio.to_thread(denied), "UNAUTHENTICATED_PATIENT_READ_NOT_DENIED")
             print("R02_BACKEND_LOOPBACK_HEALTH_AUTH_DENIAL_PASS", flush=True)
+            if os.environ.get("DC_INSTALLER_REHEARSAL") == "true":
+                def installed_assets():
+                    with opener.open(f"http://127.0.0.1:{port}/login", timeout=5) as response:
+                        require(response.headers.get_content_type()=="text/html" and b'id="root"' in response.read(),
+                                "INSTALLED_LOGIN_HTML_INVALID")
+                    manifest = http(port, "/build-manifest.json")
+                    require(manifest["commit"] == os.environ["DC_DESKTOP_HEAD"]
+                            and manifest["mode"] == "rehearsal", "INSTALLED_FRONTEND_HEAD_INVALID")
+                    with opener.open(f"http://127.0.0.1:{port}/pwa-sw.js", timeout=5) as response:
+                        require("javascript" in response.headers.get_content_type()
+                                and b"push-sw.js" in response.read(), "INSTALLED_SW_INVALID")
+                await asyncio.to_thread(installed_assets)
+                from backend.services import medication_dict
+                meta = medication_dict.catalog_metadata()
+                require(meta["sources"][0]["record_count"] == 0 and not meta["sources"][0]["available"]
+                        and not meta["sources"][0]["current_marketing_status_verified"]
+                        and medication_dict.search_regulatory_presentations("SYNTHETIC") == [],
+                        "INSTALLED_UNAPPROVED_AMMPS_EXPOSED")
+                print("R02_INSTALLER_SERVED_FRONTEND_AMMPS_DENIAL_PASS", flush=True)
             if desktop:
                 require(stop_file is not None and not stop_file.exists(), "STALE_STOP_FILE")
                 print("R02_DESKTOP_LOOPBACK_READY", flush=True)
@@ -181,7 +200,8 @@ def main():
     require(not (source / "backend" / ".env").exists()
             and not (source / "backend" / ".env.local").exists(), "PRIVATE_ENV_REFUSED")
     require(not (source / "backend" / "ai_models").exists(), "MODEL_DIRECTORY_REFUSED")
-    if desktop:
+    if desktop or os.environ.get("DC_INSTALLER_REHEARSAL") == "true":
+        require(frozen, "INSTALLER_FROZEN_REQUIRED")
         dist = source / "frontend" / "dist"
         manifest = json.loads((source / "desktop-assets.json").read_text(encoding="utf-8"))
         require(manifest["sha"] == os.environ["DC_DESKTOP_HEAD"], "FRONTEND_HEAD_MISMATCH")
