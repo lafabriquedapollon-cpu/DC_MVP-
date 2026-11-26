@@ -164,6 +164,8 @@ def project_runtime_chain_read_path(
     projected = project_typed_craniom_read_path(angles_data, patient_id=patient_id)
     payload = angles_data.get(EVIDENCE_GRAPH_KEY)
     if payload is None:
+        # Legacy JSON cannot self-declare verified scientific read authority.
+        projected.pop("scientific_read_path", None)
         return projected
     if not isinstance(payload, dict):
         raise CephaloTypedReadError("Persisted evidence graph must be an object")
