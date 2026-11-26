@@ -194,10 +194,29 @@ try {
   const quotaAfter=await api('/api/team/quota',{headers:teamHeaders});
   assert.equal(quotaAfter.status,200);
   assert.equal(quotaBefore.body.secretaires_used-quotaAfter.body.secretaires_used,1);
+  // Page.reload acknowledges the request before the old document disappears.
+  // Never click the pre-reload settings tab or accept its archived DOM as proof.
+  const beforeReloadOrigin=await evalPage('performance.timeOrigin');
+  const responseFloor=responses.length;
   await call('Page.reload');
-  await wait('team settings tab after reload',()=>evalPage('Array.from(document.querySelectorAll("nav button")).some(b=>b.innerText.includes("Mon Équipe"))'));
-  await evalPage('(()=>{const b=Array.from(document.querySelectorAll("nav button")).find(b=>b.innerText.includes("Mon Équipe"));if(!b)return false;b.click();return true})()');
-  await wait('archived member persisted',async()=>{const c=await readCard();return c.found&&c.archiveDisabled&&c.permsDisabled&&c.archived&&!c.active&&!c.activationButton;});
+  await wait('fresh settings document',async()=>{
+    const state=await evalPage('({origin:performance.timeOrigin,path:location.pathname,ready:document.readyState})');
+    return state.origin!==beforeReloadOrigin&&state.path==='/settings'&&state.ready==='complete';
+  });
+  const teamTab=()=>evalPage('(()=>{const b=Array.from(document.querySelectorAll(\'[data-tour="settings-navigation"] button\')).find(b=>b.innerText.includes("Mon Équipe"));if(!b||b.disabled||!b.getClientRects().length)return false;if(!document.querySelector(".settings-team-surface"))b.click();return true})()');
+  await wait('fresh team tab selected',async()=>{
+    if(!await teamTab())return false;
+    return await visible('.settings-team-surface');
+  });
+  await wait('fresh team API after reload',()=>responses.slice(responseFloor).some(r=>r.path==='/api/team/'&&r.method==='GET'&&r.status===200));
+  try {
+    await wait('archived member persisted',async()=>{const c=await readCard();return c.found&&c.archiveDisabled&&c.permsDisabled&&c.archived&&!c.active&&!c.activationButton;});
+  } catch(error) {
+    console.log('TEAM_RELOAD_DIAGNOSTIC',JSON.stringify({path:await pagePath(),freshDocument:await evalPage('performance.timeOrigin')!==beforeReloadOrigin,teamSelected:await visible('.settings-team-surface'),card:await readCard()}));
+    await capture('team-reload-failure');
+    throw error;
+  }
+  console.log('FUE_TEAM_FRESH_DOCUMENT_AND_API_PASS');
   await viewport(1280);
   await capture('team-reloaded-1280');
   console.log('FUE_TEAM_UI_ARCHIVE_BEFORE_AFTER_PASS widths=390,430,768,1280');
