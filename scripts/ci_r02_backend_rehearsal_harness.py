@@ -107,7 +107,7 @@ def main():
         require(os.environ.get("GITHUB_REF_NAME") == "ci/r02-installer-rehearsal-20261126",
                 "INSTALLER_BRANCH_REQUIRED")
     if final_only:
-        require(os.environ.get("GITHUB_REF_NAME") == "ci/r02-desktop-final-20261126",
+        require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-desktop-final-20261126", "ci/r03-convergence-20261126"},
                 "FINAL_ONLY_BRANCH_REQUIRED")
     source = stage_source(repo, lab)
     assets, asset_manifest = stage_assets(repo, lab)

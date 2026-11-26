@@ -1,7 +1,7 @@
 name: SCI-09-10 scientific resource safety
 on:
   push:
-    branches: [ci/r02-sci09-10-20261126]
+    branches: [ci/r02-sci09-10-20261126, ci/r03-convergence-20261126]
 permissions:
   contents: read
 jobs:

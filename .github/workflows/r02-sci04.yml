@@ -1,7 +1,7 @@
 name: R0.2 SCI-04 provenance
 on:
   push:
-    branches: [ci/r02-sci04-06-20261126]
+    branches: [ci/r02-sci04-06-20261126, ci/r03-convergence-20261126]
 permissions:
   contents: read
 jobs:

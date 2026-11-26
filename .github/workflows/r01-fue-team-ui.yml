@@ -1,7 +1,7 @@
 name: R0.1 FUE team archive UI
 on:
   push:
-    branches: [ci/r01-fue-team-ui-20261125]
+    branches: [ci/r01-fue-team-ui-20261125, ci/r03-convergence-20261126]
     paths: ['.github/workflows/r01-fue-team-ui.yml', 'backend/**', 'frontend/**']
   workflow_dispatch:
 permissions:
@@ -17,6 +17,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Verify exact convergence HEAD
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
