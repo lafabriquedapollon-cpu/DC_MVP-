@@ -6,6 +6,7 @@ The frozen protocol profile JSON is the source of composition/reference metadata
 from __future__ import annotations
 import json
 import hashlib
+import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -76,9 +77,61 @@ def _uncertified_final_gate() -> dict[str, str]:
     return {"gate": "ORTHO_ANALYSIS_PROTOCOLS_VERIFIED", "status": "OPEN"}
 
 
+# These identities are derived from the exact canonical method bridge.
+_PROTOCOL_METHODS = {
+    "M_SNA_DEG_V1": "STEINER_SNA_DEG_V1",
+    "M_SNB_DEG_V1": "STEINER_SNB_DEG_V1",
+    "M_ANB_DEG_V1": "STEINER_ANB_DEG_V1",
+    "M_U1_NA_DEG_V1": "STEINER_U1_NA_DEG_V1",
+    "M_U1_NA_MM_V1": "STEINER_U1_NA_CANONICAL_MM_V2",
+    "M_L1_NB_DEG_V1": "STEINER_L1_NB_DEG_V1",
+    "M_L1_NB_MM_V1": "STEINER_L1_NB_CANONICAL_MM_V2",
+    "M_INTERINCISAL_DEG_V1": "CRANIOM_INTERINCISAL_DEG_V1",
+    "M_OCCLUSAL_PLANE_SN_DEG_V1": "STEINER_OCCLUSAL_SN_CANONICAL_DEG_V2",
+    "M_SN_GOGN_DEG_V1": "STEINER_SN_GOGN_CANONICAL_DEG_V2",
+    "M_L1_GOGN_DEG_V1": "STEINER_L1_GOGN_CANONICAL_DEG_V2",
+    "M_SND_DEG_V1": "STEINER_SND_CANONICAL_DEG_V2",
+    "M_POG_NB_MM_V1": "STEINER_POG_NB_CANONICAL_MM_V2",
+    "M_L1_DLINE_MM_V1": "STEINER_L1_DLINE_CANONICAL_MM_V2",
+    "M_L1_DLINE_DEG_V1": "STEINER_L1_DLINE_CANONICAL_DEG_V2",
+    "M_FH_GOME_DEG_V1": "TWEED_FMA_CANONICAL_DEG_V2",
+    "M_IMPA_GOME_DEG_V1": "TWEED_IMPA_DEG_V1",
+    "M_FMIA_L1_FH_DEG_V1": "TWEED_FMIA_CANONICAL_DEG_V2",
+    "M_MERRIFIELD_Z_FH_DEG_V1": "MERRIFIELD_Z_CANONICAL_DEG_V2"
+}
+
+def _protocol_inputs(measurements):
+    result = {}
+    for item in measurements:
+        cid = item.get("canonical_measurement_id")
+        if cid not in _PROTOCOL_METHODS:
+            continue
+        if cid in result:
+            raise ValueError("Duplicate canonical protocol measurement")
+        result[cid] = item
+    return result
+
+def _safe_protocol_row(item, cid):
+    unit = "mm" if "_MM_" in cid else "deg"
+    status = item.get("availability_status")
+    value = item.get("value")
+    refs = item.get("measurement_refs")
+    method = item.get("value_authority_method_id")
+    valid = (status == "AVAILABLE" and type(value) in (int, float)
+             and math.isfinite(value) and item.get("unit") == unit
+             and method == _PROTOCOL_METHODS[cid]
+             and isinstance(refs, list) and bool(refs)
+             and all(isinstance(ref, str) and ref.strip() for ref in refs)
+             and len(set(refs)) == len(refs))
+    if valid:
+        return dict(item)
+    return {"availability_status": "NOT_COMPUTABLE", "value": None,
+            "unit": unit, "measurement_refs": [], "value_authority_method_id": None}
+
+
 def project_steiner_static_protocol(canonical_measurements: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     profile=_load_profile()
-    by_id={str(x.get("canonical_measurement_id")):dict(x) for x in canonical_measurements}
+    by_id=_protocol_inputs(canonical_measurements)
     ref_set=profile["norm_sets"][0]
     references=dict(ref_set.get("values") or {})
     base=profile["layers"]["STEINER_1953_BASE"]["required_measurement_ids"]
@@ -86,7 +139,7 @@ def project_steiner_static_protocol(canonical_measurements: Sequence[Mapping[str
     rows=[]
     for layer,ids in (("STEINER_1953_BASE",base),("STEINER_1959_EXTENSION",extension)):
         for cid in ids:
-            projected=by_id.get(cid,{})
+            projected=_safe_protocol_row(by_id.get(cid,{}), cid)
             status=str(projected.get("availability_status") or "NOT_COMPUTABLE")
             value=projected.get("value") if status=="AVAILABLE" else None
             reference=references.get(cid)
@@ -135,14 +188,11 @@ def project_tweed_merrifield_protocol(
     canonical_measurements: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     profile = _load_tweed_merrifield_profile()
-    by_id = {
-        str(item.get("canonical_measurement_id")): dict(item)
-        for item in canonical_measurements
-    }
+    by_id = _protocol_inputs(canonical_measurements)
     rows: list[dict[str, Any]] = []
     for section_id, section in profile["profiles"].items():
         for canonical_id in section.get("required_measurement_ids", []):
-            projected = by_id.get(canonical_id, {})
+            projected = _safe_protocol_row(by_id.get(canonical_id, {}), canonical_id)
             status = str(projected.get("availability_status") or "NOT_COMPUTABLE")
             rows.append(
                 {

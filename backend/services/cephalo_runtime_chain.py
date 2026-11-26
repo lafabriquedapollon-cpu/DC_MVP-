@@ -179,6 +179,12 @@ def project_runtime_chain_read_path(
     except ValueError as exc:
         raise CephaloTypedReadError("Typed measurements failed canonical convergence") from exc
 
+    try:
+        steiner = project_steiner_static_protocol(canonical_projection["measurements"])
+        tweed = project_tweed_merrifield_protocol(canonical_projection["measurements"])
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise CephaloTypedReadError("Scientific protocol profile unavailable or invalid") from exc
+
     projected["scientific_read_path"] = {
         **projected.get("scientific_read_path", {}),
         "active_chain": "VERIFIED",
@@ -193,8 +199,8 @@ def project_runtime_chain_read_path(
         "blocked_method_ids": canonical_projection["blocked_method_ids"],
         "unmapped_method_ids": canonical_projection["unmapped_method_ids"],
         "protocol_profiles": {
-            "steiner": project_steiner_static_protocol(canonical_projection["measurements"]),
-            "tweed_merrifield": project_tweed_merrifield_protocol(canonical_projection["measurements"]),
+            "steiner": steiner,
+            "tweed_merrifield": tweed,
         },
     }
     if include_r23g2_reference_profiles:
