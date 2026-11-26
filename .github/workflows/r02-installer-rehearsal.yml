@@ -22,8 +22,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
           if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) { throw 'INNO_COMPILER_MISSING' }
-          $v = (Get-Item -LiteralPath $iscc).VersionInfo.ProductVersion
-          if ($v -notmatch '^6\.7\.1(?:\.0)?$') { throw ('INNO_COMPILER_VERSION_DRIFT ' + $v) }
+          # ISCC's PE ProductVersion may be 0.0.0.0; qualify the actual compiler engine.
+          # /? help may return nonzero; only its explicit engine-version line counts.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $banner = (& $iscc '/?' 2>&1 | Out-String)
+          if ($banner -notmatch '(?m)^\s*Compiler engine version:\s*Inno Setup 6\.7\.1(?:\s|\(|$)') {
+            Write-Host $banner
+            throw 'INNO_COMPILER_ENGINE_VERSION_MISMATCH'
+          }
           Add-Content -LiteralPath $env:GITHUB_ENV -Value 'DC_INNO_VERSION=6.7.1' -Encoding utf8
           Write-Host 'R02_INNO_COMPILER_VERSION_PASS 6.7.1'
       - name: Real installer admission and uninstall on tiny synthetic fixture
@@ -74,8 +80,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
           if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) { throw 'INNO_COMPILER_MISSING' }
-          $v = (Get-Item -LiteralPath $iscc).VersionInfo.ProductVersion
-          if ($v -notmatch '^6\.7\.1(?:\.0)?$') { throw ('INNO_COMPILER_VERSION_DRIFT ' + $v) }
+          # ISCC's PE ProductVersion may be 0.0.0.0; qualify the actual compiler engine.
+          # /? help may return nonzero; only its explicit engine-version line counts.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $banner = (& $iscc '/?' 2>&1 | Out-String)
+          if ($banner -notmatch '(?m)^\s*Compiler engine version:\s*Inno Setup 6\.7\.1(?:\s|\(|$)') {
+            Write-Host $banner
+            throw 'INNO_COMPILER_ENGINE_VERSION_MISMATCH'
+          }
           Add-Content -LiteralPath $env:GITHUB_ENV -Value 'DC_INNO_VERSION=6.7.1' -Encoding utf8
           Write-Host 'R02_INNO_COMPILER_VERSION_PASS 6.7.1'
       - name: Provision native MinGW64 libraries on disposable GitHub runner

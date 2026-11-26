@@ -39,8 +39,22 @@ def inventory(root):
         require(p.is_file(), "INSTALL_NONFILE_REFUSED")
         rel = p.relative_to(root).as_posix()
         require(p.name.lower() not in {".env", ".env.local", "firebase_creds.json"}
-                and p.suffix.lower() not in {".db", ".sqlite", ".sqlite3", ".onnx", ".pt", ".pth", ".pem", ".pfx", ".key"},
+                and p.suffix.lower() not in {".db", ".sqlite", ".sqlite3", ".onnx", ".pt", ".pth", ".pfx", ".key"},
                 "INSTALL_PRIVATE_PAYLOAD_REFUSED")
+        if p.suffix.lower() == ".pem":
+            # The normal PyInstaller certifi hook includes the public CA bundle.
+            # Allow only that exact dependency path, byte-identical to the installed wheel,
+            # with certificate-only PEM blocks (not a private key).
+            import importlib.util
+            spec = importlib.util.find_spec("certifi")
+            require(rel == "_internal/certifi/cacert.pem" and spec is not None and spec.origin,
+                    "INSTALL_UNAPPROVED_PEM_REFUSED")
+            public_ca = Path(spec.origin).parent / "cacert.pem"
+            pem = p.read_bytes()
+            labels = re.findall(rb"-----BEGIN ([A-Z0-9 ]+)-----",pem)
+            require(public_ca.is_file() and pem == public_ca.read_bytes() and labels
+                    and set(labels) == {b"CERTIFICATE"} and b"PRIVATE KEY" not in pem,
+                    "INSTALL_PUBLIC_CA_IDENTITY_FAILED")
         result[rel] = (p.stat().st_size, digest(p))
     return result
 
@@ -171,7 +185,15 @@ def installed_bundle(bundle, runner, negative=False):
         (root/"outside-sentinel.txt").write_bytes(b"synthetic preserve")
         env=environment(root,token)
         script=make_script(bundle,root,dest,token)
-        require(run([compiler(),"/Qp",script],env,root,1200)==0,"INNO_BUILD_FAILED")
+        built = subprocess.run([str(compiler()),"/Qp",str(script)],env=env,cwd=root,
+                               stdin=subprocess.DEVNULL,capture_output=True,text=True,
+                               encoding="utf-8",errors="replace",timeout=1200)
+        if built.returncode != 0:
+            # Compiler errors may identify a script line; never emit the generated script or lab token.
+            for line in (built.stdout+"\n"+built.stderr).splitlines():
+                if "Error" in line or "error" in line:
+                    print(line.replace(token,"[lab-id]"),flush=True)
+            raise RuntimeError("INNO_BUILD_FAILED")
         setup=root/"dc-rehearsal-setup.exe"
         require(setup.is_file() and ordinary(setup), "INNO_OUTPUT_MISSING")
         with setup.open("rb") as f:
