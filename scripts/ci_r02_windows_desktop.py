@@ -95,40 +95,35 @@ def verify_served_assets():
     print("R02_DESKTOP_SERVED_HTML_HEAD_SW_PASS", flush=True)
 
 
-def wait_cdp(browser, profile):
-    # A fresh isolated profile and browser-selected port prevent attachment to
-    # unrelated local CDP endpoints. Do not log targets or debugger URLs.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    port_file = profile / "DevToolsActivePort"
-    for _ in range(80):
-        require(browser.poll() is None, "DESKTOP_CHROMIUM_EXITED")
-        try:
-            lines = port_file.read_text(encoding="ascii").splitlines()
-            port = int(lines[0])
-            require(1024 <= port <= 65535 and len(lines) == 2
-                    and re.fullmatch(r"/devtools/browser/[a-f0-9-]+", lines[1]),
-                    "INVALID_CDP_PORT_FILE")
-            with opener.open(f"http://127.0.0.1:{port}/json/version", timeout=2) as response:
-                version = json.load(response)
-            require(version["webSocketDebuggerUrl"] == f"ws://127.0.0.1:{port}" + lines[1],
-                    "CDP_IDENTITY_MISMATCH")
-            print("R02_DESKTOP_CDP_ENDPOINT_PASS", flush=True)
-            return port
-        except (OSError, ValueError, IndexError, KeyError):
-            time.sleep(.5)
-    raise RuntimeError("DESKTOP_CDP_ENDPOINT_TIMEOUT")
+def wait_signal(controller, path, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            require(not path.is_symlink() and path.stat().st_size == 0, "INVALID_BROWSER_SIGNAL")
+            return
+        require(controller.poll() is None, "DESKTOP_PIPE_CONTROLLER_EXITED")
+        time.sleep(.25)
+    raise RuntimeError("DESKTOP_PIPE_PHASE_TIMEOUT")
 
 
-def browser_executable():
-    roots = [os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")]
-    for root in roots:
-        if not root:
-            continue
-        for rel in ("Google/Chrome/Application/chrome.exe", "Microsoft/Edge/Application/msedge.exe"):
-            path = Path(root) / rel
-            if path.is_file():
-                return path
-    raise RuntimeError("CHROMIUM_NOT_FOUND")
+def emit_controller_log(log):
+    if not log.is_file():
+        return
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        if re.fullmatch(r"[A-Z][A-Z0-9_]+_PASS(?: [A-Za-z0-9_.=+-]+)*", line):
+            print(line, flush=True)
+        elif re.fullmatch(r"PWA_BROWSER_ACTIVE_STATIC_ONLY_PASS \{\"controlled\":(?:true|false),\"entries\":[0-9]+,\"apiEntries\":0,\"foreignEntries\":0\}", line):
+            print(line, flush=True)
+        elif re.fullmatch(r"R02_DESKTOP_PIPE_FAILURE phase=[A-Z_]+ type=[A-Za-z0-9_]+", line):
+            print(line, flush=True)
+        elif line.startswith("INTEGRATION_ERROR "):
+            labels = ("login form", "actual PWA registration and precache", "real login API",
+                      "dashboard", "authenticated profile GET", "CrownBot launcher",
+                      "CrownBot chat tab", "default-off chat", "patient form", "patient POST",
+                      "patient detail", "patient detail API", "rendered patient identity",
+                      "restart patient route", "restart patient GET", "restart patient identity")
+            label = next((v for v in labels if line == "INTEGRATION_ERROR " + v + " timeout"), None)
+            print("R02_DESKTOP_DRIVER_REPORTED_ERROR" + (" phase=" + label.replace(" ", "_") if label else ""), flush=True)
 
 
 def desktop_cycle(repo, root, exe, env):
@@ -140,75 +135,47 @@ def desktop_cycle(repo, root, exe, env):
     # line, logs, or screenshots contain tokens by design.
     driver_env = dict(env)
     driver_env.update(DC_EVIDENCE=str(evidence), DC_BUILT_REHEARSAL="true", DC_PACKAGED_DESKTOP="true")
-    browser_env = {k: v for k, v in env.items() if k in {
-        "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "PROCESSOR_ARCHITECTURE",
-        "NUMBER_OF_PROCESSORS", "SYSTEMDRIVE", "PATH", "HOME", "USERPROFILE",
-        "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"}}
+    tools = Path(os.environ["DC_BROWSER_TOOLS"]).resolve(strict=True)
+    runner = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+    require(tools.parent == runner and tools.name.startswith("dc-browser-tools-"),
+            "INVALID_BROWSER_TOOLS_ROOT")
+    driver_env["DC_BROWSER_TOOLS"] = str(tools)
+    driver_env["PLAYWRIGHT_BROWSERS_PATH"] = str(tools / "browsers")
     for name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramData", "PUBLIC", "HOMEDRIVE", "HOMEPATH"):
         if name in os.environ:
-            browser_env[name.upper()] = os.environ[name]
-    browser = None
+            driver_env[name.upper()] = os.environ[name]
+    controller = None
+    browser_log = root / "browser-controller.log"
     try:
-        for stage in ("desktop-serve", "desktop-restart"):
-            log = root / (stage + ".log")
-            with log.open("wb") as handle:
-                proc = subprocess.Popen([str(exe), stage], env=env, cwd=root, stdin=subprocess.DEVNULL,
-                                        stdout=handle, stderr=subprocess.STDOUT)
-                try:
-                    wait_health(proc, env)
-                    verify_served_assets()
-                    if browser is None:
-                        profile = root / "chrome"
-                        require(not profile.exists(), "STALE_BROWSER_PROFILE")
-                        browser = subprocess.Popen([str(browser_executable()), "--headless",
-                            "--disable-background-networking", "--disable-sync", "--disable-extensions",
-                            "--no-first-run", "--no-default-browser-check", "--disable-quic",
-                            "--proxy-server=http://127.0.0.1:1", "--proxy-bypass-list=127.0.0.1;localhost;[::1]",
-                            "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1",
-                            "--window-size=1440,900", "--remote-debugging-address=127.0.0.1",
-                            "--remote-debugging-port=0", "--user-data-dir=" + str(profile),
-                            "about:blank"], env=browser_env, cwd=root,
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        driver_env["DC_CDP_PORT"] = str(wait_cdp(browser, profile))
-                    command = [node, str(repo / "frontend/scripts/ci-desktop-integration.mjs")]
-                    if stage == "desktop-restart":
-                        command.append("--verify-restart")
-                    result = subprocess.run(command, env=driver_env, cwd=root, timeout=300,
-                                            capture_output=True, text=True, encoding="utf-8", errors="replace")
-                    # Only markers; never print response bodies, credentials, CDP expressions.
-                    for line in result.stdout.splitlines():
-                        if re.fullmatch(r"[A-Z][A-Z0-9_]+_PASS(?: [A-Za-z0-9_.=+-]+)*", line):
-                            print(line, flush=True)
-                        elif re.fullmatch(r"PWA_BROWSER_ACTIVE_STATIC_ONLY_PASS \{\"controlled\":(?:true|false),\"entries\":[0-9]+,\"apiEntries\":0,\"foreignEntries\":0\}", line):
-                            print(line, flush=True)
-                        elif line.startswith("INTEGRATION_ERROR "):
-                            labels = ("login form", "actual PWA registration and precache",
-                                      "real login API", "dashboard", "authenticated profile GET",
-                                      "CrownBot launcher", "CrownBot chat tab", "default-off chat",
-                                      "patient form", "patient POST", "patient detail",
-                                      "patient detail API", "rendered patient identity",
-                                      "restart patient route", "restart patient GET", "restart patient identity")
-                            matched = next((label for label in labels if line == "INTEGRATION_ERROR " + label + " timeout"), None)
-                            print("R02_DESKTOP_DRIVER_REPORTED_ERROR" + (" phase=" + matched.replace(" ", "_") if matched else ""), flush=True)
-                    if result.returncode:
-                        # Print only bounded, predefined diagnostic codes, not arbitrary stderr.
-                        for code in ("CDP_TARGET_TIMEOUT", "CDP_SOCKET_FAILED", "CDP_ATTACH_TIMEOUT",
-                                     "CDP_NAVIGATION_FAILED", "CDP_WRONG_ORIGIN"):
-                            if code in result.stderr or code in result.stdout:
-                                print("R02_DESKTOP_DRIVER_FAILURE " + code, flush=True)
-                        print("R02_DESKTOP_DRIVER_EXIT rc=" + str(result.returncode), flush=True)
-                    require(result.returncode == 0, "DESKTOP_BROWSER_FAILED")
-                    (root / ("stop-" + stage)).touch(exist_ok=False)
-                    require(proc.wait(timeout=25) == 0, "DESKTOP_SERVER_SHUTDOWN_FAILED")
-                finally:
-                    kill_tree(proc)
-            lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
-            for line in lines:
-                if re.fullmatch(r"(?:R02_[A-Z_-]+(?: [A-Za-z0-9_.=+-]+)*|SQLCIPHER_PATIENT_PERSISTENCE_PASS patients=1 dossiers=1)", line):
-                    print(line, flush=True)
-            require("R02_BACKEND_FROZEN_" + stage.upper() + "_PASS" in lines
-                    and "SQLCIPHER_PATIENT_PERSISTENCE_PASS patients=1 dossiers=1" in lines,
-                    "DESKTOP_FROZEN_PERSISTENCE_PROOF_MISSING")
+        with browser_log.open("wb") as browser_output:
+            for stage in ("desktop-serve", "desktop-restart"):
+                log = root / (stage + ".log")
+                with log.open("wb") as handle:
+                    proc = subprocess.Popen([str(exe), stage], env=env, cwd=root, stdin=subprocess.DEVNULL,
+                                            stdout=handle, stderr=subprocess.STDOUT)
+                    try:
+                        wait_health(proc, env)
+                        verify_served_assets()
+                        if controller is None:
+                            controller = subprocess.Popen([node, str(repo / "frontend/scripts/ci-r02-windows-browser.mjs")],
+                                env=driver_env, cwd=root, stdin=subprocess.DEVNULL,
+                                stdout=browser_output, stderr=subprocess.STDOUT)
+                            wait_signal(controller, root / "browser-first-pass", 300)
+                        else:
+                            (root / "browser-restart-ready").touch(exist_ok=False)
+                            require(controller.wait(timeout=300) == 0, "DESKTOP_BROWSER_RESTART_FAILED")
+                            require((root / "browser-restart-pass").is_file(), "DESKTOP_RESTART_SIGNAL_MISSING")
+                        (root / ("stop-" + stage)).touch(exist_ok=False)
+                        require(proc.wait(timeout=25) == 0, "DESKTOP_SERVER_SHUTDOWN_FAILED")
+                    finally:
+                        kill_tree(proc)
+                lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+                for line in lines:
+                    if re.fullmatch(r"(?:R02_[A-Z_-]+(?: [A-Za-z0-9_.=+-]+)*|SQLCIPHER_PATIENT_PERSISTENCE_PASS patients=1 dossiers=1)", line):
+                        print(line, flush=True)
+                require("R02_BACKEND_FROZEN_" + stage.upper() + "_PASS" in lines
+                        and "SQLCIPHER_PATIENT_PERSISTENCE_PASS patients=1 dossiers=1" in lines,
+                        "DESKTOP_FROZEN_PERSISTENCE_PROOF_MISSING")
         # Publish only known synthetic screenshots, never raw logs/profile/DB.
         approved = {"01-login.png", "02-dashboard.png", "02b-crownbot-default-off.png",
                     "03-patient-form.png", "04-patient-detail.png", "05-recovery-hub.png",
@@ -224,5 +191,6 @@ def desktop_cycle(repo, root, exe, env):
         (output / "head.txt").write_text(env["DC_DESKTOP_HEAD"] + "\n", encoding="ascii")
         print("R02_DESKTOP_FROZEN_BROWSER_RESTART_PASS", flush=True)
     finally:
-        if browser is not None:
-            kill_tree(browser)
+        if controller is not None:
+            kill_tree(controller)
+        emit_controller_log(browser_log)

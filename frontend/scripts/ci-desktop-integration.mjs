@@ -17,25 +17,38 @@ const wait = async (label, fn, ms=60000) => {
   }
   throw new Error(label+' timeout');
 };
-const cdpPort=packaged ? Number(process.env.DC_CDP_PORT) : 9222;
-assert(Number.isInteger(cdpPort)&&cdpPort>=1024&&cdpPort<=65535);
-const cdpOrigin='http://127.0.0.1:'+cdpPort;
 const restart=process.argv.includes('--verify-restart');
-const target=await wait('CDP_TARGET',async()=>{
-  const list=await (await fetch(cdpOrigin+'/json/list',{signal:AbortSignal.timeout(2000)})).json();
-  const pages=list.filter(t=>t.type==='page' &&
-    (t.url.startsWith(web+'/') || (packaged&&!restart&&t.url==='about:blank')));
-  return pages.length===1?pages[0]:false;
-},30000).catch(()=>{throw Error('CDP_TARGET_TIMEOUT')});
-const debugURL=new URL(target.webSocketDebuggerUrl);
-assert(debugURL.protocol==='ws:'&&debugURL.hostname==='127.0.0.1'&&Number(debugURL.port)===cdpPort&&debugURL.pathname.startsWith('/devtools/page/'));
-const ws=new WebSocket(target.webSocketDebuggerUrl);
-await new Promise((resolve,reject)=>{
-  const timer=setTimeout(()=>reject(Error('CDP_ATTACH_TIMEOUT')),10000);
-  ws.addEventListener('open',()=>{clearTimeout(timer);resolve()},{once:true});
-  ws.addEventListener('error',()=>{clearTimeout(timer);reject(Error('CDP_SOCKET_FAILED'))},{once:true});
-});
-if(packaged) console.log('R02_DESKTOP_CDP_ATTACH_PASS');
+let ws;
+if(packaged){
+  const session=globalThis.__dcDesktopCDP;
+  assert(session && typeof session.send==='function','PACKAGED_PIPE_SESSION_REQUIRED');
+  // Adapt the already qualified CDP driver to a private Playwright pipe.
+  const listeners=new Set();
+  const events=['Network.requestWillBeSent','Network.loadingFailed','Network.responseReceived'];
+  for(const method of events)session.on(method,params=>{
+    for(const listener of listeners)listener({data:JSON.stringify({method,params})});
+  });
+  ws={
+    addEventListener(type,listener){if(type==='message')listeners.add(listener)},
+    send(raw){
+      const {id,method,params}=JSON.parse(raw);
+      session.send(method,params).then(result=>{
+        for(const listener of listeners)listener({data:JSON.stringify({id,result})});
+      },()=>{
+        for(const listener of listeners)listener({data:JSON.stringify({id,error:{code:-1}})});
+      });
+    },
+    close(){listeners.clear()}
+  };
+  console.log('R02_DESKTOP_CDP_PIPE_ATTACH_PASS');
+}else{
+  const target=await wait('CDP',async()=>{
+    const list=await (await fetch('http://127.0.0.1:9222/json/list')).json();
+    return list.find(t=>t.type==='page' && t.url.startsWith(web));
+  });
+  ws=new WebSocket(target.webSocketDebuggerUrl);
+  await new Promise((resolve,reject)=>{ws.addEventListener('open',resolve,{once:true});ws.addEventListener('error',reject,{once:true});});
+}
 let seq=0;
 const pending=new Map(), requests=new Map(), responses=[];
 ws.addEventListener('message',e=>{

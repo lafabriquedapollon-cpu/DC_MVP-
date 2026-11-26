@@ -38,6 +38,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'PWA_ASSET_CONTRACT_FAILED' }
           node --check scripts/ci-desktop-integration.mjs
           if ($LASTEXITCODE -ne 0) { throw 'BROWSER_DRIVER_SYNTAX_FAILED' }
+      - name: Install isolated Playwright Chromium test tooling
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $env:RUNNER_TEMP ("dc-browser-tools-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
+          New-Item -ItemType Directory -Path $tools | Out-Null
+          '{"private":true,"name":"dc-browser-ci","version":"0.0.0"}' | Set-Content -LiteralPath (Join-Path $tools 'package.json') -Encoding ascii
+          npm install --prefix $tools --ignore-scripts --no-audit --no-fund --save-exact --registry https://registry.npmjs.org playwright-core@1.61.0
+          if ($LASTEXITCODE -ne 0) { throw 'PLAYWRIGHT_TOOL_INSTALL_FAILED' }
+          $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $tools 'browsers'
+          node (Join-Path $tools 'node_modules\playwright-core\cli.js') install chromium
+          if ($LASTEXITCODE -ne 0) { throw 'PLAYWRIGHT_CHROMIUM_INSTALL_FAILED' }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value ("DC_BROWSER_TOOLS=" + $tools) -Encoding utf8
+          node --check frontend/scripts/ci-r02-windows-browser.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'PIPE_CONTROLLER_SYNTAX_FAILED' }
+          Write-Host 'R02_DESKTOP_PLAYWRIGHT_TOOLING_PASS'
       - name: Provision native MinGW64 libraries on disposable GitHub runner
         shell: pwsh
         timeout-minutes: 15
@@ -155,3 +171,10 @@ jobs:
             ${{ runner.temp }}\dc-packaged-desktop-evidence\head.txt
           if-no-files-found: error
           retention-days: 7
+      - name: Remove isolated browser tooling
+        if: always()
+        shell: pwsh
+        run: |
+          $tools = Join-Path $env:RUNNER_TEMP ("dc-browser-tools-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $tools) { Remove-Item -LiteralPath $tools -Recurse -Force }
+          if (Test-Path -LiteralPath $tools) { throw 'BROWSER_TOOL_CLEANUP_FAILED' }
