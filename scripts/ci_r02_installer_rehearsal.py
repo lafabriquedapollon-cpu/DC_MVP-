@@ -64,7 +64,11 @@ def verify_public_ca(p, rel):
     require(starts and starts == ends and set(starts) == {b"CERTIFICATE"}
             and b"PRIVATE KEY" not in data, "INSTALL_NONCERTIFICATE_PEM_REFUSED")
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    context.load_verify_locations(cadata=data.decode("ascii"))
+    # Official CA bundles may contain non-ASCII descriptive comments.
+    # OpenSSL's native PEM file parser consumes the original verified bytes.
+    # Do not transcode, strip or repair the bundle.
+    context.load_verify_locations(cafile=str(p))
+    require(p.read_bytes() == data, "INSTALL_PUBLIC_CA_CHANGED_DURING_PARSE")
     require(context.cert_store_stats()["x509"] > 0, "INSTALL_PUBLIC_CA_X509_EMPTY")
     print("R02_INSTALLER_PUBLIC_CA_PASS package="+package+" sha256="+digest(p), flush=True)
 
