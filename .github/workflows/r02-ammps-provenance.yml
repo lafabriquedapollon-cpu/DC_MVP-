@@ -7,7 +7,7 @@ permissions:
   contents: read
 jobs:
   provenance-only:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -17,8 +17,10 @@ jobs:
         with:
           python-version: '3.12.10'
       - name: Exact HEAD and synthetic provenance regression
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          $ErrorActionPreference = 'Stop'
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:GITHUB_SHA) { throw 'HEAD_MISMATCH' }
           python -I -B scripts/ci_r02_ammps_provenance.py
+          if ($LASTEXITCODE -ne 0) { throw 'AMMPS_PROVENANCE_TEST_FAILED' }
