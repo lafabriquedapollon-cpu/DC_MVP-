@@ -3,6 +3,9 @@ No cabinet admission, no distribution, no patient data, no persistent OS changes
 """
 from contextlib import contextmanager
 import hashlib
+import base64
+from importlib import metadata
+import ssl
 import os
 from pathlib import Path
 import re
@@ -29,6 +32,43 @@ def digest(p):
         return hashlib.file_digest(f, "sha256").hexdigest()
 
 
+# Only the exact public CA resources of these locked dependencies may enter.
+_PUBLIC_CA = {
+    "_internal/certifi/cacert.pem": ("certifi", "2026.1.4", "certifi/cacert.pem"),
+    "_internal/grpc/_cython/_credentials/roots.pem": ("grpcio", "1.78.0", "grpc/_cython/_credentials/roots.pem"),
+}
+
+
+def verify_public_ca(p, rel):
+    if rel not in _PUBLIC_CA:
+        # Bundle paths originate from the public build. Never print contents.
+        safe = rel if re.fullmatch(r"[A-Za-z0-9_./-]{1,200}", rel) else "unidentified"
+        raise RuntimeError("INSTALL_UNAPPROVED_PEM_REFUSED path=" + safe)
+    package, version, wheel_path = _PUBLIC_CA[rel]
+    dist = metadata.distribution(package)
+    require(dist.version == version, "INSTALL_PUBLIC_CA_VERSION_MISMATCH")
+    entries = [entry for entry in (dist.files or ()) if entry.as_posix() == wheel_path]
+    require(len(entries) == 1, "INSTALL_PUBLIC_CA_RECORD_MISSING")
+    entry = entries[0]
+    require(entry.hash is not None and entry.hash.mode == "sha256" and entry.size is not None,
+            "INSTALL_PUBLIC_CA_RECORD_HASH_MISSING")
+    original = Path(dist.locate_file(entry)).resolve(strict=True)
+    require(original.is_file() and ordinary(original)
+            and original.is_relative_to(Path(sys.prefix).resolve(strict=True)), "INSTALL_PUBLIC_CA_ORIGIN_REFUSED")
+    data = p.read_bytes()
+    actual_hash = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
+    require(len(data) == entry.size and actual_hash == entry.hash.value
+            and data == original.read_bytes(), "INSTALL_PUBLIC_CA_IDENTITY_FAILED")
+    starts = re.findall(rb"-----BEGIN ([A-Z0-9 ]+)-----", data)
+    ends = re.findall(rb"-----END ([A-Z0-9 ]+)-----", data)
+    require(starts and starts == ends and set(starts) == {b"CERTIFICATE"}
+            and b"PRIVATE KEY" not in data, "INSTALL_NONCERTIFICATE_PEM_REFUSED")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(cadata=data.decode("ascii"))
+    require(context.cert_store_stats()["x509"] > 0, "INSTALL_PUBLIC_CA_X509_EMPTY")
+    print("R02_INSTALLER_PUBLIC_CA_PASS package="+package+" sha256="+digest(p), flush=True)
+
+
 def inventory(root):
     require(root.is_dir() and ordinary(root), "INSTALL_ROOT_INVALID")
     result = {}
@@ -42,19 +82,7 @@ def inventory(root):
                 and p.suffix.lower() not in {".db", ".sqlite", ".sqlite3", ".onnx", ".pt", ".pth", ".pfx", ".key"},
                 "INSTALL_PRIVATE_PAYLOAD_REFUSED")
         if p.suffix.lower() == ".pem":
-            # The normal PyInstaller certifi hook includes the public CA bundle.
-            # Allow only that exact dependency path, byte-identical to the installed wheel,
-            # with certificate-only PEM blocks (not a private key).
-            import importlib.util
-            spec = importlib.util.find_spec("certifi")
-            require(rel == "_internal/certifi/cacert.pem" and spec is not None and spec.origin,
-                    "INSTALL_UNAPPROVED_PEM_REFUSED")
-            public_ca = Path(spec.origin).parent / "cacert.pem"
-            pem = p.read_bytes()
-            labels = re.findall(rb"-----BEGIN ([A-Z0-9 ]+)-----",pem)
-            require(public_ca.is_file() and pem == public_ca.read_bytes() and labels
-                    and set(labels) == {b"CERTIFICATE"} and b"PRIVATE KEY" not in pem,
-                    "INSTALL_PUBLIC_CA_IDENTITY_FAILED")
+            verify_public_ca(p, rel)
         result[rel] = (p.stat().st_size, digest(p))
     return result
 
