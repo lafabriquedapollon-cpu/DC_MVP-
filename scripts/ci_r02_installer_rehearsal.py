@@ -91,6 +91,23 @@ def inventory(root):
     return result
 
 
+def directory_inventory(root):
+    """Include empty directories, which the file/hash inventory cannot see."""
+    require(root.is_dir() and ordinary(root), "INSTALL_ROOT_INVALID")
+    directories = set()
+    for p in root.rglob("*"):
+        require(ordinary(p), "INSTALL_REPARSE_REFUSED")
+        if p.is_dir():
+            directories.add(p.relative_to(root).as_posix())
+        else:
+            require(p.is_file(), "INSTALL_NONFILE_REFUSED")
+    return directories
+
+
+def assert_directory_inventory(root, expected):
+    require(directory_inventory(root) == expected, "INSTALLED_DIRECTORY_TREE_MUTATED")
+
+
 def run(command, env, cwd, timeout):
     p = subprocess.Popen([str(x) for x in command], env=env, cwd=cwd, stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)

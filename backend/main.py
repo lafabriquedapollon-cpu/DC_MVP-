@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 # --- CONFIGURATION CHEMINS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-os.makedirs(STATIC_DIR, exist_ok=True)
+# Static assets are read-only; never create directories inside the packaged code root.
 
 # --- CACHE LICENCES PER-USER ---
 # Structure : {email: (is_ok: bool, reason: str, cached_at: float)}
@@ -853,9 +853,9 @@ async def favicon():
 MEDIA_DIR = get_media_root()
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Mount pour les uploads locaux (dev & reports)
+# Legacy read fallback only. Mutable imaging uses get_imaging_root() outside the bundle.
+# Preserve historic lookup paths without creating or moving any clinical files.
 UPLOAD_DIR = os.path.join(BASE_DIR, "static", "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # --- P0.2 : PROTECTION DES FICHIERS PATIENTS ---------------------------------
 # Avant ce correctif, l'imagerie patient (panoramiques, céphalo) et les

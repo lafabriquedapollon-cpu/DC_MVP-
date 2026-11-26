@@ -64,8 +64,20 @@ with tempfile.TemporaryDirectory(prefix="dc-uninstall-payload-",dir=runner) as t
         path.parent.mkdir(parents=True,exist_ok=True)
         path.write_bytes(("synthetic "+str(i)).encode("ascii"))
     with policy.installed_bundle(source,runner) as installed:
-        # Simulate directories created at runtime without touching installed bytes.
+        # Prove the new invariant detects precisely the old false-green condition.
+        expected_dirs=policy.directory_inventory(installed)
+        expected_files=policy.inventory(installed)
+        policy.assert_directory_inventory(installed,expected_dirs)
         (installed/"_internal"/"synthetic-runtime-empty"/"nested").mkdir(parents=True)
+        policy.require(policy.inventory(installed)==expected_files,"SYNTHETIC_FILES_CHANGED")
+        try:
+            policy.assert_directory_inventory(installed,expected_dirs)
+        except RuntimeError as exc:
+            policy.require(str(exc)=="INSTALLED_DIRECTORY_TREE_MUTATED","WRONG_TREE_REFUSAL")
+        else:
+            raise RuntimeError("EMPTY_DIR_MUTATION_UNDETECTED")
+        print("R02_INSTALLER_EMPTY_DIR_MUTATION_DENIAL_PASS",flush=True)
+        # Retain the deliberately injected directories to exercise native + lab cleanup.
         policy.require(len(policy.inventory(source))==5051,"SYNTHETIC_PAYLOAD_COUNT_MISMATCH")
     policy.require(not installed.exists(),"INSTALL_DIR_STILL_EXISTS")
 print("R02_INSTALLER_LARGE_UNINSTALL_TARGETED_PASS files=5051",flush=True)

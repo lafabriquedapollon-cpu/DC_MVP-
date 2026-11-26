@@ -236,6 +236,19 @@ def main():
         from sqlalchemy import text
         require(database.engine.dialect.driver == "pysqlcipher", "SQLCIPHER_FALLBACK_REFUSED")
         print("R02_BACKEND_REAL_FASTAPI_IMPORT_PASS", flush=True)
+        if os.environ.get("DC_INSTALLER_REHEARSAL") == "true":
+            from backend.core.media_paths import get_imaging_root
+            imaging = get_imaging_root().resolve(strict=True)
+            require(imaging == root / "uploads" and ordinary(imaging),
+                    "INSTALLED_MEDIA_ROOT_NOT_ISOLATED")
+            sentinel = imaging / "ci-install-rehearsal-sentinel.bin"
+            if initial:
+                with sentinel.open("xb") as handle:
+                    handle.write(b"synthetic media persistence")
+            require(sentinel.is_file() and ordinary(sentinel)
+                    and sentinel.read_bytes() == b"synthetic media persistence",
+                    "INSTALLED_MEDIA_PERSISTENCE_FAILED")
+            print("R02_INSTALLER_MEDIA_PERSISTENCE_PASS", flush=True)
         if initial:
             from backend.scripts.ci_fresh_backend_rehearsal import main as baseline
             baseline()

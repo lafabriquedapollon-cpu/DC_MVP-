@@ -13,7 +13,7 @@ from importlib import metadata
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ci_r02_windows_desktop import stage_assets, desktop_cycle
-from ci_r02_installer_rehearsal import installed_bundle
+from ci_r02_installer_rehearsal import installed_bundle, directory_inventory, assert_directory_inventory
 
 
 def require(ok, marker):
@@ -161,6 +161,9 @@ def main():
     if installer_only:
         with installed_bundle(bundle, runner) as installed:
             installed_exe = installed / exe.name
+            installed_dirs = directory_inventory(installed)
+            require("_internal/backend/static/uploads" not in installed_dirs,
+                    "INSTALLED_LEGACY_UPLOAD_DIR_PRESENT")
             with tempfile.TemporaryDirectory(prefix="dc-backend-rehearsal-", dir=runner) as temp:
                 root = Path(temp).resolve(strict=True)
                 env = child_env(root, lab)
@@ -176,9 +179,22 @@ def main():
                 require(result.returncode == 1 and "marker=WINDOWS_CI_ONLY" in result.stdout
                         and set(root.iterdir()) == before, "INSTALLED_NON_CI_ADMISSION_FAILED")
                 print("R02_INSTALLER_NON_CI_RUNTIME_DENIAL_PASS", flush=True)
+                assert_directory_inventory(installed, installed_dirs)
+                # A runtime redirected to the installed tree must refuse before imports.
+                denied = dict(env)
+                denied["MEDIA_ROOT"] = str(installed / "_internal" / "backend" / "static" / "uploads")
+                result = subprocess.run([str(installed_exe), "init"], env=denied, cwd=root,
+                                        stdin=subprocess.DEVNULL, capture_output=True,
+                                        encoding="utf-8", errors="replace", timeout=60)
+                require(result.returncode == 1 and "marker=INVALID_ISOLATED_PATH MEDIA_ROOT" in result.stdout
+                        and set(root.iterdir()) == before, "INSTALLED_MEDIA_REDIRECTION_ACCEPTED")
+                assert_directory_inventory(installed, installed_dirs)
+                print("R02_INSTALLER_MEDIA_REDIRECTION_DENIAL_PASS", flush=True)
                 for stage in ("init", "serve", "restart"):
                     run([str(installed_exe), stage], env, root,
                         "R02_BACKEND_FROZEN_" + stage.upper() + "_PASS", 180)
+                    assert_directory_inventory(installed, installed_dirs)
+                    print("R02_INSTALLER_DIRECTORY_TREE_PASS stage=" + stage, flush=True)
                 print("R02_INSTALLER_INSTALLED_BACKEND_RESTART_PASS", flush=True)
             require(not root.exists(), "INSTALLED_DATA_LAB_RESIDUE")
         print("R02_INSTALLER_INTEGRATED_PASS", flush=True)
