@@ -7,15 +7,13 @@ on:
       - '.github/workflows/r02-trust02-lab.yml'
 permissions: {}
 jobs:
-  inert-provenance:
+  attest-inert:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
       attestations: write
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -26,7 +24,25 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-path: ${{ runner.temp }}/trust02-inert-subject.txt
+      - name: Cleanup inert subject
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/trust02-inert-subject.txt"
+  verify-inert:
+    needs: attest-inert
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Independently reconstruct inert subject
+        run: python3 scripts/ci_r02_trust02_lab.py make
       - name: Verify real provenance and synthetic owner approval
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci_r02_trust02_lab.py verify
       - name: Cleanup inert subject
         if: always()
