@@ -1,0 +1,24 @@
+name: R0.2 - AMMPS provenance targeted
+on:
+  push:
+    branches: [ci/r02-ammps-provenance-20261126]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  provenance-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Exact HEAD and synthetic provenance regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python -I -B scripts/ci_r02_ammps_provenance.py
