@@ -99,6 +99,11 @@ def main():
     repo = Path(__file__).resolve().parents[1]
     script = Path(__file__).resolve().with_name("ci_r02_backend_rehearsal_probe.py")
     native = lab / "native-bundle"
+    final_only = sys.argv[1:] == ["--desktop-final-only"]
+    require(not sys.argv[1:] or final_only, "UNEXPECTED_HARNESS_ARGUMENT")
+    if final_only:
+        require(os.environ.get("GITHUB_REF_NAME") == "ci/r02-desktop-final-20261126",
+                "FINAL_ONLY_BRANCH_REQUIRED")
     source = stage_source(repo, lab)
     assets, asset_manifest = stage_assets(repo, lab)
     with tempfile.TemporaryDirectory(prefix="dc-backend-rehearsal-", dir=runner) as temp:
@@ -148,12 +153,15 @@ def main():
                     and file.suffix.lower() not in {".db", ".sqlite", ".sqlite3", ".onnx", ".pt", ".pth"},
                     "FORBIDDEN_BUNDLE_PAYLOAD")
     print("R02_BACKEND_REAL_PE_BUILD_PASS", flush=True)
-    with tempfile.TemporaryDirectory(prefix="dc-backend-rehearsal-", dir=runner) as temp:
-        root = Path(temp)
-        env = child_env(root, lab)
-        for stage in ("init", "serve", "restart"):
-            run([str(exe), stage], env, root, "R02_BACKEND_FROZEN_" + stage.upper() + "_PASS", 180)
-    print("R02_BACKEND_SOURCE_FROZEN_RESTART_PASS", flush=True)
+    if not final_only:
+        with tempfile.TemporaryDirectory(prefix="dc-backend-rehearsal-", dir=runner) as temp:
+            root = Path(temp)
+            env = child_env(root, lab)
+            for stage in ("init", "serve", "restart"):
+                run([str(exe), stage], env, root, "R02_BACKEND_FROZEN_" + stage.upper() + "_PASS", 180)
+        print("R02_BACKEND_SOURCE_FROZEN_RESTART_PASS", flush=True)
+    else:
+        print("R02_DESKTOP_INTEGRATED_CLOSEOUT_ONLY", flush=True)
     with tempfile.TemporaryDirectory(prefix="dc-backend-rehearsal-", dir=runner) as temp:
         root = Path(temp)
         env = child_env(root, lab)
