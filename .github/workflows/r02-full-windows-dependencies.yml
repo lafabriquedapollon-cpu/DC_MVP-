@@ -7,7 +7,7 @@ permissions:
 jobs:
   full-runtime-dependencies:
     runs-on: windows-latest
-    timeout-minutes: 35
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,7 +36,7 @@ jobs:
             Write-Host ('R02_NATIVE_DLL_SHA256 ' + $dll + '=' + (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant())
           }
           Write-Host 'R02_MINGW_NATIVE_PROVISION_PASS'
-      - name: Qualify pinned Windows dependencies without starting the clinical application
+      - name: Qualify Windows dependencies and isolated synthetic backend
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -116,6 +116,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'NATIVE_BUNDLE_CLOSURE_FAILED' }
             & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_native_bundle_harness.py')
             if ($LASTEXITCODE -ne 0) { throw 'NATIVE_BUNDLE_REHEARSAL_FAILED' }
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_backend_rehearsal_harness.py')
+            if ($LASTEXITCODE -ne 0) { throw 'BACKEND_FROZEN_REHEARSAL_FAILED' }
           } finally {
             if (Test-Path -LiteralPath $lab) { Remove-Item -LiteralPath $lab -Recurse -Force }
           }
