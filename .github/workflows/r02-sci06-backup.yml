@@ -1,0 +1,68 @@
+name: SCI-06 exact source backup
+on:
+  push:
+    branches: [ci/r02-sci06-backup-20261126]
+permissions:
+  contents: read
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 1782a3e99e6e4c402f134c17938f14330a5132f0
+          persist-credentials: false
+      - name: Verify and package exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "1782a3e99e6e4c402f134c17938f14330a5132f0"
+          test "$(git rev-parse HEAD^{tree})" = "c1b3150099b876c62ff3b1192fcaa64531b13703"
+          git archive --format=zip --output="$RUNNER_TEMP/source.zip" HEAD
+          python - <<'PY'
+          import hashlib, json, os, pathlib, subprocess, zipfile, tempfile
+          p=pathlib.Path(os.environ["RUNNER_TEMP"])
+          source=p/"source.zip"
+          target=p/"DIGITAL_CROWN_BACKUP.zip"
+          head="1782a3e99e6e4c402f134c17938f14330a5132f0"
+          tree="c1b3150099b876c62ff3b1192fcaa64531b13703"
+          records=[]
+          with zipfile.ZipFile(source) as z, zipfile.ZipFile(target,"w",zipfile.ZIP_DEFLATED) as out:
+              for item in z.infolist():
+                  if item.is_dir(): continue
+                  name=item.filename
+                  assert not name.startswith("/") and ".." not in pathlib.PurePosixPath(name).parts
+                  assert not name.startswith("BACKUP-METADATA/")
+                  data=z.read(item)
+                  mode,typ,sha= subprocess.check_output(["git","ls-tree",head,"--",name],text=True).split("\t")[0].split()
+                  assert typ=="blob"
+                  assert hashlib.sha1(b"blob "+str(len(data)).encode()+b"\0"+data).hexdigest()==sha
+                  assert pathlib.PurePosixPath(name).suffix.lower() not in {".db",".sqlite",".sqlite3",".pem",".key",".pfx",".dcm",".zip"}
+                  assert pathlib.PurePosixPath(name).name not in {".env",".env.local","firebase_creds.json"}
+                  records.append({"path":name,"mode":mode,"git_blob":sha,"sha256":hashlib.sha256(data).hexdigest(),"bytes":len(data)})
+                  out.writestr(item,data)
+              assert len(records)==1277
+              out.writestr("BACKUP-METADATA/MANIFEST.json",json.dumps({"project":"Digital Crown","lot":"SCI-06","date":"2026-11-26","commit":head,"tree":tree,"source_count":len(records),"ci_run":45903729236,"clinical_release":False},indent=2))
+              out.writestr("BACKUP-METADATA/INVENTORY.json",json.dumps(records,indent=2))
+              out.writestr("BACKUP-METADATA/RESTORE.md","Restore source only to an isolated directory. Verify inventory SHA256 and Git blob/tree. No patient data, no clinical activation. Historical private profiles are separately governed; not bundled.")
+              out.writestr("BACKUP-METADATA/EVIDENCE.md","SCI-05 run 45903729236 success at exact HEAD. Synthetic HTTP/DB/Chromium tests only. TRUST-02 OWNER and J5 clinical certification remain blocked.")
+          with tempfile.TemporaryDirectory() as tmp,zipfile.ZipFile(target) as z:
+              assert z.testzip() is None
+              root=pathlib.Path(tmp)
+              subprocess.run(["git","init","-q",tmp],check=True)
+              for r in records:
+                  data=z.read(r["path"])
+                  assert hashlib.sha256(data).hexdigest()==r["sha256"]
+                  blob=subprocess.check_output(["git","-C",tmp,"hash-object","-w","--stdin"],input=data).decode().strip()
+                  assert blob==r["git_blob"]
+                  subprocess.run(["git","-C",tmp,"update-index","--add","--cacheinfo",r["mode"],blob,r["path"]],check=True)
+              assert subprocess.check_output(["git","-C",tmp,"write-tree"],text=True).strip()==tree
+          print("SCI06_ARCHIVE_PASS",len(records),target.stat().st_size,hashlib.sha256(target.read_bytes()).hexdigest(),tree)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sci06-verified-source
+          path: ${{ runner.temp }}/DIGITAL_CROWN_BACKUP.zip
+          retention-days: 1
+          compression-level: 0
