@@ -154,7 +154,7 @@ class ProvenanceTest(unittest.TestCase):
 if __name__ == "__main__":
     logging.disable(logging.CRITICAL)
     with tempfile.TemporaryDirectory(prefix="dc-ammps-source-") as tmp:
-        root=Path(tmp)
+        root=Path(tmp).resolve(strict=True)
         service=root/"backend"/"services"
         service.mkdir(parents=True)
         for package in (service,service.parent):
@@ -164,8 +164,23 @@ if __name__ == "__main__":
         sys.path.insert(0,str(root))
         med=importlib.import_module("backend.services.medication_dict")
         safety=importlib.import_module("backend.services.neo_prescription_safety")
-        assert Path(med.__file__).resolve().is_relative_to(root)
-        assert med._AMMPS_APPROVED_SNAPSHOT_SHA256 is None
+        # Windows may expand a short TEMP path when resolving module filenames.
+        # Compare both sides canonically, with exact filename and byte identity.
+        for name in ("medication_dict.py","neo_prescription_safety.py","neo_medication_evidence.py"):
+            module = sys.modules["backend.services."+name[:-3]]
+            actual = Path(module.__file__).resolve(strict=True)
+            expected = (service/name).resolve(strict=True)
+            if not actual.is_relative_to(root) or actual != expected:
+                raise RuntimeError("ISOLATED_MODULE_ORIGIN_MISMATCH "+name)
+            if actual.read_bytes() != (REPO/"backend"/"services"/name).read_bytes():
+                raise RuntimeError("ISOLATED_MODULE_BYTES_MISMATCH "+name)
+        for name, package in (("backend",service.parent),("backend.services",service)):
+            actual = Path(sys.modules[name].__file__).resolve(strict=True)
+            if actual != (package/"__init__.py").resolve(strict=True) or actual.read_bytes():
+                raise RuntimeError("ISOLATED_PACKAGE_ORIGIN_MISMATCH "+name)
+        if med._AMMPS_APPROVED_SNAPSHOT_SHA256 is not None:
+            raise RuntimeError("UNEXPECTED_AMMPS_APPROVAL")
+        print("R02_AMMPS_ISOLATED_MODULE_IDENTITY_PASS modules=3 packages=2",flush=True)
         result=unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(ProvenanceTest))
         if not result.wasSuccessful():
             raise SystemExit(1)
