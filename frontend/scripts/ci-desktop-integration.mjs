@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { certifyCompanionVault } from './ci-r02-vault.mjs';
 import {setTimeout as sleep} from 'node:timers/promises';
 const base = 'http://127.0.0.1:8008';
-const web = process.env.DC_PACKAGED_DESKTOP === 'true' ? base : 'http://127.0.0.1:5173';
+const packaged = process.env.DC_PACKAGED_DESKTOP === 'true';
+const web = packaged ? base : 'http://127.0.0.1:5173';
 const evidence = process.env.DC_EVIDENCE;
 const password = process.env.DC_SYNTH_PASSWORD;
 assert(process.env.GITHUB_ACTIONS === 'true' && password && evidence);
@@ -16,12 +17,25 @@ const wait = async (label, fn, ms=60000) => {
   }
   throw new Error(label+' timeout');
 };
-const target=await wait('CDP',async()=>{
-  const list=await (await fetch('http://127.0.0.1:9222/json/list')).json();
-  return list.find(t=>t.type==='page' && t.url.startsWith(web));
-});
+const cdpPort=packaged ? Number(process.env.DC_CDP_PORT) : 9222;
+assert(Number.isInteger(cdpPort)&&cdpPort>=1024&&cdpPort<=65535);
+const cdpOrigin='http://127.0.0.1:'+cdpPort;
+const restart=process.argv.includes('--verify-restart');
+const target=await wait('CDP_TARGET',async()=>{
+  const list=await (await fetch(cdpOrigin+'/json/list',{signal:AbortSignal.timeout(2000)})).json();
+  const pages=list.filter(t=>t.type==='page' &&
+    (t.url.startsWith(web+'/') || (packaged&&!restart&&t.url==='about:blank')));
+  return pages.length===1?pages[0]:false;
+},30000).catch(()=>{throw Error('CDP_TARGET_TIMEOUT')});
+const debugURL=new URL(target.webSocketDebuggerUrl);
+assert(debugURL.protocol==='ws:'&&debugURL.hostname==='127.0.0.1'&&Number(debugURL.port)===cdpPort&&debugURL.pathname.startsWith('/devtools/page/'));
 const ws=new WebSocket(target.webSocketDebuggerUrl);
-await new Promise((resolve,reject)=>{ws.addEventListener('open',resolve,{once:true});ws.addEventListener('error',reject,{once:true});});
+await new Promise((resolve,reject)=>{
+  const timer=setTimeout(()=>reject(Error('CDP_ATTACH_TIMEOUT')),10000);
+  ws.addEventListener('open',()=>{clearTimeout(timer);resolve()},{once:true});
+  ws.addEventListener('error',()=>{clearTimeout(timer);reject(Error('CDP_SOCKET_FAILED'))},{once:true});
+});
+if(packaged) console.log('R02_DESKTOP_CDP_ATTACH_PASS');
 let seq=0;
 const pending=new Map(), requests=new Map(), responses=[];
 ws.addEventListener('message',e=>{
@@ -115,7 +129,14 @@ const denied=async(path,headers,status,detail,label)=>{
 const verifyIdentity=()=>evalPage('Boolean(document.body && document.body.innerText.toUpperCase().includes("CI-SYNTHETIC") && document.body.innerText.toUpperCase().includes("FIXTURE"))');
 try {
   await call('Network.enable');await call('Page.enable');
-  if(process.argv.includes('--verify-restart')){
+  if(packaged&&!restart){
+    const nav=await call('Page.navigate',{url:web+'/login'});
+    if(nav.errorText)throw Error('CDP_NAVIGATION_FAILED');
+    await wait('packaged origin',async()=>await evalPage('location.origin')===web,15000)
+      .catch(()=>{throw Error('CDP_WRONG_ORIGIN')});
+    console.log('R02_DESKTOP_CDP_NAVIGATION_PASS');
+  }
+  if(restart){
     const id=Number(fs.readFileSync(process.env.DC_LAB_ROOT+'/synthetic-patient-id','utf8'));
     assert(Number.isSafeInteger(id)&&id>0);
     const cookie=await workstationCookie();

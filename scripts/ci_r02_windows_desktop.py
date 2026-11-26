@@ -78,6 +78,47 @@ def wait_health(proc, env):
     raise RuntimeError("DESKTOP_HEALTH_TIMEOUT")
 
 
+def verify_served_assets():
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    base = "http://127.0.0.1:8008"
+    with opener.open(base + "/login", timeout=5) as response:
+        page = response.read()
+        require(response.headers.get_content_type() == "text/html" and b'id="root"' in page,
+                "DESKTOP_LOGIN_HTML_MISMATCH")
+    with opener.open(base + "/build-manifest.json", timeout=5) as response:
+        manifest = json.load(response)
+        require(manifest["commit"] == os.environ["GITHUB_SHA"] and manifest["mode"] == "rehearsal",
+                "DESKTOP_SERVED_HEAD_MISMATCH")
+    with opener.open(base + "/pwa-sw.js", timeout=5) as response:
+        require("javascript" in response.headers.get_content_type() and b"push-sw.js" in response.read(),
+                "DESKTOP_SERVED_SW_MISMATCH")
+    print("R02_DESKTOP_SERVED_HTML_HEAD_SW_PASS", flush=True)
+
+
+def wait_cdp(browser, profile):
+    # A fresh isolated profile and browser-selected port prevent attachment to
+    # unrelated local CDP endpoints. Do not log targets or debugger URLs.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    port_file = profile / "DevToolsActivePort"
+    for _ in range(80):
+        require(browser.poll() is None, "DESKTOP_CHROMIUM_EXITED")
+        try:
+            lines = port_file.read_text(encoding="ascii").splitlines()
+            port = int(lines[0])
+            require(1024 <= port <= 65535 and len(lines) == 2
+                    and re.fullmatch(r"/devtools/browser/[a-f0-9-]+", lines[1]),
+                    "INVALID_CDP_PORT_FILE")
+            with opener.open(f"http://127.0.0.1:{port}/json/version", timeout=2) as response:
+                version = json.load(response)
+            require(version["webSocketDebuggerUrl"] == f"ws://127.0.0.1:{port}" + lines[1],
+                    "CDP_IDENTITY_MISMATCH")
+            print("R02_DESKTOP_CDP_ENDPOINT_PASS", flush=True)
+            return port
+        except (OSError, ValueError, IndexError, KeyError):
+            time.sleep(.5)
+    raise RuntimeError("DESKTOP_CDP_ENDPOINT_TIMEOUT")
+
+
 def browser_executable():
     roots = [os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")]
     for root in roots:
@@ -103,6 +144,9 @@ def desktop_cycle(repo, root, exe, env):
         "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "PROCESSOR_ARCHITECTURE",
         "NUMBER_OF_PROCESSORS", "SYSTEMDRIVE", "PATH", "HOME", "USERPROFILE",
         "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"}}
+    for name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramData", "PUBLIC", "HOMEDRIVE", "HOMEPATH"):
+        if name in os.environ:
+            browser_env[name.upper()] = os.environ[name]
     browser = None
     try:
         for stage in ("desktop-serve", "desktop-restart"):
@@ -112,16 +156,20 @@ def desktop_cycle(repo, root, exe, env):
                                         stdout=handle, stderr=subprocess.STDOUT)
                 try:
                     wait_health(proc, env)
+                    verify_served_assets()
                     if browser is None:
+                        profile = root / "chrome"
+                        require(not profile.exists(), "STALE_BROWSER_PROFILE")
                         browser = subprocess.Popen([str(browser_executable()), "--headless",
                             "--disable-background-networking", "--disable-sync", "--disable-extensions",
                             "--no-first-run", "--no-default-browser-check", "--disable-quic",
                             "--proxy-server=http://127.0.0.1:1", "--proxy-bypass-list=127.0.0.1;localhost;[::1]",
-                            "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost",
+                            "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1",
                             "--window-size=1440,900", "--remote-debugging-address=127.0.0.1",
-                            "--remote-debugging-port=9222", "--user-data-dir=" + str(root / "chrome"),
-                            "http://127.0.0.1:8008/login"], env=browser_env, cwd=root,
+                            "--remote-debugging-port=0", "--user-data-dir=" + str(profile),
+                            "about:blank"], env=browser_env, cwd=root,
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        driver_env["DC_CDP_PORT"] = str(wait_cdp(browser, profile))
                     command = [node, str(repo / "frontend/scripts/ci-desktop-integration.mjs")]
                     if stage == "desktop-restart":
                         command.append("--verify-restart")
@@ -131,8 +179,24 @@ def desktop_cycle(repo, root, exe, env):
                     for line in result.stdout.splitlines():
                         if re.fullmatch(r"[A-Z][A-Z0-9_]+_PASS(?: [A-Za-z0-9_.=+-]+)*", line):
                             print(line, flush=True)
+                        elif re.fullmatch(r"PWA_BROWSER_ACTIVE_STATIC_ONLY_PASS \{\"controlled\":(?:true|false),\"entries\":[0-9]+,\"apiEntries\":0,\"foreignEntries\":0\}", line):
+                            print(line, flush=True)
                         elif line.startswith("INTEGRATION_ERROR "):
-                            print("R02_DESKTOP_DRIVER_REPORTED_ERROR", flush=True)
+                            labels = ("login form", "actual PWA registration and precache",
+                                      "real login API", "dashboard", "authenticated profile GET",
+                                      "CrownBot launcher", "CrownBot chat tab", "default-off chat",
+                                      "patient form", "patient POST", "patient detail",
+                                      "patient detail API", "rendered patient identity",
+                                      "restart patient route", "restart patient GET", "restart patient identity")
+                            matched = next((label for label in labels if line == "INTEGRATION_ERROR " + label + " timeout"), None)
+                            print("R02_DESKTOP_DRIVER_REPORTED_ERROR" + (" phase=" + matched.replace(" ", "_") if matched else ""), flush=True)
+                    if result.returncode:
+                        # Print only bounded, predefined diagnostic codes, not arbitrary stderr.
+                        for code in ("CDP_TARGET_TIMEOUT", "CDP_SOCKET_FAILED", "CDP_ATTACH_TIMEOUT",
+                                     "CDP_NAVIGATION_FAILED", "CDP_WRONG_ORIGIN"):
+                            if code in result.stderr or code in result.stdout:
+                                print("R02_DESKTOP_DRIVER_FAILURE " + code, flush=True)
+                        print("R02_DESKTOP_DRIVER_EXIT rc=" + str(result.returncode), flush=True)
                     require(result.returncode == 0, "DESKTOP_BROWSER_FAILED")
                     (root / ("stop-" + stage)).touch(exist_ok=False)
                     require(proc.wait(timeout=25) == 0, "DESKTOP_SERVER_SHUTDOWN_FAILED")
