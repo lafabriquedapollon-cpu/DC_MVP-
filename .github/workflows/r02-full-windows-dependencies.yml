@@ -7,7 +7,7 @@ permissions:
 jobs:
   full-runtime-dependencies:
     runs-on: windows-latest
-    timeout-minutes: 55
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
         with:
@@ -16,6 +16,28 @@ jobs:
         with:
           python-version: '3.12.10'
           architecture: x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build guarded same-origin synthetic frontend
+        working-directory: frontend
+        shell: pwsh
+        env:
+          VITE_API_URL: http://127.0.0.1:8008
+          VITE_ENABLE_HTTPS: 'false'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($file in @('.env','.env.local','.env.production','.env.production.local')) {
+            if (Test-Path -LiteralPath $file) { throw 'PRIVATE_FRONTEND_ENV_REFUSED' }
+          }
+          npm ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'FRONTEND_DEPS_FAILED' }
+          npm run build:rehearsal
+          if ($LASTEXITCODE -ne 0) { throw 'FRONTEND_BUILD_FAILED' }
+          node scripts/ci-pwa-assets.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'PWA_ASSET_CONTRACT_FAILED' }
+          node --check scripts/ci-desktop-integration.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'BROWSER_DRIVER_SYNTAX_FAILED' }
       - name: Provision native MinGW64 libraries on disposable GitHub runner
         shell: pwsh
         timeout-minutes: 15
@@ -123,3 +145,13 @@ jobs:
           }
           if (Test-Path -LiteralPath $lab) { throw 'FULL_WINDOWS_LAB_CLEANUP_FAILED' }
           Write-Host 'R02_FULL_WINDOWS_DEPENDENCY_REHEARSAL_CLEANUP_PASS'
+      - name: Upload synthetic desktop screenshots only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r02-packaged-desktop-synthetic-evidence
+          path: |
+            ${{ runner.temp }}\dc-packaged-desktop-evidence\*.png
+            ${{ runner.temp }}\dc-packaged-desktop-evidence\head.txt
+          if-no-files-found: error
+          retention-days: 7

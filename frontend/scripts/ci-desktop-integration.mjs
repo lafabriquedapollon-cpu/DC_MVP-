@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { certifyCompanionVault } from './ci-r02-vault.mjs';
 import {setTimeout as sleep} from 'node:timers/promises';
 const base = 'http://127.0.0.1:8008';
-const web = 'http://127.0.0.1:5173';
+const web = process.env.DC_PACKAGED_DESKTOP === 'true' ? base : 'http://127.0.0.1:5173';
 const evidence = process.env.DC_EVIDENCE;
 const password = process.env.DC_SYNTH_PASSWORD;
 assert(process.env.GITHUB_ACTIONS === 'true' && password && evidence);

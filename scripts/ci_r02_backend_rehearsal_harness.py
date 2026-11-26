@@ -10,6 +10,9 @@ import subprocess
 import sys
 import tempfile
 from importlib import metadata
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_r02_windows_desktop import stage_assets, desktop_cycle
 
 
 def require(ok, marker):
@@ -97,6 +100,7 @@ def main():
     script = Path(__file__).resolve().with_name("ci_r02_backend_rehearsal_probe.py")
     native = lab / "native-bundle"
     source = stage_source(repo, lab)
+    assets, asset_manifest = stage_assets(repo, lab)
     with tempfile.TemporaryDirectory(prefix="dc-backend-rehearsal-", dir=runner) as temp:
         root = Path(temp)
         env = child_env(root, lab)
@@ -115,10 +119,12 @@ def main():
     packages = sorted({d.metadata["Name"] for d in metadata.distributions()
                        if d.metadata.get("Name") and re.fullmatch(r"[A-Za-z0-9_.-]+", d.metadata["Name"])})
     code = "from PyInstaller.utils.hooks import collect_data_files, copy_metadata\n"
-    code += "datas = " + repr([(str(source / "backend/templates"), "backend/templates")]) + "\n"
+    code += "datas = " + repr([(str(source / "backend/templates"), "backend/templates"),
+                              (str(assets), "frontend/dist"),
+                              (str(asset_manifest), ".")]) + "\n"
     code += "datas += collect_data_files('weasyprint') + collect_data_files('tzdata')\n"
     code += "for package in " + repr(packages) + ":\n    datas += copy_metadata(package)\n"
-    code += "a = Analysis(" + repr([str(script)]) + ", pathex=" + repr([str(source), str(script.parent)]) + ", binaries=" + repr([(str(ffi), ".")]) + ", datas=datas, hiddenimports=" + repr(sorted(observed)) + ", excludes=['pytest', 'IPython', 'jupyter', 'matplotlib.tests'], noarchive=False)\n"
+    code += "a = Analysis(" + repr([str(script)]) + ", pathex=" + repr([str(source), str(script.parent)]) + ", binaries=" + repr([(str(ffi), ".")]) + ", datas=datas, hiddenimports=" + repr(sorted(observed | {"backend.scripts.ci_desktop_integration"})) + ", excludes=['pytest', 'IPython', 'jupyter', 'matplotlib.tests'], noarchive=False)\n"
     code += "pyz = PYZ(a.pure)\nexe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='dc_backend_rehearsal', console=True, upx=False)\n"
     code += "coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='dc_backend_rehearsal')\n"
     spec.write_text(code, encoding="utf-8")
@@ -148,6 +154,14 @@ def main():
         for stage in ("init", "serve", "restart"):
             run([str(exe), stage], env, root, "R02_BACKEND_FROZEN_" + stage.upper() + "_PASS", 180)
     print("R02_BACKEND_SOURCE_FROZEN_RESTART_PASS", flush=True)
+    with tempfile.TemporaryDirectory(prefix="dc-backend-rehearsal-", dir=runner) as temp:
+        root = Path(temp)
+        env = child_env(root, lab)
+        env["DC_SYNTH_PASSWORD"] = secrets.token_urlsafe(24)
+        env["DC_DESKTOP_HEAD"] = os.environ["GITHUB_SHA"]
+        env["ALLOWED_ORIGINS"] = "http://127.0.0.1:8008"
+        run([str(exe), "desktop-init"], env, root, "R02_BACKEND_FROZEN_DESKTOP-INIT_PASS", 180)
+        desktop_cycle(repo, root, exe, env)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """CI-only actual backend startup rehearsal; never a cabinet launcher."""
 import asyncio
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -101,11 +102,11 @@ def http(port, path, expected=200):
     return json.loads(payload)
 
 
-async def exercise_http(app):
+async def exercise_http(app, desktop=False, stop_file=None):
     import uvicorn
     from backend.services.panoramic_service import panoramic_engine
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
+        listener.bind(("127.0.0.1", 8008 if desktop else 0))
         port = listener.getsockname()[1]
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port,
                                                lifespan="on", loop="asyncio",
@@ -144,6 +145,19 @@ async def exercise_http(app):
                 return False
             require(await asyncio.to_thread(denied), "UNAUTHENTICATED_PATIENT_READ_NOT_DENIED")
             print("R02_BACKEND_LOOPBACK_HEALTH_AUTH_DENIAL_PASS", flush=True)
+            if desktop:
+                require(stop_file is not None and not stop_file.exists(), "STALE_STOP_FILE")
+                print("R02_DESKTOP_LOOPBACK_READY", flush=True)
+                for _ in range(3600):
+                    if stop_file.is_file():
+                        require(ordinary(stop_file) and stop_file.stat().st_size == 0,
+                                "INVALID_STOP_FILE")
+                        break
+                    if task.done():
+                        raise RuntimeError("DESKTOP_SERVER_EARLY_EXIT")
+                    await asyncio.sleep(0.1)
+                else:
+                    raise RuntimeError("DESKTOP_RUN_TIMEOUT")
         finally:
             server.should_exit = True
             await asyncio.wait_for(task, timeout=12)
@@ -156,9 +170,10 @@ def main():
     frozen = bool(getattr(sys, "frozen", False))
     require(len(sys.argv) == (2 if frozen else 4), "INVALID_ARGUMENTS")
     stage = sys.argv[1]
-    require(stage in {"init", "serve", "restart"}, "INVALID_STAGE")
-    require((stage == "init" and not db.exists()) or (stage != "init" and db.is_file()),
-            "INVALID_DB_STATE")
+    desktop = stage in {"desktop-init", "desktop-serve", "desktop-restart"}
+    require(stage in {"init", "serve", "restart"} or (desktop and frozen), "INVALID_STAGE")
+    initial = stage in {"init", "desktop-init"}
+    require((initial and not db.exists()) or (not initial and db.is_file()), "INVALID_DB_STATE")
     source = Path(sys._MEIPASS) if frozen else Path(sys.argv[2]).resolve(strict=True)
     native = Path(sys.executable).parent / "native" if frozen else Path(sys.argv[3]).resolve(strict=True)
     require(source.is_relative_to(Path(os.environ["RUNNER_TEMP"]).resolve())
@@ -166,6 +181,16 @@ def main():
     require(not (source / "backend" / ".env").exists()
             and not (source / "backend" / ".env.local").exists(), "PRIVATE_ENV_REFUSED")
     require(not (source / "backend" / "ai_models").exists(), "MODEL_DIRECTORY_REFUSED")
+    if desktop:
+        dist = source / "frontend" / "dist"
+        manifest = json.loads((source / "desktop-assets.json").read_text(encoding="utf-8"))
+        require(manifest["sha"] == os.environ["DC_DESKTOP_HEAD"], "FRONTEND_HEAD_MISMATCH")
+        expected = manifest["files"]
+        actual = {p.relative_to(dist).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                  for p in dist.rglob("*") if p.is_file() and ordinary(p)}
+        require(actual == expected and "index.html" in actual and "pwa-sw.js" in actual,
+                "FRONTEND_ASSET_SET_MISMATCH")
+        print("R02_DESKTOP_ASSET_INTEGRITY_PASS", flush=True)
     listed = verify(native)
     verify_single_ffi(frozen)
     win = Path(os.environ["SystemRoot"]).resolve(strict=True)
@@ -191,27 +216,49 @@ def main():
         from sqlalchemy import text
         require(database.engine.dialect.driver == "pysqlcipher", "SQLCIPHER_FALLBACK_REFUSED")
         print("R02_BACKEND_REAL_FASTAPI_IMPORT_PASS", flush=True)
-        if stage == "init":
+        if initial:
             from backend.scripts.ci_fresh_backend_rehearsal import main as baseline
             baseline()
-            with database.engine.begin() as conn:
-                conn.execute(models.Base.metadata.tables["users"].insert().values(
-                    id=1, email="ci-frozen-fixture@example.invalid",
-                    hashed_password="INVALID-NOT-A-PASSWORD-HASH",
-                    is_active=False, is_licensed=False, is_archived=True, is_suspended=True,
-                ))
+            if desktop:
+                from backend.scripts.ci_desktop_integration import main as fixture
+                old = sys.argv[:]
+                try:
+                    sys.argv = [old[0], "seed"]
+                    fixture()
+                finally:
+                    sys.argv = old
+            else:
+                with database.engine.begin() as conn:
+                    conn.execute(models.Base.metadata.tables["users"].insert().values(
+                        id=1, email="ci-frozen-fixture@example.invalid",
+                        hashed_password="INVALID-NOT-A-PASSWORD-HASH",
+                        is_active=False, is_licensed=False, is_archived=True, is_suspended=True,
+                    ))
         else:
             assert_database_at_current_head(database.engine)
-            asyncio.run(exercise_http(app))
+            asyncio.run(exercise_http(app, desktop=desktop, stop_file=root / ("stop-" + stage)))
+            if desktop:
+                from backend.scripts.ci_desktop_integration import main as fixture
+                old = sys.argv[:]
+                try:
+                    sys.argv = [old[0], "verify"]
+                    fixture()
+                finally:
+                    sys.argv = old
         with database.engine.connect() as conn:
             require(bool(conn.execute(text("PRAGMA cipher_version")).scalar()), "CIPHER_MISSING")
             require(conn.execute(text("PRAGMA foreign_keys")).scalar() == 1, "FK_DISABLED")
             require(conn.execute(text("PRAGMA integrity_check")).scalar() == "ok", "DB_INTEGRITY_FAILED")
             require(not conn.execute(text("PRAGMA foreign_key_check")).all(), "FK_INTEGRITY_FAILED")
-            require(conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 1
-                    and conn.execute(text("SELECT COUNT(*) FROM users WHERE email='ci-frozen-fixture@example.invalid'")).scalar() == 1
-                    and conn.execute(text("SELECT COUNT(*) FROM patients")).scalar() == 0,
-                    "SYNTHETIC_PERSISTENCE_FAILED")
+            if desktop:
+                require(conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 3
+                        and conn.execute(text("SELECT COUNT(*) FROM patients")).scalar() == (0 if initial else 1),
+                        "DESKTOP_SYNTHETIC_PERSISTENCE_FAILED")
+            else:
+                require(conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 1
+                        and conn.execute(text("SELECT COUNT(*) FROM users WHERE email='ci-frozen-fixture@example.invalid'")).scalar() == 1
+                        and conn.execute(text("SELECT COUNT(*) FROM patients")).scalar() == 0,
+                        "SYNTHETIC_PERSISTENCE_FAILED")
         database.engine.dispose()
         try:
             with sqlite3.connect(db) as plain:
