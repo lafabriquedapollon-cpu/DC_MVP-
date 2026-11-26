@@ -1,0 +1,23 @@
+name: R0.2 SCI-03 reader guards
+on:
+  push:
+    branches: [ci/r02-sci03-20261126]
+permissions:
+  contents: read
+jobs:
+  reader-guards:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Exact HEAD synthetic reader tests
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw 'HEAD_MISMATCH' }
+          node --experimental-strip-types --test scripts/ci_r02_sci03.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'SCI03_FAILED' }

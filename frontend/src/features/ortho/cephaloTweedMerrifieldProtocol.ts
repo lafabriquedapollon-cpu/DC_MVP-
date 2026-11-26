@@ -33,6 +33,15 @@ export const readTweedMerrifieldProtocolProjection = (
     profile.protocol_profile_id !== 'TWEED_MERRIFIELD_DC_PROTOCOL_PROFILE_V1' ||
     !Array.isArray(profile.rows)
   ) return null;
+  if (profile.final_gate?.gate !== 'ORTHO_ANALYSIS_PROTOCOLS_VERIFIED' ||
+      profile.final_gate?.status !== 'OPEN' ||
+      profile.rows.length !== 4 ||
+      new Set(profile.rows.map((row: any) => row?.canonical_measurement_id)).size !== profile.rows.length ||
+      profile.rows.some((row: any) => !row || typeof row.canonical_measurement_id !== 'string' ||
+        row.classification_authority !== false ||
+        (row.availability_status !== 'AVAILABLE' && row.value !== null) ||
+        (row.availability_status === 'AVAILABLE' &&
+          (typeof row.value !== 'number' || !Number.isFinite(row.value))))) return null;
   return profile as TweedMerrifieldProtocolProjection;
 };
 
