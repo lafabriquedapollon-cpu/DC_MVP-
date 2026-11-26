@@ -191,12 +191,88 @@ end;
     return script
 
 
-def wait_absent(dest):
-    for _ in range(120):
-        if not dest.exists():
+def residual_inventory(dest, root):
+    """Inspect without following reparse points or disclosing file contents."""
+    require(root.is_dir() and ordinary(root) and root.parent.resolve(strict=True) ==
+            Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+            and root.name.startswith("dc-installer-rehearsal-")
+            and dest == root / "installed", "UNINSTALL_SCOPE_REFUSED")
+    dirs, files, unsafe = [], [], []
+    def visit(path):
+        if not ordinary(path):
+            unsafe.append(path)
             return
-        time.sleep(.25)
-    raise RuntimeError("UNINSTALL_RESIDUE")
+        if path.is_dir():
+            dirs.append(path)
+            for child in path.iterdir():
+                visit(child)
+        else:
+            files.append(path)
+    # lstat also sees a dangling symlink. Do not resolve an untrusted destination.
+    try:
+        dest.lstat()
+    except FileNotFoundError:
+        return dirs, files, unsafe
+    visit(dest)
+    return dirs, files, unsafe
+
+
+def cleanup_empty_residue(dest, root):
+    """After successful native uninstall, remove ONLY empty ordinary lab dirs.
+    Never delete a remaining file or traverse a reparse point. No clinical use.
+    """
+    dirs, files, unsafe = residual_inventory(dest, root)
+    require(not files and not unsafe, "UNINSTALL_NONEMPTY_OR_REPARSE_RESIDUE")
+    for path in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+        require(ordinary(path) and path.is_dir(), "UNINSTALL_DIR_CHANGED")
+        path.rmdir()  # atomic refusal if not empty; no rmtree or recursive file deletion
+    require(not dest.exists() and not dest.is_symlink(), "UNINSTALL_EMPTY_DIR_CLEANUP_FAILED")
+    return len(dirs)
+
+
+def wait_absent(dest, root, log):
+    # Inno may launch a self-removal helper after the main process exits.
+    # Wait for the actual payload files to disappear, not just an exit code.
+    deadline = time.monotonic() + 120
+    while True:
+        try:
+            dirs, files, unsafe = residual_inventory(dest, root)
+        except FileNotFoundError:
+            # Self-removal may race this read. Reinspect, never delete on a race.
+            if time.monotonic() >= deadline:
+                raise RuntimeError("UNINSTALL_RESIDUE_INSPECTION_RACE") from None
+            time.sleep(.25)
+            continue
+        if not dirs and not files and not unsafe:
+            print("R02_INSTALLER_NATIVE_UNINSTALL_NO_RESIDUE_PASS", flush=True)
+            return
+        if unsafe:
+            raise RuntimeError("UNINSTALL_REPARSE_RESIDUE")
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(.5)
+    # The installer process returned success; classify the actual remainder.
+    print(f"R02_INSTALLER_NATIVE_RESIDUE dirs={len(dirs)} files={len(files)} unsafe={len(unsafe)}",flush=True)
+    for p in (files + unsafe + dirs)[:30]:
+        rel = p.relative_to(root).as_posix()
+        safe = rel if re.fullmatch(r"[A-Za-z0-9_./ -]{1,240}",rel) else "unidentified"
+        print("R02_INSTALLER_RESIDUAL_PATH "+safe,flush=True)
+    if files or unsafe:
+        # The log contains only disposable installer paths. Emit aggregate error
+        # categories, not raw lines, contents, host identifiers or lab tokens.
+        if log.is_file():
+            text = log.read_bytes().decode("utf-8",errors="replace").lower()
+            for label, patterns in (
+                ("DELETE_FAILURE",("could not delete","failed to delete","deletefile failed")),
+                ("DIRECTORY_FAILURE",("could not remove directory","failed to remove directory")),
+                ("RESTART_REQUIRED",("restart required","reboot required","restartreplace")),
+            ):
+                print("R02_INSTALLER_UNINSTALL_LOG_"+label+" count="+
+                      str(sum(text.count(p) for p in patterns)),flush=True)
+        raise RuntimeError("UNINSTALL_NONEMPTY_RESIDUE")
+    # Distinguish native uninstallation from the explicit lab empty-dir cleanup.
+    count = cleanup_empty_residue(dest, root)
+    print("R02_INSTALLER_EMPTY_DIR_CLOSEOUT_PASS dirs="+str(count),flush=True)
 
 
 @contextmanager
@@ -265,9 +341,11 @@ def installed_bundle(bundle, runner, negative=False):
             yield dest
             require(inventory(dest)==actual,"INSTALLED_PAYLOAD_MUTATED")
         finally:
-            require(run([uninstaller,"/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART"],env,root,900)==0,
+            uninstall_log=root/"uninstall.log"
+            require(run([uninstaller,"/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART",
+                         "/LOG="+str(uninstall_log)],env,root,900)==0,
                     "INNO_UNINSTALL_FAILED")
-            wait_absent(dest)
+            wait_absent(dest,root,uninstall_log)
             require((root/"outside-sentinel.txt").read_bytes()==b"synthetic preserve","UNINSTALL_OUTSIDE_MUTATION")
             print("R02_INSTALLER_UNINSTALL_CLEAN_PASS",flush=True)
     require(not root.exists(),"INSTALL_LAB_RESIDUE")
