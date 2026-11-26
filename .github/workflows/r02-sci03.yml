@@ -19,5 +19,5 @@ jobs:
         shell: pwsh
         run: |
           if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw 'HEAD_MISMATCH' }
-          node --experimental-strip-types --test scripts/ci_r02_sci03.test.ts
+          node --experimental-strip-types --test scripts/ci_r02_sci03.test.mts
           if ($LASTEXITCODE -ne 0) { throw 'SCI03_FAILED' }
