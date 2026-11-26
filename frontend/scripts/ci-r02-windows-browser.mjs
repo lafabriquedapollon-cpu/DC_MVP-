@@ -5,6 +5,7 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {setTimeout as sleep} from 'node:timers/promises';
+import {detachSession,closeContext} from './ci-r02-browser-lifecycle.mjs';
 
 const root=process.env.DC_LAB_ROOT;
 const tools=process.env.DC_BROWSER_TOOLS;
@@ -34,7 +35,7 @@ async function runDriver(page,restart){
   }finally{
     process.argv=old;
     delete globalThis.__dcDesktopCDP;
-    await session.detach().catch(()=>{});
+    await detachSession(session);
   }
 }
 try{
@@ -57,6 +58,9 @@ try{
   assert(fs.existsSync(signal),'RESTART_SIGNAL_TIMEOUT');
   phase='RESTART';
   await runDriver(page,true);
+  phase='CLOSE_CONTEXT';
+  await closeContext(context);
+  context=null;
   fs.writeFileSync(path.join(root,'browser-restart-pass'),'',{flag:'wx'});
   console.log('R02_DESKTOP_PIPE_BROWSER_RESTART_PASS');
 }catch(error){
@@ -64,5 +68,5 @@ try{
   console.log('R02_DESKTOP_PIPE_FAILURE phase='+phase+' type='+type);
   process.exitCode=1;
 }finally{
-  if(context)await context.close();
+  if(context)await closeContext(context);
 }

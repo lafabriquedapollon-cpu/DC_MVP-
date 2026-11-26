@@ -4,6 +4,18 @@ import http from 'node:http';
 import fs from 'node:fs';
 import ts from 'typescript';
 import assert from 'node:assert/strict';
+// CI fixture only; terminate all owned sockets after assertions.
+export function closeVaultFixture(server,sockets){
+  return new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(Error('VAULT_FIXTURE_CLOSE_TIMEOUT')),5000);
+    server.close(error=>{
+      clearTimeout(timer);
+      if(error)reject(error);else resolve();
+    });
+    server.closeAllConnections();
+    for(const socket of sockets)socket.destroy();
+  });
+}
 export async function certifyCompanionVault(call,evalPage,wait){
   const source=fs.readFileSync(new URL('../src/features/patient-companion/PatientCompanionStorage.ts',import.meta.url),'utf8');
   const result=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext},reportDiagnostics:true});
@@ -12,6 +24,11 @@ export async function certifyCompanionVault(call,evalPage,wait){
     if(req.url==='/vault.mjs'){res.writeHead(200,{'Content-Type':'text/javascript','Cache-Control':'no-store'});return res.end(result.outputText)}
     if(req.url==='/'){res.writeHead(200,{'Content-Type':'text/html','Cache-Control':'no-store'});return res.end('<!doctype html><title>Synthetic vault lab</title>')}
     res.writeHead(404);res.end();
+  });
+  const sockets=new Set();
+  server.on('connection',socket=>{
+    sockets.add(socket);
+    socket.once('close',()=>sockets.delete(socket));
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve)});
   const origin='http://127.0.0.1:'+server.address().port;
@@ -48,5 +65,9 @@ export async function certifyCompanionVault(call,evalPage,wait){
       await s.clear();if((await s.load()).pairings.length!==0)throw Error('vault retained');return true;
     })()`);
     assert.equal(reloaded,true);console.log('COMPANION_REAL_VAULT_RELOAD_DELETE_CLEAR_PASS');
-  }finally{await new Promise(resolve=>server.close(resolve))}
+  }finally{
+    await closeVaultFixture(server,sockets);
+    assert.equal(server.listening,false);
+    console.log('COMPANION_FIXTURE_HTTP_CLOSE_PASS');
+  }
 }

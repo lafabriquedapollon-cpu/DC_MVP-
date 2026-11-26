@@ -1,0 +1,52 @@
+name: R0.2 - targeted Windows browser teardown
+on:
+  push:
+    branches: [ci/r02-desktop-closeout-20261126]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  teardown-only:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.3'
+      - name: Qualify real browser teardown only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP ('dc-closeout-' + [guid]::NewGuid().ToString('N'))
+          $tools = Join-Path $env:RUNNER_TEMP ('dc-browser-tools-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $root,$tools | Out-Null
+          try {
+            '{"private":true,"name":"dc-closeout-ci","version":"0.0.0"}' | Set-Content -LiteralPath (Join-Path $tools 'package.json') -Encoding ascii
+            npm install --prefix $tools --ignore-scripts --no-audit --no-fund --save-exact --registry https://registry.npmjs.org playwright-core@1.61.0
+            if ($LASTEXITCODE -ne 0) { throw 'PLAYWRIGHT_INSTALL_FAILED' }
+            Push-Location frontend
+            try {
+              npm ci --ignore-scripts --no-audit --no-fund
+              if ($LASTEXITCODE -ne 0) { throw 'LOCKED_FRONTEND_TOOLS_FAILED' }
+            } finally { Pop-Location }
+            $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $tools 'browsers'
+            node (Join-Path $tools 'node_modules\playwright-core\cli.js') install chromium
+            if ($LASTEXITCODE -ne 0) { throw 'CHROMIUM_INSTALL_FAILED' }
+            $env:DC_CLOSEOUT_ROOT = $root
+            $env:DC_BROWSER_TOOLS = $tools
+            foreach ($name in @('HOME','USERPROFILE','APPDATA','LOCALAPPDATA','TEMP','TMP')) { Set-Item -Path "env:$name" -Value $root }
+            foreach ($file in @('ci-r02-vault.mjs','ci-r02-browser-lifecycle.mjs','ci-r02-windows-browser.mjs','ci-r02-browser-closeout.mjs')) {
+              node --check (Join-Path $env:GITHUB_WORKSPACE ('frontend\scripts\' + $file))
+              if ($LASTEXITCODE -ne 0) { throw 'SYNTAX_FAILED' }
+            }
+            node (Join-Path $env:GITHUB_WORKSPACE 'frontend\scripts\ci-r02-browser-closeout.mjs')
+            if ($LASTEXITCODE -ne 0) { throw 'BROWSER_CLOSEOUT_FAILED' }
+          } finally {
+            if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+            if (Test-Path -LiteralPath $tools) { Remove-Item -LiteralPath $tools -Recurse -Force }
+          }
+          if ((Test-Path -LiteralPath $root) -or (Test-Path -LiteralPath $tools)) { throw 'CLEANUP_FAILED' }
+          Write-Host 'R02_CLOSEOUT_LAB_CLEANUP_PASS'

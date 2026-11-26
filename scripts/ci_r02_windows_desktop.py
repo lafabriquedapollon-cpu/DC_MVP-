@@ -101,7 +101,10 @@ def wait_signal(controller, path, timeout):
         if path.is_file():
             require(not path.is_symlink() and path.stat().st_size == 0, "INVALID_BROWSER_SIGNAL")
             return
-        require(controller.poll() is None, "DESKTOP_PIPE_CONTROLLER_EXITED")
+        if controller.poll() is not None:
+            require(path.is_file() and not path.is_symlink() and path.stat().st_size == 0,
+                    "DESKTOP_PIPE_CONTROLLER_EXITED")
+            return
         time.sleep(.25)
     raise RuntimeError("DESKTOP_PIPE_PHASE_TIMEOUT")
 
@@ -163,8 +166,8 @@ def desktop_cycle(repo, root, exe, env):
                             wait_signal(controller, root / "browser-first-pass", 300)
                         else:
                             (root / "browser-restart-ready").touch(exist_ok=False)
-                            require(controller.wait(timeout=300) == 0, "DESKTOP_BROWSER_RESTART_FAILED")
-                            require((root / "browser-restart-pass").is_file(), "DESKTOP_RESTART_SIGNAL_MISSING")
+                            wait_signal(controller, root / "browser-restart-pass", 300)
+                            require(controller.wait(timeout=20) == 0, "DESKTOP_BROWSER_RESTART_FAILED")
                         (root / ("stop-" + stage)).touch(exist_ok=False)
                         require(proc.wait(timeout=25) == 0, "DESKTOP_SERVER_SHUTDOWN_FAILED")
                     finally:
