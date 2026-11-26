@@ -61,7 +61,7 @@ def stage_source(repo, lab):
     source.mkdir()
     git = shutil.which("git")
     require(bool(git), "GIT_MISSING")
-    names = subprocess.check_output([git, "-C", str(repo), "ls-files", "-z", "--", "backend", "dc_release_gate"],
+    names = subprocess.check_output([git, "-C", str(repo), "ls-files", "-z", "--", "backend", "dc_release_gate", "relay"],
                                     timeout=20).decode("utf-8").split("\0")
     count = 0
     for name in names:
@@ -81,7 +81,9 @@ def stage_source(repo, lab):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(file, target)
         count += 1
-    require((source / "backend/main.py").is_file() and count > 400, "INCOMPLETE_BACKEND_SOURCE")
+    require(all((source / name).is_file() for name in (
+        "backend/main.py", "relay/__init__.py", "relay/contract.py", "dc_release_gate/__init__.py"
+    )) and count > 400, "INCOMPLETE_BACKEND_SOURCE")
     print("R02_BACKEND_STAGED_SOURCE_PASS files=" + str(count), flush=True)
     return source
 
