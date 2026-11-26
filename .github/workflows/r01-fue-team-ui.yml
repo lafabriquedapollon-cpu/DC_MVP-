@@ -1,7 +1,7 @@
 name: R0.1 FUE team archive UI
 on:
   push:
-    branches: [ci/r01-fue-team-ui-20261125, ci/r03-convergence-20261126, ci/r03-conv02-team-reload-20261126]
+    branches: [ci/r01-fue-team-ui-20261125, ci/r03-convergence-20261126, ci/r03-conv02-team-reload-20261126, ci/r03-conv02-team-nav-20261126]
     paths: ['.github/workflows/r01-fue-team-ui.yml', 'backend/**', 'frontend/**']
   workflow_dispatch:
 permissions:

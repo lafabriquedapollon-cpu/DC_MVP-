@@ -150,9 +150,48 @@ try {
   assert.equal((await api('/api/team/'+memberId+'/approve',{method:'POST',headers:teamHeaders})).status,200);
   const quotaBefore=await api('/api/team/quota',{headers:teamHeaders});
   assert.equal(quotaBefore.status,200);
-  await call('Page.navigate',{url:web+'/settings'});
-  await wait('team settings tab',()=>evalPage('Array.from(document.querySelectorAll("nav button")).some(b=>b.innerText.includes("Mon Équipe"))'));
-  assert(await evalPage('(()=>{const b=Array.from(document.querySelectorAll("nav button")).find(b=>b.innerText.includes("Mon Équipe"));if(!b)return false;b.click();return true})()'));
+  // Shared navigation protocol for initial entry and reload. Wait for the
+  // actual new document, then observe and operate on the same live DOM.
+  const openTeam=async (phase,navigate)=>{
+    const previousOrigin=await evalPage('performance.timeOrigin');
+    const responseFloor=responses.length;
+    let observed=null;
+    const inspect=async click=>evalPage('('+((click)=>{
+      const nav=document.querySelector('[data-tour="settings-navigation"]');
+      const b=nav && Array.from(nav.querySelectorAll('button')).find(x=>x.textContent.includes('Mon Équipe'));
+      const selected=Boolean(document.querySelector('.settings-team-surface'));
+      const available=Boolean(b&&!b.disabled&&b.getClientRects().length);
+      const state={origin:performance.timeOrigin,path:location.pathname,ready:document.readyState,
+                   nav:!!nav,available,selected};
+      if(click&&state.path==='/settings'&&state.ready==='complete'&&available&&!selected)b.click();
+      return state;
+    }).toString()+')('+JSON.stringify(click)+')');
+    try {
+      const navResult=await navigate();
+      assert(!navResult?.errorText,'CDP navigation failed');
+      await wait(phase+' new settings document',async()=>{
+        observed=await inspect(false);
+        return observed.origin!==previousOrigin&&observed.path==='/settings'&&observed.ready==='complete';
+      });
+      await wait(phase+' team selection',async()=>{
+        observed=await inspect(false);
+        if(observed.origin===previousOrigin||observed.path!=='/settings'||observed.ready!=='complete')return false;
+        if(observed.selected)return true;
+        if(observed.available){
+          const clicked=await inspect(true);
+          if(clicked.origin!==observed.origin)throw Error('Document changed during selection');
+        }
+        return false;
+      });
+      await wait(phase+' fresh team API',()=>responses.slice(responseFloor).some(r=>r.path==='/api/team/'&&r.method==='GET'&&r.status===200));
+      console.log('FUE_TEAM_NAVIGATION_PASS',phase,JSON.stringify(observed));
+    } catch(error) {
+      console.log('TEAM_NAVIGATION_DIAGNOSTIC',phase,JSON.stringify(observed));
+      try { await capture('team-navigation-failure-'+phase); } catch {}
+      throw error;
+    }
+  };
+  await openTeam('initial',()=>call('Page.navigate',{url:web+'/settings'}));
   // Use exact badge nodes, not the concatenated card text or CSS casing.
   const cardOperation=(operation)=>evalPage('('+((operation)=>{
     const matches=Array.from(document.querySelectorAll('button[title="Archiver le compte"]'))
@@ -194,25 +233,11 @@ try {
   const quotaAfter=await api('/api/team/quota',{headers:teamHeaders});
   assert.equal(quotaAfter.status,200);
   assert.equal(quotaBefore.body.secretaires_used-quotaAfter.body.secretaires_used,1);
-  // Page.reload acknowledges the request before the old document disappears.
-  // Never click the pre-reload settings tab or accept its archived DOM as proof.
-  const beforeReloadOrigin=await evalPage('performance.timeOrigin');
-  const responseFloor=responses.length;
-  await call('Page.reload');
-  await wait('fresh settings document',async()=>{
-    const state=await evalPage('({origin:performance.timeOrigin,path:location.pathname,ready:document.readyState})');
-    return state.origin!==beforeReloadOrigin&&state.path==='/settings'&&state.ready==='complete';
-  });
-  const teamTab=()=>evalPage('(()=>{const b=Array.from(document.querySelectorAll(\'[data-tour="settings-navigation"] button\')).find(b=>b.innerText.includes("Mon Équipe"));if(!b||b.disabled||!b.getClientRects().length)return false;if(!document.querySelector(".settings-team-surface"))b.click();return true})()');
-  await wait('fresh team tab selected',async()=>{
-    if(!await teamTab())return false;
-    return await visible('.settings-team-surface');
-  });
-  await wait('fresh team API after reload',()=>responses.slice(responseFloor).some(r=>r.path==='/api/team/'&&r.method==='GET'&&r.status===200));
+  await openTeam('reload',()=>call('Page.reload'));
   try {
     await wait('archived member persisted',async()=>{const c=await readCard();return c.found&&c.archiveDisabled&&c.permsDisabled&&c.archived&&!c.active&&!c.activationButton;});
   } catch(error) {
-    console.log('TEAM_RELOAD_DIAGNOSTIC',JSON.stringify({path:await pagePath(),freshDocument:await evalPage('performance.timeOrigin')!==beforeReloadOrigin,teamSelected:await visible('.settings-team-surface'),card:await readCard()}));
+    console.log('TEAM_RELOAD_DIAGNOSTIC',JSON.stringify({path:await pagePath(),teamSelected:await visible('.settings-team-surface'),card:await readCard()}));
     await capture('team-reload-failure');
     throw error;
   }
