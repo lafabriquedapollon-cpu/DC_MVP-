@@ -40,4 +40,5 @@ jobs:
           probe 404 'Not found' "$base/" -X POST
           probe 503 'LAB CLOSED' 'https://adbe9d1c.approval-lab-7c28d6.pages.dev/'
           probe 503 'LAB CLOSED' 'https://a1fab177.approval-lab-7c28d6.pages.dev/'
+          probe 503 'LAB CLOSED' 'https://834f6e8b.approval-lab-7c28d6.pages.dev/'
           echo PROTECTED_SYNTHETIC_RUNTIME_NEGATIVES_PASS
