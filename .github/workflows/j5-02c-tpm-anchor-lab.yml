@@ -19,8 +19,8 @@ jobs:
       - name: Install isolated dependencies and record versions
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends swtpm tpm2-tools libtss2-tcti-swtpm0
-          dpkg-query -W swtpm tpm2-tools libtss2-tcti-swtpm0
+          sudo apt-get install -y --no-install-recommends swtpm tpm2-tools libtss2-tcti-swtpm0t64
+          dpkg-query -W swtpm tpm2-tools libtss2-tcti-swtpm0t64
           python -m pip install --disable-pip-version-check --only-binary=:all: 'webauthn==3.0.0' 'cryptography==49.0.0'
           python -m pip check
       - name: Exact checkout and isolated delta

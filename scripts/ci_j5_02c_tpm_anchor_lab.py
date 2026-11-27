@@ -186,5 +186,34 @@ class Tests(unittest.TestCase):
     def test_12_no_silent_reprovision(self):
         with self.assertRaises(Denied):self.p.provision_fixture(1001)
 
+    def test_13_platform_policy_delete_guard(self):
+        # An emulator-only platform-created index with deletion authorization
+        # deliberately bound to another command. NOT a provisioning recipe.
+        index="0x01500021"
+        session=self.root/"trial.ctx"
+        policy=self.root/"policy.digest"
+        self.tpm.run("tpm2_startauthsession","-S",str(session))
+        self.tpm.run("tpm2_policycommandcode","-S",str(session),"-L",str(policy),"TPM2_CC_NV_Read")
+        self.tpm.run("tpm2_flushcontext",str(session))
+        self.tpm.run("tpm2_nvdefine","-C","p","-g","sha256","-s","32","-a","nt=extend|authread|authwrite|no_da|platformcreate|policydelete","-L",str(policy),"-p","file:"+str(self.tpm.auth),index)
+        self.tpm.run("tpm2_nvextend","-C",index,"-P","file:"+str(self.tpm.auth),"-i","-",index,data=bytes(32))
+        want=sha(bytes(64))
+        def read():
+            return self.tpm.run("tpm2_nvread","-C",index,"-P","file:"+str(self.tpm.auth),"-s","32",index).stdout
+        self.assertEqual(read(),want)
+        for hierarchy in ("o","p"):
+            r=self.tpm.run("tpm2_nvundefine","-C",hierarchy,index,ok=False)
+            self.assertNotEqual(r.returncode,0)
+            self.assertEqual(read(),want)
+        session=self.root/"wrong-delete.ctx"
+        self.tpm.run("tpm2_startauthsession","--policy-session","-S",str(session))
+        self.tpm.run("tpm2_policycommandcode","-S",str(session),"TPM2_CC_NV_UndefineSpaceSpecial")
+        try:
+            r=self.tpm.run("tpm2_nvundefine","-C","p","-S",str(session),index,ok=False)
+            self.assertNotEqual(r.returncode,0)
+            self.assertEqual(read(),want)
+        finally:
+            self.tpm.run("tpm2_flushcontext",str(session),ok=False)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
