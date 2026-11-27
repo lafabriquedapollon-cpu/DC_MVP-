@@ -11,6 +11,8 @@ import secrets
 import sqlite3
 import tempfile
 import unittest
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -325,6 +327,46 @@ class Tests(unittest.TestCase):
         with self.assertRaises(ValueError): self.finish(q,self.p)
         a=self.issue("approve",self.p)
         with self.assertRaises(ValueError): self.lab.register(a[0],registration(self.c,a[1]),now=self.now)
+
+    def test_29_replay_across_process(self):
+        q=self.issue("approve",self.p)
+        a=assertion(self.p,q[1])
+        script=(
+            "import json,sys; from scripts.ci_j5_02c_recovery_lab import Lab; "
+            "d=json.load(sys.stdin); "
+            "print(Lab(d['path']).finish(d['nonce'],d['assertion'],now=d['now']))"
+        )
+        payload=json.dumps(dict(path=str(self.path),nonce=q[0],assertion=a,now=self.now))
+        first=subprocess.run([sys.executable,"-B","-c",script],input=payload,text=True,capture_output=True,timeout=15)
+        self.assertEqual(first.returncode,0,first.stderr)
+        self.assertEqual(first.stdout.strip(),"approve")
+        second=subprocess.run([sys.executable,"-B","-c",script],input=payload,text=True,capture_output=True,timeout=15)
+        self.assertNotEqual(second.returncode,0)
+        self.assertIn("unknown/replay/stale/expired challenge",second.stderr)
+    def test_30_competing_rotations(self):
+        self.candidate()
+        n=fixture();self.register(n);self.finish(self.issue("prove",n),n)
+        q1=self.issue("rotate",self.p,self.c)
+        q2=self.issue("rotate",self.p,n)
+        def attempt(q):
+            try: Lab(self.path).finish(q[0],assertion(self.p,q[1]),now=self.now);return True
+            except ValueError: return False
+        with ThreadPoolExecutor(max_workers=2) as ex: results=list(ex.map(attempt,[q1,q2]))
+        self.assertEqual(sum(results),1)
+        with self.lab.tx() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM credentials WHERE role='primary'").fetchone()[0],1)
+            self.assertEqual(db.execute("SELECT count(*) FROM credentials WHERE role='candidate'").fetchone()[0],0)
+            self.assertEqual(self.lab.epoch(db),1)
+        winner=self.c if results[0] else n
+        loser=n if results[0] else self.c
+        self.finish(self.issue("approve",winner),winner)
+        with self.assertRaises(ValueError): self.issue("approve",loser)
+    def test_31_lost_both_fails_closed(self):
+        self.finish(self.issue("revoke_backup",self.p),self.p)
+        self.candidate()
+        with self.assertRaises(ValueError): self.issue("recover",self.b,self.c)
+        with self.assertRaises(ValueError): self.lab.bootstrap_fixture(self.c[:2],fixture()[:2])
+        with self.assertRaises(ValueError): self.issue("approve",self.c)
 
 if __name__=="__main__":
     unittest.main(verbosity=2)
