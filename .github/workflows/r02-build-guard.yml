@@ -1,0 +1,57 @@
+name: R0.2 - isolated build guard recovery
+on:
+  push:
+    branches: [ci/dc-mvp-integration-20261124, ci/r02-conservative-cleanup-20261125]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: r02-build-guard
+  cancel-in-progress: false
+jobs:
+  guard-and-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Syntax and dependency preparation
+        working-directory: frontend
+        run: |
+          node --check scripts/build-guard.mjs
+          node --check scripts/ci-build-guard.mjs
+          npm ci --ignore-scripts --no-audit --no-fund
+      - name: Guard contract and actual isolated rehearsal build
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ns="dc-build-$GITHUB_RUN_ID"
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-build.XXXXXXXX")
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true HOME="$lab" TMPDIR="$lab" DC_CHECKOUT="$GITHUB_WORKSPACE" GITHUB_SHA="$GITHUB_SHA" bash -s <<'LAB'
+          set -euo pipefail
+          cd "$DC_CHECKOUT/frontend"
+          test "$(ip -o link show | wc -l)" -eq 1
+          echo BUILD_LOOPBACK_ONLY
+          node scripts/ci-build-guard.mjs
+          test ! -e dist
+          mkdir dist
+          printf 'synthetic-dist-must-stay-unchanged\n' > dist/sentinel
+          sha256sum dist/sentinel > "$HOME/dist.sha256"
+          # No real build, no private env, no actual cabinet, no release packaging.
+          export VITE_API_URL=http://127.0.0.1:8008 VITE_ENABLE_HTTPS=false
+          npm run build:rehearsal
+          sha256sum -c "$HOME/dist.sha256"
+          test "$(find dist -type f | wc -l)" -eq 1
+          node --input-type=module -e 'import fs from "node:fs"; import assert from "node:assert/strict"; const m=JSON.parse(fs.readFileSync("dist-rehearsal/build-manifest.json")); assert.equal(m.commit,process.env.GITHUB_SHA);assert.equal(m.mode,"rehearsal");assert.equal(m.outputDir,"dist-rehearsal");assert(fs.existsSync("dist-rehearsal/index.html"));console.log("REHEARSAL_BUILD_EXACT_HEAD_PASS")'
+          node scripts/ci-pwa-assets.mjs
+          ./node_modules/.bin/vitest run --config scripts/ci-r02-business.config.mjs
+          echo R02_TARGETED_COMPONENT_CONTRACTS_PASS
+          LAB

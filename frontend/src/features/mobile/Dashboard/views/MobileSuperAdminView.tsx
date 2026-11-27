@@ -5,12 +5,8 @@ import {
   ArrowLeft,
   Ban,
   Boxes,
-  CheckCircle2,
   ChevronRight,
   ClipboardCopy,
-  Clock3,
-  FileClock,
-  FilePlus2,
   Fingerprint,
   History,
   Mail,
@@ -28,7 +24,6 @@ import {
   Users,
   X,
   XCircle,
-  Zap,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import {

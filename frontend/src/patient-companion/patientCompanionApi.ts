@@ -39,8 +39,10 @@ export interface PatientShare {
 }
 
 export class PatientCompanionApiError extends Error {
-  constructor(public readonly status: number, message: string) {
+  readonly status: number;
+  constructor(status: number, message: string) {
     super(message);
+    this.status = status;
     this.name = 'PatientCompanionApiError';
   }
 }

@@ -1,3 +1,4 @@
+import { protocolRowsValid, steinerIds } from './cephaloProtocolGuard.ts';
 export type SteinerProtocolLayer = 'STEINER_1953_BASE' | 'STEINER_1959_EXTENSION';
 
 export interface SteinerProtocolRow {
@@ -47,6 +48,9 @@ export const readSteinerProtocolProjection = (anglesData: any): SteinerProtocolP
   if (scientific?.authority !== 'EVIDENCE_GRAPH_V1' || scientific?.active_chain !== 'VERIFIED') return null;
   const profile = scientific?.protocol_profiles?.steiner;
   if (!profile || profile.protocol_profile_id !== 'STEINER_STATIC_PROTOCOL_PROFILE_V1' || !Array.isArray(profile.rows)) return null;
+  if (profile.final_gate?.gate !== 'ORTHO_ANALYSIS_PROTOCOLS_VERIFIED' ||
+      profile.final_gate?.status !== 'OPEN' ||
+      !protocolRowsValid(profile.rows, steinerIds)) return null;
   return profile as SteinerProtocolProjection;
 };
 

@@ -1,3 +1,4 @@
+import { protocolRowsValid, tweedIds } from './cephaloProtocolGuard.ts';
 export interface TweedMerrifieldProtocolRow {
   canonical_measurement_id: string;
   label: string;
@@ -33,6 +34,9 @@ export const readTweedMerrifieldProtocolProjection = (
     profile.protocol_profile_id !== 'TWEED_MERRIFIELD_DC_PROTOCOL_PROFILE_V1' ||
     !Array.isArray(profile.rows)
   ) return null;
+  if (profile.final_gate?.gate !== 'ORTHO_ANALYSIS_PROTOCOLS_VERIFIED' ||
+      profile.final_gate?.status !== 'OPEN' ||
+      !protocolRowsValid(profile.rows, tweedIds)) return null;
   return profile as TweedMerrifieldProtocolProjection;
 };
 

@@ -1,0 +1,26 @@
+name: R0.2 - AMMPS provenance targeted
+on:
+  push:
+    branches: [ci/r02-ammps-provenance-20261126]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  provenance-only:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Exact HEAD and synthetic provenance regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:GITHUB_SHA) { throw 'HEAD_MISMATCH' }
+          python -I -B scripts/ci_r02_ammps_provenance.py
+          if ($LASTEXITCODE -ne 0) { throw 'AMMPS_PROVENANCE_TEST_FAILED' }

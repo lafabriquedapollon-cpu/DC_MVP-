@@ -99,6 +99,7 @@ class TeamMemberOut(BaseModel):
     nom_complet: Optional[str] = None
     telephone_mobile: Optional[str] = None
     is_active: bool
+    is_archived: bool = False
     approval_status: str = "approved"
     approval_note: Optional[str] = None
     created_at: Optional[datetime.datetime] = None

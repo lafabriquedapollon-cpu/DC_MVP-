@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { BrainCircuit, Check, ArrowRight, Zap } from 'lucide-react';
 import { api, API_BASE } from '../services/api';
 import { useAuthStore } from '../stores/useAuthStore';

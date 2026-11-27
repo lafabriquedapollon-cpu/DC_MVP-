@@ -1,0 +1,372 @@
+{
+  "schema": 1,
+  "scope": "synthetic-native-rehearsal",
+  "files": [
+    {
+      "bytes": 140068,
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-brotli 1.2.1-1",
+      "path": "bin/libbrotlicommon.dll",
+      "sha256": "121006fe45e8bd12b1929f86e1efb1dbd1c6291118f9a409693ce8c030f1cefb"
+    },
+    {
+      "bytes": 60092,
+      "imports": [
+        "kernel32.dll",
+        "libbrotlicommon.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-brotli 1.2.1-1",
+      "path": "bin/libbrotlidec.dll",
+      "sha256": "dab7d47981ee887865d1f82dcbcc8fc4c7a43942278bb27877e168909e10d346"
+    },
+    {
+      "bytes": 108633,
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-bzip2 1.0.8-4",
+      "path": "bin/libbz2-1.dll",
+      "sha256": "a4fbb97c26662d2b8a80bf4597ed3effb69b12048b0cb1eef2c3f211e2e66673"
+    },
+    {
+      "bytes": 35033,
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-libdatrie 0.2.14-1",
+      "path": "bin/libdatrie-1.dll",
+      "sha256": "2f784872e6404e57847201fe1e7e591bd5b5be4a319ef38ebcb36014ac7f385d"
+    },
+    {
+      "bytes": 237027,
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-expat 2.10.0-1",
+      "path": "bin/libexpat-1.dll",
+      "sha256": "d96eafff7e3356e13aab6b569cc373ef61b1b2b9489803f45561cbfeaf70ee1b"
+    },
+    {
+      "bytes": 32976,
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-libffi 3.8.1-1",
+      "path": "bin/libffi-8.dll",
+      "sha256": "66b36d7b793e6da743fb8b5fb2d9419d2e46d645c7777963c539416209cd97c6"
+    },
+    {
+      "bytes": 506353,
+      "imports": [
+        "kernel32.dll",
+        "libexpat-1.dll",
+        "libfreetype-6.dll",
+        "libgcc_s_seh-1.dll",
+        "libintl-8.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-fontconfig 2.18.4-1",
+      "path": "bin/libfontconfig-1.dll",
+      "sha256": "04b3ef319b36fd7ba810e1ebf3a04430fbc0ab953c67db06bf745a7c27e61687"
+    },
+    {
+      "bytes": 807389,
+      "imports": [
+        "kernel32.dll",
+        "libbrotlidec.dll",
+        "libbz2-1.dll",
+        "libharfbuzz-0.dll",
+        "libpng16-16.dll",
+        "msvcrt.dll",
+        "zlib1.dll"
+      ],
+      "package": "mingw-w64-x86_64-freetype 2.15.0-1",
+      "path": "bin/libfreetype-6.dll",
+      "sha256": "9f62ad75bdc24573940f2e0b0db1848464ce02928926808885e3744fc5272add"
+    },
+    {
+      "bytes": 154283,
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-fribidi 1.0.18-1",
+      "path": "bin/libfribidi-0.dll",
+      "sha256": "777543504df2de352659d5153f90c9ca17957d9ad88fe8d37126819995f5336b"
+    },
+    {
+      "bytes": 149364,
+      "imports": [
+        "kernel32.dll",
+        "libwinpthread-1.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-libgcc 16.2.0-7",
+      "path": "bin/libgcc_s_seh-1.dll",
+      "sha256": "3776dae2a0a196651bc9a5f3e79cfdebcf7a63c7ac522a9b2f9b1604996e1e1b"
+    },
+    {
+      "bytes": 1918835,
+      "imports": [
+        "advapi32.dll",
+        "dnsapi.dll",
+        "iphlpapi.dll",
+        "kernel32.dll",
+        "libglib-2.0-0.dll",
+        "libgmodule-2.0-0.dll",
+        "libgobject-2.0-0.dll",
+        "libintl-8.dll",
+        "msvcrt.dll",
+        "ole32.dll",
+        "shell32.dll",
+        "shlwapi.dll",
+        "user32.dll",
+        "ws2_32.dll",
+        "zlib1.dll"
+      ],
+      "package": "mingw-w64-x86_64-glib2 2.90.1-1",
+      "path": "bin/libgio-2.0-0.dll",
+      "sha256": "eef35a18138b7afefaf5ade36b07b3b3ec25d21080a1c2c5eccefad383482016"
+    },
+    {
+      "bytes": 1570710,
+      "imports": [
+        "advapi32.dll",
+        "kernel32.dll",
+        "libintl-8.dll",
+        "libpcre2-8-0.dll",
+        "msvcrt.dll",
+        "ole32.dll",
+        "shell32.dll",
+        "user32.dll",
+        "ws2_32.dll"
+      ],
+      "package": "mingw-w64-x86_64-glib2 2.90.1-1",
+      "path": "bin/libglib-2.0-0.dll",
+      "sha256": "84b15dc907fd1d3bb1cd799fc034d2edcbc3946c8c4acd6a8dd3ace381f9e568"
+    },
+    {
+      "bytes": 23387,
+      "imports": [
+        "kernel32.dll",
+        "libglib-2.0-0.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-glib2 2.90.1-1",
+      "path": "bin/libgmodule-2.0-0.dll",
+      "sha256": "79a7646945b520966dcd2541d40c109f26c42979b47bed9aabec796a8cbe20d0"
+    },
+    {
+      "bytes": 357682,
+      "imports": [
+        "kernel32.dll",
+        "libffi-8.dll",
+        "libglib-2.0-0.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-glib2 2.90.1-1",
+      "path": "bin/libgobject-2.0-0.dll",
+      "sha256": "a417864358cbe7a1da74b7cfcc61f7d49b03772b02f29fa611b01a67d5b99632"
+    },
+    {
+      "bytes": 167155,
+      "imports": [
+        "kernel32.dll",
+        "libgcc_s_seh-1.dll",
+        "libstdc++-6.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-graphite2 1.3.15-1",
+      "path": "bin/libgraphite2.dll",
+      "sha256": "063a9ad34a5ec87d038b4646660957395224ecf2cf707917256b7d251a7c5f57"
+    },
+    {
+      "bytes": 1952250,
+      "imports": [
+        "dwrite.dll",
+        "gdi32.dll",
+        "kernel32.dll",
+        "libfreetype-6.dll",
+        "libgcc_s_seh-1.dll",
+        "libglib-2.0-0.dll",
+        "libgraphite2.dll",
+        "msvcrt.dll",
+        "rpcrt4.dll",
+        "user32.dll",
+        "usp10.dll"
+      ],
+      "package": "mingw-w64-x86_64-harfbuzz 15.2.0-1",
+      "path": "bin/libharfbuzz-0.dll",
+      "sha256": "e8ffc111297c498091691a90ece1aea2f259f4d86fda4fc3c74d0e0acb5e9c1d"
+    },
+    {
+      "bytes": 1141004,
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-libiconv 1.19.1-1",
+      "path": "bin/libiconv-2.dll",
+      "sha256": "587bd8c780e89f5d834c251accc6053f479713184c433e0f1bab898ee0aa3751"
+    },
+    {
+      "bytes": 298731,
+      "imports": [
+        "advapi32.dll",
+        "kernel32.dll",
+        "libiconv-2.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-gettext-runtime 1.0-1",
+      "path": "bin/libintl-8.dll",
+      "sha256": "0537c3dd2378218508ebe3cc416d72a99ee2d24ae1c5525e23458f32544ef861"
+    },
+    {
+      "bytes": 228197,
+      "imports": [
+        "kernel32.dll",
+        "libsystre-0.dll",
+        "msvcrt.dll",
+        "shlwapi.dll"
+      ],
+      "package": "mingw-w64-x86_64-file 5.48-1",
+      "path": "bin/libmagic-1.dll",
+      "sha256": "73e9ab47916462ca1631cf165385eeb8664333cf7740c54ed6f9e2e2d8f6c798"
+    },
+    {
+      "bytes": 434535,
+      "imports": [
+        "kernel32.dll",
+        "libfribidi-0.dll",
+        "libgio-2.0-0.dll",
+        "libglib-2.0-0.dll",
+        "libgobject-2.0-0.dll",
+        "libharfbuzz-0.dll",
+        "libthai-0.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-pango 1.58.2-1",
+      "path": "bin/libpango-1.0-0.dll",
+      "sha256": "078881c139e7dd422c4cb5f9c43b939712eb7ad4f3d7d25c41639873e8aec6d6"
+    },
+    {
+      "bytes": 111841,
+      "imports": [
+        "kernel32.dll",
+        "libfontconfig-1.dll",
+        "libfreetype-6.dll",
+        "libgio-2.0-0.dll",
+        "libglib-2.0-0.dll",
+        "libgobject-2.0-0.dll",
+        "libharfbuzz-0.dll",
+        "libpango-1.0-0.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-pango 1.58.2-1",
+      "path": "bin/libpangoft2-1.0-0.dll",
+      "sha256": "38602e75c85e149bf7294bccb8792f54299daed45509a8ac4b3a18e3921ec56e"
+    },
+    {
+      "bytes": 706403,
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-pcre2 10.49-2",
+      "path": "bin/libpcre2-8-0.dll",
+      "sha256": "26fb276dc3a6179d889684a8ec0e3f012a7da60d9bf4c755822340c5268cb8dc"
+    },
+    {
+      "bytes": 260070,
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll",
+        "zlib1.dll"
+      ],
+      "package": "mingw-w64-x86_64-libpng 1.6.59-2",
+      "path": "bin/libpng16-16.dll",
+      "sha256": "4a33007395f1d30881d0c185c120f1ecf05c8ebb520933068902ddc1f6c58506"
+    },
+    {
+      "bytes": 2658711,
+      "imports": [
+        "kernel32.dll",
+        "libgcc_s_seh-1.dll",
+        "libwinpthread-1.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-libstdc++ 16.2.0-7",
+      "path": "bin/libstdc++-6.dll",
+      "sha256": "d5f362b6956185e24af7c710ae9ed794af92ffa325e50a165c26a1a31f35d694"
+    },
+    {
+      "bytes": 11201,
+      "imports": [
+        "kernel32.dll",
+        "libtre-5.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-libsystre 1.0.2-3",
+      "path": "bin/libsystre-0.dll",
+      "sha256": "4bc4dae17267afec9f9812e88167980808848c10a255ccbda9ef4fd758897938"
+    },
+    {
+      "bytes": 72294,
+      "imports": [
+        "kernel32.dll",
+        "libdatrie-1.dll",
+        "msvcrt.dll",
+        "shlwapi.dll"
+      ],
+      "package": "mingw-w64-x86_64-libthai 0.1.30-1",
+      "path": "bin/libthai-0.dll",
+      "sha256": "5d741974fdec19e0f6cddbcdb539428af0c7392740a056634714c2884157fdb9"
+    },
+    {
+      "bytes": 100574,
+      "imports": [
+        "kernel32.dll",
+        "libintl-8.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-libtre 0.9.0-2",
+      "path": "bin/libtre-5.dll",
+      "sha256": "5833b2b1f62b67d8b4b3881f1bc05f42b0dee1a9f10cef897cdf44d74d094fdf"
+    },
+    {
+      "bytes": 73020,
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-libwinpthread 14.0.0.r598.ge3d18511f-1",
+      "path": "bin/libwinpthread-1.dll",
+      "sha256": "98a4fea591385952cad1c532f4a92606358630976e9ede5fcf115ab945305a09"
+    },
+    {
+      "bytes": 191257,
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll"
+      ],
+      "package": "mingw-w64-x86_64-zlib 1.4-2",
+      "path": "bin/zlib1.dll",
+      "sha256": "72df18f3a7c8e9341c776a5a23c2dfb2524dbbf1f343c3012cb1178436535a29"
+    },
+    {
+      "bytes": 10793952,
+      "imports": [],
+      "package": "mingw-w64-x86_64-file 5.48-1",
+      "path": "share/misc/magic.mgc",
+      "sha256": "1a98967ddb2a9ef80f9dd1a3f1fa3bebc4991741878a512310f0d434428de85e"
+    }
+  ]
+}

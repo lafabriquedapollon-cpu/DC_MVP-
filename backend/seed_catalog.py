@@ -1,0 +1,193 @@
+"""Seed the dental act catalog with standard specialties and acts."""
+from backend.database import SessionLocal
+from backend import models
+
+CATALOG = [
+    {
+        "name": "CONSERVATRICE",
+        "color": "#3B82F6",
+        "acts": [
+            {"name": "Composite 1 face", "base_price": 0, "code": "HBMD001"},
+            {"name": "Composite 2 faces", "base_price": 0, "code": "HBMD002"},
+            {"name": "Composite 3 faces", "base_price": 0, "code": "HBMD003"},
+            {"name": "Inlay/Onlay céramique", "base_price": 0, "code": "HBMD004"},
+            {"name": "Traitement hypersensibilité", "base_price": 0, "code": "HBMD005"},
+            {"name": "Scellement de fissures", "base_price": 0, "code": "HBMD006"},
+        ],
+    },
+    {
+        "name": "ENDODONTIE",
+        "color": "#6366F1",
+        "acts": [
+            {"name": "Traitement canalaire mono-radiculé", "base_price": 0, "code": "HBMD020"},
+            {"name": "Traitement canalaire bi-radiculé", "base_price": 0, "code": "HBMD021"},
+            {"name": "Traitement canalaire tri-radiculé", "base_price": 0, "code": "HBMD022"},
+            {"name": "Retraitement canalaire", "base_price": 0, "code": "HBMD023"},
+            {"name": "Pulpotomie", "base_price": 0, "code": "HBMD024"},
+            {"name": "Pulpectomie", "base_price": 0, "code": "HBMD025"},
+        ],
+    },
+    {
+        "name": "CHIRURGIE",
+        "color": "#EF4444",
+        "acts": [
+            {"name": "Extraction simple", "base_price": 0, "code": "HBMD040"},
+            {"name": "Extraction dent de sagesse", "base_price": 0, "code": "HBMD041"},
+            {"name": "Extraction chirurgicale", "base_price": 0, "code": "HBMD042"},
+            {"name": "Alvéolectomie", "base_price": 0, "code": "HBMD043"},
+            {"name": "Frenectomie", "base_price": 0, "code": "HBMD044"},
+            {"name": "Résection apicale", "base_price": 0, "code": "HBMD045"},
+        ],
+    },
+    {
+        "name": "PROTHESE",
+        "color": "#10B981",
+        "acts": [
+            {"name": "Couronne céramo-métallique", "base_price": 0, "code": "HBMD060"},
+            {"name": "Couronne zircone", "base_price": 0, "code": "HBMD061"},
+            {"name": "Couronne provisoire", "base_price": 0, "code": "HBMD062"},
+            {"name": "Bridge 3 éléments", "base_price": 0, "code": "HBMD063"},
+            {"name": "Prothèse adjointe partielle", "base_price": 0, "code": "HBMD064"},
+            {"name": "Prothèse complète", "base_price": 0, "code": "HBMD065"},
+            {"name": "Facette céramique", "base_price": 0, "code": "HBMD066"},
+            {"name": "Inlay core", "base_price": 0, "code": "HBMD067"},
+        ],
+    },
+    {
+        "name": "IMPLANTOLOGIE",
+        "color": "#8B5CF6",
+        "acts": [
+            {"name": "Pose implant", "base_price": 0, "code": "HBMD080"},
+            {"name": "Couronne sur implant", "base_price": 0, "code": "HBMD081"},
+            {"name": "Greffe osseuse", "base_price": 0, "code": "HBMD082"},
+            {"name": "Élévation sinusienne", "base_price": 0, "code": "HBMD083"},
+            {"name": "Prothèse implanto-portée", "base_price": 0, "code": "HBMD084"},
+        ],
+    },
+    {
+        "name": "PARODONTOLOGIE",
+        "color": "#14B8A6",
+        "acts": [
+            {"name": "Détartrage & Polissage", "base_price": 0, "code": "HBMD100"},
+            {"name": "Surfaçage radiculaire (secteur)", "base_price": 0, "code": "HBMD101"},
+            {"name": "Curetage parodontal", "base_price": 0, "code": "HBMD102"},
+            {"name": "Bilan parodontal", "base_price": 0, "code": "HBMD103"},
+            {"name": "Lambeau parodontal", "base_price": 0, "code": "HBMD104"},
+        ],
+    },
+    {
+        "name": "ORTHODONTIE",
+        "color": "#0EA5E9",
+        "acts": [
+            {"name": "Semestre ODF multibagues", "base_price": 0, "code": "HBMD120"},
+            {"name": "Contention amovible", "base_price": 0, "code": "HBMD121"},
+            {"name": "Gouttière aligneur (par semestre)", "base_price": 0, "code": "HBMD122"},
+            {"name": "Bilan orthodontique", "base_price": 0, "code": "HBMD123"},
+        ],
+    },
+    {
+        "name": "PREVENTION",
+        "color": "#F59E0B",
+        "acts": [
+            {"name": "Fluorisation", "base_price": 0, "code": "HBMD140"},
+            {"name": "Scellement prophylactique", "base_price": 0, "code": "HBMD141"},
+            {"name": "Consultation standard", "base_price": 0, "code": "HBMD142"},
+            {"name": "Radiographie panoramique", "base_price": 0, "code": "HBMD143"},
+        ],
+    },
+    {
+        "name": "ESTHETIQUE",
+        "color": "#EC4899",
+        "acts": [
+            {"name": "Blanchiment dentaire (cabinet)", "base_price": 0, "code": "HBMD160"},
+            {"name": "Gouttière blanchiment", "base_price": 0, "code": "HBMD161"},
+            {"name": "Reconstitution esthétique", "base_price": 0, "code": "HBMD162"},
+        ],
+    },
+    {
+        "name": "PEDODONTIE",
+        "color": "#F472B6",
+        "acts": [
+            {"name": "Consultation pédiatrique", "base_price": 0, "code": "HBMD180"},
+            {"name": "Scellement de sillons (enfant)", "base_price": 0, "code": "HBMD181"},
+            {"name": "Coiffage pulpaire (enfant)", "base_price": 0, "code": "HBMD182"},
+            {"name": "Pulpotomie dent temporaire", "base_price": 0, "code": "HBMD183"},
+            {"name": "Couronne pédodontique préformée", "base_price": 0, "code": "HBMD184"},
+            {"name": "Extraction dent de lait", "base_price": 0, "code": "HBMD185"},
+            {"name": "Mainteneur d'espace", "base_price": 0, "code": "HBMD186"},
+        ],
+    },
+    {
+        "name": "DIAGNOSTIC & URGENCE",
+        "color": "#64748B",
+        "acts": [
+            {"name": "Consultation standard", "base_price": 0, "code": "HBMD200"},
+            {"name": "Consultation d'urgence", "base_price": 0, "code": "HBMD201"},
+            {"name": "Radiographie rétro-alvéolaire", "base_price": 0, "code": "HBMD202"},
+            {"name": "Radiographie panoramique", "base_price": 0, "code": "HBMD203"},
+            {"name": "Cone Beam (CBCT)", "base_price": 0, "code": "HBMD204"},
+            {"name": "Drainage d'abcès", "base_price": 0, "code": "HBMD205"},
+            {"name": "Sutures", "base_price": 0, "code": "HBMD206"},
+            {"name": "Pansement / soin palliatif", "base_price": 0, "code": "HBMD207"},
+        ],
+    },
+]
+
+
+def seed_catalog(db=None):
+    """
+    Seed ADDITIF du catalogue : crée les spécialités/actes manquants sans toucher
+    aux existants (idempotent). Peut être appelé au démarrage à chaque boot.
+    Le matching se fait par nom de spécialité et par nom d'acte (insensible casse).
+    """
+    own_session = db is None
+    if own_session:
+        db = SessionLocal()
+    try:
+        added_spec = 0
+        added_acts = 0
+        for spec_data in CATALOG:
+            acts_data = spec_data.get("acts", [])
+            specialty = db.query(models.Specialty).filter(
+                models.Specialty.name == spec_data["name"]
+            ).first()
+            if not specialty:
+                specialty = models.Specialty(name=spec_data["name"], color=spec_data.get("color"))
+                db.add(specialty)
+                db.flush()
+                added_spec += 1
+
+            # Actes existants de la spécialité (par nom, normalisé)
+            existing_names = {
+                a.name.strip().lower()
+                for a in db.query(models.CatalogAct).filter(
+                    models.CatalogAct.specialty_id == specialty.id
+                ).all()
+            }
+            for act in acts_data:
+                if act["name"].strip().lower() in existing_names:
+                    continue
+                # Évite les collisions de code unique
+                code = act.get("code")
+                if code and db.query(models.CatalogAct).filter(models.CatalogAct.code == code).first():
+                    code = None
+                db.add(models.CatalogAct(
+                    specialty_id=specialty.id,
+                    name=act["name"], base_price=act.get("base_price", 0), code=code,
+                ))
+                added_acts += 1
+
+        db.commit()
+        total_acts = db.query(models.CatalogAct).count()
+        print(f"OK Catalogue : +{added_spec} spécialité(s), +{added_acts} acte(s). Total actes = {total_acts}.")
+    except Exception as e:
+        db.rollback()
+        print(f"ERREUR seed_catalog : {e}")
+        raise
+    finally:
+        if own_session:
+            db.close()
+
+
+if __name__ == "__main__":
+    seed_catalog()

@@ -339,7 +339,8 @@ class GuidedRestoreService:
         prepared_plain = rescue_dir / ".prepared-current.db"
         try:
             _decrypt_backup_key(prepared_db, prepared_plain)
-            _validate_database_file(prepared_plain, str(job.get("active_driver") or "pysqlite"))
+            # The rescue preserves the original state, even if the original has orphans.
+            _validate_database_file(prepared_plain, str(job.get("active_driver") or "pysqlite"), require_referential_integrity=False)
         finally:
             if prepared_plain.exists():
                 prepared_plain.unlink()

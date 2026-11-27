@@ -2,14 +2,7 @@ import React, { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../services/api';
 import { useAuthenticatedImage } from '../../../hooks/useAuthenticatedImage';
-import {
-  Upload,
-  Save,
-  Image as ImageIcon,
-  Edit2,
-  FileSignature,
-  Receipt,
-} from 'lucide-react';
+import { Save, Image as ImageIcon, Edit2, FileSignature, Receipt } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { usePatientStore } from '../../../stores/usePatientStore';
 

@@ -1,5 +1,5 @@
 /** LOT07/07-C: purely presentational helpers for synthetic Command fixtures. */
-import React from 'react';
+import 'react';
 import type { SyntheticAppointment } from './command-synthetic-fixtures';
 
 export function AppointmentIdentity({appointment}: {appointment:SyntheticAppointment}) {

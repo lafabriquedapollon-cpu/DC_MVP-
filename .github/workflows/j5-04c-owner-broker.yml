@@ -1,0 +1,41 @@
+name: J5-04C native Windows OWNER commissioning
+on:
+  push:
+    branches: [ci/j5-04c-owner-broker-20261127]
+permissions:
+  contents: read
+jobs:
+  native-broker:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Exact delta and gates
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git diff --name-only 9fda4675612b5636082dc00c9cd5b9713237aa13 HEAD | sort | paste -sd ' ' -)" = '.github/workflows/j5-04c-owner-broker.yml docs/J5-04C-OWNER-BROKER.md scripts/ci_j5_04c_native_broker.py scripts/ci_j5_04c_pipe_diag.py scripts/j5_owner_broker.py scripts/j5_owner_store.py'
+          test ! -e .github/workflows/cabinet-release-certification.yml
+      - name: Dependencies for isolated component
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: 'pywin32==311' 'pyinstaller==6.22.3' 'webauthn==3.0.0' 'cryptography==49.0.0' 'cbor2==6.3.0'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip check
+      - name: Existing WebAuthn regression
+        run: python -B -m scripts.ci_j5_02c_recovery_lab
+      - name: Build standalone Windows service and exercise native broker
+        run: |
+          $lab = Join-Path $env:RUNNER_TEMP ('dc-broker-build-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $lab | Out-Null
+          try {
+            python -m PyInstaller --noconfirm --clean --onedir --name dc-owner-commissioning --paths . --hidden-import win32timezone --distpath "$lab/dist" --workpath "$lab/build" --specpath "$lab" scripts/j5_owner_broker.py
+            if ($LASTEXITCODE -ne 0) { throw 'BROKER_BUILD_FAILED' }
+            python -B -m scripts.ci_j5_04c_native_broker "$lab/dist/dc-owner-commissioning"
+            if ($LASTEXITCODE -ne 0) { throw 'BROKER_NATIVE_FAILED' }
+          } finally { Remove-Item -LiteralPath $lab -Recurse -Force }

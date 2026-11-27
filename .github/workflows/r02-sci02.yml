@@ -1,0 +1,24 @@
+name: R0.2 SCI-02 synthetic profile admission
+on:
+  push:
+    branches: [ci/r02-sci02-20261126]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  admission:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Exact HEAD synthetic tests
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw 'HEAD_MISMATCH' }
+          python -I -B scripts/ci_r02_sci02.py
+          if ($LASTEXITCODE -ne 0) { throw 'SCI02_FAILED' }

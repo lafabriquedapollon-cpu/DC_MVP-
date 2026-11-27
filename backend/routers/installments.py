@@ -3,7 +3,7 @@ import os
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from backend import database, models
@@ -250,12 +250,26 @@ def delete_installment_plan(
         raise HTTPException(status_code=404, detail="Plan introuvable")
     assert_patient_access(plan.patient_id, current_user, db)
 
+    # A partial payment or any retained Payment reference is financial evidence,
+    # even when a historical installment status is inconsistent.
     paid_installment = (
         db.query(models.Installment)
-        .filter(models.Installment.plan_id == plan_id, models.Installment.status == "PAYE")
+        .filter(
+            models.Installment.plan_id == plan_id,
+            or_(
+                func.upper(models.Installment.status).in_(["PAYE", "PARTIEL"]),
+                models.Installment.paid_date.isnot(None),
+            ),
+        )
         .first()
     )
-    if paid_installment:
+    linked_payment = (
+        db.query(models.Payment.id)
+        .join(models.Installment, models.Payment.installment_id == models.Installment.id)
+        .filter(models.Installment.plan_id == plan_id)
+        .first()
+    )
+    if paid_installment or linked_payment:
         raise HTTPException(
             status_code=409,
             detail="Un plan contenant une échéance encaissée ne peut pas être supprimé sans contrepassation comptable.",

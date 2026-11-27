@@ -1,6 +1,6 @@
 // CB2 G6 loopback-only lab mounts REAL MainLayout, including its REAL launcher.
 // The surrounding page and API fixtures are synthetic; no clinical deployment.
-import React from 'react';
+import 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { MainLayout } from '../Layout/MainLayout';

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Image as ImageIcon, FileImage, Type, Palette, Upload, MousePointer2, Check, ChevronDown, ChevronUp } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp } from 'lucide-react';
 import { cn } from '../../../../utils/cn';
 import { BRAND_IDENTITIES, PREMIUM_FONTS } from '../../constants';
 import type { HeaderOption, TemplateOption } from '../../types';
@@ -51,15 +51,14 @@ const TEMPLATES = [
 ];
 
 export const Step5Design: React.FC<Props> = ({
-  headerOption, setHeaderOption,
+  headerOption,
   selectedIdentity, setSelectedIdentity,
   selectedFont, setSelectedFont,
   selectedTemplate, setSelectedTemplate,
-  logoPreview, letterheadPreview,
-  logoInputRef, letterheadInputRef,
-  handleLogoChange, handleLetterheadChange,
+  logoPreview,
+  logoInputRef,
+  handleLogoChange,
   margins, setMargins,
-  headerScale, setHeaderScale,
   advanced
 }) => {
   const [advancedOpen, setAdvancedOpen] = useState(false);

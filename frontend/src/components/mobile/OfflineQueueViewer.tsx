@@ -1,6 +1,6 @@
 import React from 'react';
 import { useOfflineQueue } from '../../hooks/useOfflineQueue';
-import { CloudOff, Cloud, RefreshCw, AlertCircle } from 'lucide-react';
+import { CloudOff, RefreshCw, AlertCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'react-router-dom';
 

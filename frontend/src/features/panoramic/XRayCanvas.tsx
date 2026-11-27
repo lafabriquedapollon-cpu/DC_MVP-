@@ -40,7 +40,7 @@ export const XRayCanvas: React.FC<XRayCanvasProps> = ({
   const [popover, setPopover] = useState<{ screenX: number, screenY: number, fdi: number } | null>(null);
   const [activeCategory, setActiveCategory] = useState<AnomalyCategory>('Conservatrice');
   const [customInput, setCustomInput] = useState("");
-  const [showReferenceGrid, setShowReferenceGrid] = useState(false);
+  const [showReferenceGrid] = useState(false);
 
   const { 
     toothAnomalies, toggleAnomaly, 

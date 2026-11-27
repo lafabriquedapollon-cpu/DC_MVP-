@@ -1,0 +1,35 @@
+name: J5-03D Launcher and portable SQLCipher admission LAB
+on:
+  push:
+    branches: [ci/j5-03d-provision-restore-20261127]
+permissions:
+  contents: read
+jobs:
+  admission:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Exact checkout and guards unchanged
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git diff --name-only d690f5fc71e637710386da87cd65a955265ca977 HEAD | sort | paste -sd ' ' -)" = '.github/workflows/j5-03d-provision-restore.yml docs/J5-03D-RELEASE-TRANSITION.md scripts/ci_j5_03d_sqlcipher_restore.py'
+      - name: Launcher and current authority contract
+        run: |
+          python -B -m scripts.ci_r02_launcher_admission
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B -m scripts.ci_r02_recovery_authority
+      - name: Native SQLCipher dependencies
+        run: |
+          python -m pip --isolated install --only-binary=:all: 'sqlcipher3==0.6.2' 'SQLAlchemy==2.0.28' 'cryptography==49.0.0'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip check
+      - name: Real encrypted portable export and rekey on isolated fixtures
+        run: python -B -m scripts.ci_j5_03d_sqlcipher_restore

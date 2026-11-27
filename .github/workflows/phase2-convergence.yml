@@ -1,0 +1,1237 @@
+name: Phase 2 convergence - synthetic LAB only
+on:
+  push:
+    branches: [ci/phase2-convergence-20261127]
+    paths: ['.github/workflows/phase2-convergence.yml']
+permissions:
+  contents: read
+concurrency:
+  group: phase2-convergence
+  cancel-in-progress: false
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify exact orchestration HEAD and candidate delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor 0a99bbcc27d5be27ea3b87d3431fde2c78bc7c6b HEAD
+          test "$(git diff --name-status 0a99bbcc27d5be27ea3b87d3431fde2c78bc7c6b HEAD)" = "$(printf 'A\t.github/workflows/phase2-convergence.yml\nM\tscripts/ci_r02_backend_rehearsal_harness.py')"
+          test "$(git rev-parse HEAD:scripts/ci_r02_backend_rehearsal_harness.py)" = "ed6cb16c006767086892b0653e2dc3a78efc5f97"
+          python -c "import ast,pathlib; ast.parse(pathlib.Path('scripts/ci_r02_backend_rehearsal_harness.py').read_text(encoding='utf-8'))"
+          test ! -e .github/workflows/cabinet-release-certification.yml
+          python - <<'PY'
+          import subprocess, re, collections, pathlib
+          base = 'f7fa10e12e4db0f4ab23961d82a6050e46b2a8f8'
+          candidate = '0a99bbcc27d5be27ea3b87d3431fde2c78bc7c6b'
+          def git(*args):
+              return subprocess.check_output(['git', *args])
+          delta = git('diff','--no-renames','--name-status','-z',base,candidate).split(b'\0')[:-1]
+          assert len(delta) == 628, 'DELTA_SIZE_MISMATCH'
+          pairs = list(zip(delta[::2],delta[1::2]))
+          counts = collections.Counter(status.decode() for status, _ in pairs)
+          assert counts == {'A':227,'M':87}, 'DELTA_STATUS_MISMATCH'
+          groups = collections.Counter(p.decode().split('/')[0] for _,p in pairs)
+          assert groups == {'.github':42,'backend':61,'frontend':142,'scripts':51,'docs':10,'dc_release_gate':4,'relay':2,'DigitalCrown.spec':1,'run.py':1}
+          print('PHASE2_DELTA_PASS',dict(counts),dict(groups))
+          patterns = [re.compile(rb'(?m)^-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----\s*$'),re.compile(rb'gh[pousr]_[A-Za-z0-9]{36,}'),re.compile(rb'AKIA[A-Z0-9]{16}')]
+          findings = []
+          for _, raw in pairs:
+              p = raw.decode()
+              name = pathlib.PurePosixPath(p).name.lower()
+              if name in ('.env','.env.local','.env.production','.env.production.local','id_rsa','id_ed25519') or name.endswith(('.p12','.pfx','.sqlite','.sqlite3','.db','.dcm')):
+                  findings.append((p,'restricted-name'))
+              blob=git('show',candidate+':'+p)
+              if any(pat.search(blob) for pat in patterns):
+                  findings.append((p,'credential-pattern'))
+              if p.endswith('.py'):
+                  import ast
+                  ast.parse(blob.decode('utf-8-sig'),filename=p)
+          for p, kind in findings:
+              print('REVIEW_REQUIRED',kind,p)
+          assert not findings, 'RESTRICTED_CONTENT_PATTERN_REVIEW_REQUIRED'
+          print('PHASE2_DELTA_PATTERN_AND_PYTHON_SYNTAX_PASS files=314; bounded signature scan, not a confidentiality certification')
+          PY
+  authority-regression:
+    needs: inventory
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Replay synthetic authority, recovery and emulator negatives
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends swtpm tpm2-tools libtss2-tcti-swtpm0t64
+          python -m pip install --disable-pip-version-check --only-binary=:all: 'webauthn==3.0.0' 'cryptography==49.0.0'
+          python -m pip check
+          # The historical __main__ is intentionally bound to its original branch.
+          # Re-run the unchanged test class under an explicit convergence admission,
+          # preserving every repository, runner, SHA and protected-blob assertion.
+          python -B - <<'PY'
+          import os, subprocess, unittest
+          from scripts import ci_j5_02c_passkey_lab as lab
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+          assert os.environ["GITHUB_REF"] == "refs/heads/ci/phase2-convergence-20261127"
+          assert os.environ["GITHUB_REPOSITORY"] == lab.authority.REPOSITORY
+          assert os.environ["GITHUB_REPOSITORY_ID"] == str(lab.authority.REPOSITORY_ID)
+          assert os.environ["GITHUB_REPOSITORY_OWNER_ID"] == str(lab.authority.OWNER_ID)
+          assert os.environ["RUNNER_ENVIRONMENT"] == "github-hosted"
+          assert git("rev-parse", "HEAD") == os.environ["GITHUB_SHA"]
+          candidate = "0a99bbcc27d5be27ea3b87d3431fde2c78bc7c6b"
+          assert git("diff", "--name-status", candidate, "HEAD") == "A\t.github/workflows/phase2-convergence.yml\nM\tscripts/ci_r02_backend_rehearsal_harness.py"
+          assert git("rev-parse", "HEAD:scripts/ci_r02_backend_rehearsal_harness.py") == "ed6cb16c006767086892b0653e2dc3a78efc5f97"
+          for path in ("run.py", "DigitalCrown.spec", "dc_release_gate/release_certification.py", "dc_release_gate/recovery_authority.py", "backend/routers/mobile_passkey.py"):
+              assert git("rev-parse", lab.BASE + ":" + path) == git("rev-parse", "HEAD:" + path), path
+          assert lab.legacy.REPOSITORY != lab.authority.REPOSITORY
+          assert git("rev-parse", "HEAD:scripts/ci_j5_02c_passkey_lab.py") == "53e447c9ff9b32989373df994a0b7cb61283690a"
+          suite = unittest.defaultTestLoader.loadTestsFromTestCase(lab.Lab)
+          assert suite.countTestCases() == 6, "PASSKEY_TEST_COLLECTION_CHANGED"
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.wasSuccessful() and result.testsRun == 6 and not result.skipped and not result.expectedFailures, "PASSKEY_CONVERGENCE_FAILED"
+          print("J5_PASSKEY_CONVERGENCE_LAB_PASS 6/6 NOT_OWNER_ENROLLED_NOT_A_RELEASE")
+          PY
+          python -B -m scripts.ci_j5_02c_recovery_lab
+          python -B -m scripts.ci_j5_02c_trust_root_lab
+          python -B -m scripts.ci_j5_02c_tpm_anchor_lab
+  packaging-guard-regression:
+    needs: inventory
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Replay admission and isolated native restore without release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw 'HEAD_MISMATCH' }
+          foreach ($module in @('scripts.ci_j5_03c_asset_exclusion_tests','scripts.ci_r02_launcher_admission','scripts.ci_r02_recovery_authority')) {
+            python -B -m $module
+            if ($LASTEXITCODE -ne 0) { throw ('REGRESSION_FAILED ' + $module) }
+          }
+          python -m pip --isolated install --only-binary=:all: 'sqlcipher3==0.6.2' 'SQLAlchemy==2.0.28' 'cryptography==49.0.0'
+          if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCIES_FAILED' }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'PIP_CHECK_FAILED' }
+          python -B -m scripts.ci_j5_03d_sqlcipher_restore
+          if ($LASTEXITCODE -ne 0) { throw 'RESTORE_FAILED' }
+  r03-conv03-security-clinical-retention:
+    needs: inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify exact convergence HEAD
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Validate integration driver syntax
+        run: node --check frontend/scripts/ci-desktop-integration.mjs
+      - name: Validate all Python source syntax
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          files = sorted(Path('backend').rglob('*.py'))
+          for p in files:
+              ast.parse(p.read_text(encoding='utf-8-sig'), filename=str(p))
+          print(f'BACKEND_AST_PASS files={len(files)}')
+          PY
+      - name: Install native runtime prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsqlcipher-dev libmagic1 libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libgl1 libglib2.0-0t64
+      - name: Install pinned Python dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+          python -m pip install --no-cache-dir --index-url https://pypi.org/simple -r backend/requirements.txt
+          python -m pip check
+          echo PYTHON_DEPENDENCIES_PASS
+      - name: Create fresh encrypted LAB and run actual FastAPI without external network
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-rehearsal.XXXXXXXX")
+          ns="dc-rehearsal-$GITHUB_RUN_ID"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          export DC_LAB_ROOT="$lab"
+          export DC_PYTHON="$(command -v python)"
+          export DC_CHECKOUT="$GITHUB_WORKSPACE"
+          export DC_EVIDENCE="$RUNNER_TEMP/dc-integration-evidence"
+          mkdir -p "$DC_EVIDENCE"
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" bash -s <<'LAB'
+          set -euo pipefail
+          umask 077
+          cd "$DC_CHECKOUT"
+          export HOME="$DC_LAB_ROOT/home"
+          export XDG_CONFIG_HOME="$HOME/config" XDG_RUNTIME_DIR="$HOME/runtime" XDG_DATA_HOME="$HOME/data"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME" "$DC_LAB_ROOT/rehearsal-media"
+          export ENVIRONMENT=e2e_install_rehearsal
+          export ALLOWED_ORIGINS=http://127.0.0.1:5173
+          export DC_SYNTH_PASSWORD="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          export VITE_API_URL=http://127.0.0.1:8008 VITE_ENABLE_HTTPS=false
+          export DATABASE_URL="sqlite:///$DC_LAB_ROOT/fresh-rehearsal.db"
+          export MEDIA_ROOT="$DC_LAB_ROOT/rehearsal-media"
+          export SECRET_KEY="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export CABINET_MASTER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export SQLCIPHER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export MOBILE_PAIRING_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export DIGITALCROWN_ISOLATED_RUNTIME=true TELEMETRY_ENABLED=false
+          export GOOGLE_CLIENT_ID='' GOOGLE_CLIENT_SECRET='' SMTP_HOST='' PATIENT_COMPANION_RELAY_URL='' PATIENT_COMPANION_RELAY_BOOTSTRAP_SECRET=''
+          export DIGITALCROWN_ISOLATION_DB_FINGERPRINT="$("$DC_PYTHON" -c 'import os; from backend.core.runtime_safety import database_target_fingerprint; print(database_target_fingerprint(os.environ["DATABASE_URL"]))')"
+          test ! -e "$DC_LAB_ROOT/fresh-rehearsal.db"
+          test "$(ip -o link show | wc -l)" -eq 1
+          echo LAB_LOOPBACK_ONLY
+          "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
+          "$DC_PYTHON" -m backend.scripts.ci_fk_runtime_probe
+          "$DC_PYTHON" -m backend.scripts.ci_clinical_retention_probe
+          "$DC_PYTHON" -m backend.scripts.ci_f04_business_cascade_probe
+          "$DC_PYTHON" -m backend.scripts.ci_fk_mutation_inventory
+          "$DC_PYTHON" -m backend.scripts.ci_f04_purge_failclosed_probe
+          LAB
+  r03-conv03-security-restore-integrity:
+    needs: inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify exact convergence HEAD
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Validate integration driver syntax
+        run: node --check frontend/scripts/ci-desktop-integration.mjs
+      - name: Validate all Python source syntax
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          files = sorted(Path('backend').rglob('*.py'))
+          for p in files:
+              ast.parse(p.read_text(encoding='utf-8-sig'), filename=str(p))
+          print(f'BACKEND_AST_PASS files={len(files)}')
+          PY
+      - name: Install native runtime prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsqlcipher-dev libmagic1 libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libgl1 libglib2.0-0t64
+      - name: Install pinned Python dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+          python -m pip install --no-cache-dir --index-url https://pypi.org/simple -r backend/requirements.txt
+          python -m pip check
+          echo PYTHON_DEPENDENCIES_PASS
+      - name: Create fresh encrypted LAB and run actual FastAPI without external network
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-rehearsal.XXXXXXXX")
+          ns="dc-rehearsal-$GITHUB_RUN_ID"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          export DC_LAB_ROOT="$lab"
+          export DC_PYTHON="$(command -v python)"
+          export DC_CHECKOUT="$GITHUB_WORKSPACE"
+          export DC_EVIDENCE="$RUNNER_TEMP/dc-integration-evidence"
+          mkdir -p "$DC_EVIDENCE"
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" bash -s <<'LAB'
+          set -euo pipefail
+          umask 077
+          cd "$DC_CHECKOUT"
+          export HOME="$DC_LAB_ROOT/home"
+          export XDG_CONFIG_HOME="$HOME/config" XDG_RUNTIME_DIR="$HOME/runtime" XDG_DATA_HOME="$HOME/data"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME" "$DC_LAB_ROOT/rehearsal-media"
+          export ENVIRONMENT=e2e_install_rehearsal
+          export ALLOWED_ORIGINS=http://127.0.0.1:5173
+          export DC_SYNTH_PASSWORD="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          export VITE_API_URL=http://127.0.0.1:8008 VITE_ENABLE_HTTPS=false
+          export DATABASE_URL="sqlite:///$DC_LAB_ROOT/fresh-rehearsal.db"
+          export MEDIA_ROOT="$DC_LAB_ROOT/rehearsal-media"
+          export SECRET_KEY="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export CABINET_MASTER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export SQLCIPHER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export MOBILE_PAIRING_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export DIGITALCROWN_ISOLATED_RUNTIME=true TELEMETRY_ENABLED=false
+          export GOOGLE_CLIENT_ID='' GOOGLE_CLIENT_SECRET='' SMTP_HOST='' PATIENT_COMPANION_RELAY_URL='' PATIENT_COMPANION_RELAY_BOOTSTRAP_SECRET=''
+          export DIGITALCROWN_ISOLATION_DB_FINGERPRINT="$("$DC_PYTHON" -c 'import os; from backend.core.runtime_safety import database_target_fingerprint; print(database_target_fingerprint(os.environ["DATABASE_URL"]))')"
+          test ! -e "$DC_LAB_ROOT/fresh-rehearsal.db"
+          test "$(ip -o link show | wc -l)" -eq 1
+          echo LAB_LOOPBACK_ONLY
+          "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
+          "$DC_PYTHON" -m backend.scripts.ci_fk_runtime_probe
+          "$DC_PYTHON" -m backend.scripts.ci_restore_referential_probe
+          LAB
+  r03-conv03-security-synthetic-audit:
+    needs: inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify exact convergence HEAD
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install SQLCipher
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsqlcipher-dev
+          python -m pip install --no-cache-dir 'sqlcipher3==0.6.2'
+      - name: Verify read-only behavior on synthetic encrypted copies
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          git diff --exit-code -- backend/scripts/ci_fk_readonly_audit.py
+          sha256sum backend/scripts/ci_fk_readonly_audit.py
+          ns="r01-audit-$GITHUB_RUN_ID"
+          lab="$(mktemp -d "$RUNNER_TEMP/r01-audit.XXXXXXXX")"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" HOME="$lab" LAB="$lab" PYTHONPATH="$GITHUB_WORKSPACE/backend/scripts" "$(command -v python)" - <<'PY'
+          import os, secrets, pathlib, subprocess, shutil
+          from sqlcipher3 import dbapi2 as driver
+          from ci_fk_readonly_audit import audit, sha256
+          assert len(subprocess.check_output(["ip","-o","link","show"],text=True).splitlines()) == 1
+          lab=pathlib.Path(os.environ["LAB"])
+          key=secrets.token_hex(32)
+          def build(name, orphan=False):
+              p=lab/name
+              c=driver.connect(str(p))
+              try:
+                  c.execute("PRAGMA key = '"+key+"'")
+                  c.execute("CREATE TABLE parent(id INTEGER PRIMARY KEY)")
+                  c.execute("CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id REFERENCES parent(id))")
+                  c.execute("INSERT INTO parent VALUES (1)")
+                  c.execute("INSERT INTO child VALUES (1,1)")
+                  if orphan:
+                      c.execute("INSERT INTO child VALUES (2,999)")
+                  c.commit()
+              finally:
+                  c.close()
+              copy=lab/("copy-"+name)
+              shutil.copyfile(p,copy)
+              return copy
+          clean=build("clean.db")
+          bad=build("orphan.db",True)
+          for p,count in ((clean,0),(bad,1)):
+              before=sha256(p)
+              assert audit(p,driver,key)=={"integrity_ok":True,"fk_violations":count,"unchanged":True}
+              assert sha256(p)==before
+              print("AUDIT_SYNTHETIC_PASS violations="+str(count))
+          before=sha256(clean)
+          try:
+              audit(clean,driver,secrets.token_hex(32))
+          except Exception:
+              pass
+          else:
+              raise AssertionError("Wrong key accepted")
+          assert sha256(clean)==before
+          print("AUDIT_WRONG_KEY_REFUSED_PASS")
+          c=driver.connect(clean.as_uri()+"?mode=ro&immutable=1",uri=True)
+          try:
+              c.execute("PRAGMA key = '"+key+"'")
+              try:
+                  c.execute("DELETE FROM child")
+              except driver.DatabaseError:
+                  pass
+              else:
+                  raise AssertionError("Read-only URI accepted mutation")
+          finally:
+              c.close()
+          assert sha256(clean)==before
+          print("AUDIT_READONLY_WRITE_REFUSED_PASS")
+          pathlib.Path(str(clean)+"-wal").touch()
+          try:
+              audit(clean,driver,key)
+          except RuntimeError as e:
+              assert str(e)=="COPY_HAS_SIDECARS"
+          else:
+              raise AssertionError("Sidecar accepted")
+          assert sha256(clean)==before
+          print("AUDIT_SIDECAR_REFUSED_PASS")
+          pathlib.Path(str(clean)+"-wal").unlink()
+          hard=lab/"hardlink.db"
+          os.link(clean,hard)
+          try:
+              audit(clean,driver,key)
+          except RuntimeError as e:
+              assert str(e)=="COPY_LINK_COUNT_INVALID"
+          else:
+              raise AssertionError("Hardlinked source accepted")
+          hard.unlink()
+          print("AUDIT_HARDLINK_REFUSED_PASS")
+          clean.chmod(0o666)
+          try:
+              audit(clean,driver,key)
+          except RuntimeError as e:
+              assert str(e)=="COPY_PERMISSIONS_UNSAFE"
+          else:
+              raise AssertionError("Writable shared source accepted")
+          clean.chmod(0o600)
+          print("AUDIT_UNSAFE_PERMISSIONS_REFUSED_PASS")
+          class ChangedSourceDriver:
+              @staticmethod
+              def connect(database_uri,**kwargs):
+                  assert "snapshot.db" in database_uri and str(clean) not in database_uri
+                  with clean.open("ab") as f:
+                      f.write(b"synthetic-concurrent-change")
+                  return driver.connect(database_uri,**kwargs)
+          try:
+              audit(clean,ChangedSourceDriver,key)
+          except RuntimeError as e:
+              assert str(e)=="COPY_CHANGED_DURING_AUDIT"
+          else:
+              raise AssertionError("Changed source accepted")
+          assert not list(lab.glob(".dc-fk-audit-*"))
+          print("AUDIT_SOURCE_CHANGE_AND_CLEANUP_PASS")
+          print("SQLCIPHER_READONLY_AUDIT_PASS count=8")
+          PY
+  dc-mvp-desktop-integration-desktop-integration:
+    needs: inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Validate integration driver syntax
+        run: node --check frontend/scripts/ci-desktop-integration.mjs
+      - name: Validate all Python source syntax
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          files = sorted(Path('backend').rglob('*.py'))
+          for p in files:
+              ast.parse(p.read_text(encoding='utf-8-sig'), filename=str(p))
+          print(f'BACKEND_AST_PASS files={len(files)}')
+          PY
+      - name: Install native runtime prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsqlcipher-dev libmagic1 libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libgl1 libglib2.0-0t64
+      - name: Install pinned Python dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+          python -m pip install --no-cache-dir --index-url https://pypi.org/simple -r backend/requirements.txt
+          python -m pip check
+          echo PYTHON_DEPENDENCIES_PASS
+      - name: Create fresh encrypted LAB and run actual FastAPI without external network
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-rehearsal.XXXXXXXX")
+          ns="dc-rehearsal-$GITHUB_RUN_ID"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          export DC_LAB_ROOT="$lab"
+          export DC_PYTHON="$(command -v python)"
+          export DC_CHECKOUT="$GITHUB_WORKSPACE"
+          export DC_EVIDENCE="$RUNNER_TEMP/dc-integration-evidence"
+          mkdir -p "$DC_EVIDENCE"
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" DC_BUILT_REHEARSAL=true bash -s <<'LAB'
+          set -euo pipefail
+          umask 077
+          cd "$DC_CHECKOUT"
+          export HOME="$DC_LAB_ROOT/home"
+          export XDG_CONFIG_HOME="$HOME/config" XDG_RUNTIME_DIR="$HOME/runtime" XDG_DATA_HOME="$HOME/data"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME" "$DC_LAB_ROOT/rehearsal-media"
+          export ENVIRONMENT=e2e_install_rehearsal
+          export ALLOWED_ORIGINS=http://127.0.0.1:5173
+          export DC_SYNTH_PASSWORD="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          export VITE_API_URL=http://127.0.0.1:8008 VITE_ENABLE_HTTPS=false
+          export DATABASE_URL="sqlite:///$DC_LAB_ROOT/fresh-rehearsal.db"
+          export MEDIA_ROOT="$DC_LAB_ROOT/rehearsal-media"
+          export SECRET_KEY="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export CABINET_MASTER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export SQLCIPHER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export MOBILE_PAIRING_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export DIGITALCROWN_ISOLATED_RUNTIME=true TELEMETRY_ENABLED=false
+          export GOOGLE_CLIENT_ID='' GOOGLE_CLIENT_SECRET='' SMTP_HOST='' PATIENT_COMPANION_RELAY_URL='' PATIENT_COMPANION_RELAY_BOOTSTRAP_SECRET=''
+          export DIGITALCROWN_ISOLATION_DB_FINGERPRINT="$("$DC_PYTHON" -c 'import os; from backend.core.runtime_safety import database_target_fingerprint; print(database_target_fingerprint(os.environ["DATABASE_URL"]))')"
+          test ! -e "$DC_LAB_ROOT/fresh-rehearsal.db"
+          test "$(ip -o link show | wc -l)" -eq 1
+          echo LAB_LOOPBACK_ONLY
+          "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
+          "$DC_PYTHON" -m backend.scripts.ci_desktop_integration seed
+          # Deterministic regression of the receive/deadline contract in the LAB.
+          "$DC_PYTHON" - <<'PY'
+          import asyncio
+          from backend.routers.ai_feedback import _ghost_wait_for_disconnect
+
+          class Socket:
+              def __init__(self, messages=(), flood=False):
+                  self.messages = asyncio.Queue()
+                  for message in messages:
+                      self.messages.put_nowait(message)
+                  self.flood = flood
+              async def receive(self):
+                  if self.flood:
+                      await asyncio.sleep(0)
+                      return {"type": "websocket.receive", "text": "synthetic"}
+                  return await self.messages.get()
+
+          async def check():
+              disconnected = Socket([{"type": "websocket.disconnect", "code": 1001}])
+              assert await asyncio.wait_for(_ghost_wait_for_disconnect(disconnected), 1)
+              mixed = Socket([{"type": "websocket.receive", "text": "synthetic"},
+                              {"type": "websocket.disconnect", "code": 1000}])
+              assert await asyncio.wait_for(_ghost_wait_for_disconnect(mixed), 1)
+              assert not await asyncio.wait_for(_ghost_wait_for_disconnect(Socket(), .03), 1)
+              assert not await asyncio.wait_for(_ghost_wait_for_disconnect(Socket(flood=True), .03), 1)
+              pending = asyncio.create_task(_ghost_wait_for_disconnect(Socket()))
+              await asyncio.sleep(0)
+              pending.cancel()
+              try:
+                  await pending
+              except asyncio.CancelledError:
+                  pass
+              else:
+                  raise AssertionError("Cancellation swallowed")
+              print("GHOST_DISCONNECT_DEADLINE_CANCELLATION_PASS")
+          asyncio.run(check())
+          PY
+          # Diagnostic launcher exists only in this isolated LAB.
+          cat > "$DC_LAB_ROOT/uvicorn-diagnostic.py" <<'PY'
+          import asyncio
+          import faulthandler
+          import os
+          import signal
+          import re
+          import uvicorn
+
+          active_requests = {}
+
+          def safe_name(value):
+              return re.sub(r"[^a-zA-Z0-9_.<>-]", "_", str(value))[:120]
+
+          def await_chain(task):
+              coro = task.get_coro()
+              seen = set()
+              frames = []
+              while coro is not None and id(coro) not in seen and len(frames) < 30:
+                  seen.add(id(coro))
+                  code = getattr(coro, "cr_code", None) or getattr(coro, "gi_code", None)
+                  frame = getattr(coro, "cr_frame", None) or getattr(coro, "gi_frame", None)
+                  if code is not None:
+                      frames.append("%s:%s:%s" % (safe_name(os.path.basename(code.co_filename)),
+                                    frame.f_lineno if frame else 0, safe_name(code.co_name)))
+                  coro = getattr(coro, "cr_await", None) or getattr(coro, "gi_yieldfrom", None) or getattr(coro, "ag_await", None)
+              return ">".join(frames) or "unknown"
+
+          def observe_app(app):
+              async def observed(scope, receive, send):
+                  task = asyncio.current_task()
+                  state = {"scope": scope, "disconnect": False, "response_complete": False}
+                  active_requests[task] = state
+                  async def observed_receive():
+                      message = await receive()
+                      if message["type"] in {"http.disconnect", "websocket.disconnect"}:
+                          state["disconnect"] = True
+                      return message
+                  async def observed_send(message):
+                      await send(message)
+                      if message["type"] == "http.response.body" and not message.get("more_body", False):
+                          state["response_complete"] = True
+                  try:
+                      await app(scope, observed_receive, observed_send)
+                  finally:
+                      active_requests.pop(task, None)
+                      if getattr(scope.get("endpoint"), "__name__", "") == "websocket_ghost_insights":
+                          print("R02_GHOST_HANDLER_EXIT disconnect=%d" % int(state["disconnect"]), flush=True)
+              return observed
+
+          class DiagnosticServer(uvicorn.Server):
+              async def shutdown(self, sockets=None):
+                  print("R02_UVICORN_SHUTDOWN_ENTER", flush=True)
+                  async def monitor():
+                      while True:
+                          print("R02_UVICORN_STATE connections=%d tasks=%d" %
+                                (len(self.server_state.connections), len(self.server_state.tasks)), flush=True)
+                          for pending in list(self.server_state.tasks):
+                              state = active_requests.get(pending, {})
+                              scope = state.get("scope", {})
+                              endpoint = scope.get("endpoint")
+                              print("R02_PENDING endpoint=%s method=%s disconnect=%s response_complete=%s chain=%s" %
+                                    (safe_name(getattr(endpoint, "__name__", "unresolved")),
+                                     scope.get("method") if scope.get("method") in {"GET","POST","PUT","PATCH","DELETE","OPTIONS","HEAD"} else "other",
+                                     int(state.get("disconnect", False)), int(state.get("response_complete", False)),
+                                     await_chain(pending)), flush=True)
+                          # Include child coroutines: Starlette task groups can hide the actual handler.
+                          if self.server_state.tasks:
+                              for child in sorted(asyncio.all_tasks(), key=lambda t: t.get_name()):
+                                  if child is not asyncio.current_task() and not child.done():
+                                      print("R02_ASYNC_CHAIN " + await_chain(child), flush=True)
+                          await asyncio.sleep(2)
+                  task = asyncio.create_task(monitor())
+                  try:
+                      await super().shutdown(sockets=sockets)
+                      print("R02_UVICORN_SHUTDOWN_RETURN", flush=True)
+                  finally:
+                      task.cancel()
+                      await asyncio.gather(task, return_exceptions=True)
+
+          if __name__ == "__main__":
+              with open(os.path.join(os.environ["DC_LAB_ROOT"], "shutdown-stacks.log"), "a") as stacks:
+                  faulthandler.register(signal.SIGUSR1, file=stacks, all_threads=True)
+                  config = uvicorn.Config("backend.main:app", host="127.0.0.1", port=8008)
+                  config.load()
+                  config.loaded_app = observe_app(config.loaded_app)
+                  DiagnosticServer(config).run()
+          PY
+          export PYTHONPATH="$DC_CHECKOUT"
+          backend_log="$DC_LAB_ROOT/uvicorn.log"
+          "$DC_PYTHON" "$DC_LAB_ROOT/uvicorn-diagnostic.py" > "$backend_log" 2>&1 &
+          pid=$!
+          stop_lab_process() {
+            local label="$1" child="$2" attempt
+            echo "R02_STOP_BEGIN_$label"
+            kill -TERM "$child" 2>/dev/null || true
+            for attempt in $(seq 1 20); do
+              if ! kill -0 "$child" 2>/dev/null; then
+                local child_rc=0
+                wait "$child" 2>/dev/null || child_rc=$?
+                echo "R02_STOP_DONE_$label rc=$child_rc"
+                if [ "$label" = BACKEND ]; then
+                  [ "$child_rc" -eq 0 ] || return 1
+                  grep -Fx 'R02_UVICORN_SHUTDOWN_RETURN' "$backend_log" || return 1
+                fi
+                return 0
+              fi
+              sleep 1
+            done
+            echo "R02_STOP_TIMEOUT_$label"
+            if [ "$label" = BACKEND ]; then
+              grep -E '^(R02_UVICORN_(SHUTDOWN_(ENTER|RETURN)|STATE connections=[0-9]+ tasks=[0-9]+)|INFO: +(Shutting down|Waiting for application shutdown[.]|Application shutdown complete[.]|Waiting for connections to close[.] \(CTRL\+C to force quit\)|Waiting for background tasks to complete[.] \(CTRL\+C to force quit\)))$' "$backend_log" | tail -n 25 || true
+              grep -E '^R02_(PENDING endpoint=[a-zA-Z0-9_.<>-]+ method=(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|other) disconnect=[01] response_complete=[01] chain=[a-zA-Z0-9_.:<>-]+|ASYNC_CHAIN [a-zA-Z0-9_.:<>-]+)$' "$backend_log" | sort -u | head -n 60 || true
+              kill -USR1 "$child" 2>/dev/null || true
+              sleep 1
+              if [ -f "$DC_LAB_ROOT/shutdown-stacks.log" ]; then
+                sed -nE 's@^  File "([^"]*/)?([^/" ]+)", line ([0-9]+) in ([[:alnum:]_<>.-]+)$@R02_STACK \2:\3 \4@p' "$DC_LAB_ROOT/shutdown-stacks.log" | head -n 60 || true
+              fi
+            fi
+            kill -KILL "$child" 2>/dev/null || true
+            return 1
+          }
+          vite_pid=
+          chrome_pid=
+          cleanup_lab() {
+            local rc=$?
+            trap - EXIT
+            set +e
+            if [ -n "$pid" ]; then stop_lab_process BACKEND "$pid" || rc=1; fi
+            if [ -n "$vite_pid" ]; then stop_lab_process VITE "$vite_pid" || rc=1; fi
+            if [ -n "$chrome_pid" ]; then stop_lab_process CHROME "$chrome_pid" || rc=1; fi
+            echo "R02_CLEANUP_EXIT=$rc"
+            exit "$rc"
+          }
+          trap cleanup_lab EXIT
+          "$DC_PYTHON" - <<'PY'
+          import json, time, urllib.request
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          def get(path):
+              with opener.open('http://127.0.0.1:8008' + path, timeout=2) as r:
+                  assert r.status == 200
+                  return json.load(r)
+          for attempt in range(60):
+              try:
+                  root = get('/health')
+                  assert root['status'] == 'ok' and root['db'] == 'ok'
+                  break
+              except (OSError, AssertionError, ValueError, KeyError):
+                  time.sleep(1)
+          else:
+              raise SystemExit('BACKEND_HEALTH_BLOCKED')
+          result = get('/api/health')
+          assert result['status'] == 'ok' and result['database'] == 'ok'
+          assert result['environment'] == 'e2e_install_rehearsal'
+          assert get('/api/health/db')['status'] == 'ok'
+          assert get('/api/health/storage')['status'] == 'ok'
+          print('BACKEND_HTTP_PASS: /health, /api/health, /api/health/db, /api/health/storage')
+          PY
+          (
+            cd frontend
+            if [ "$DC_BUILT_REHEARSAL" = true ]; then
+              npm run build:rehearsal
+              exec ./node_modules/.bin/vite preview --outDir dist-rehearsal --host 127.0.0.1 --port 5173 --strictPort
+            fi
+            exec ./node_modules/.bin/vite --host 127.0.0.1 --port 5173 --strictPort
+          ) > "$DC_LAB_ROOT/vite.log" 2>&1 &
+          vite_pid=$!
+          ready=false
+          for attempt in $(seq 1 100); do
+            if curl --noproxy '*' --fail --silent http://127.0.0.1:5173/login >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser)
+          "$chrome" --headless --no-sandbox --disable-dev-shm-usage --disable-background-networking --disable-sync --disable-extensions --no-first-run --no-default-browser-check --window-size=1440,900 --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="$DC_LAB_ROOT/chrome" http://127.0.0.1:5173/login > "$DC_LAB_ROOT/chrome.log" 2>&1 &
+          chrome_pid=$!
+          echo R02_DRIVER_INITIAL_BEGIN
+          timeout --kill-after=10s 300s node frontend/scripts/ci-desktop-integration.mjs
+          echo R02_DRIVER_INITIAL_EXIT_PASS
+          stop_lab_process BACKEND "$pid"
+          pid=
+          grep -Fx 'R02_GHOST_HANDLER_EXIT disconnect=1' "$backend_log"
+          echo R02_REAL_GHOST_DISCONNECT_PASS
+          echo R02_PERSISTENCE_VERIFY_BEGIN
+          timeout --kill-after=10s 90s "$DC_PYTHON" -m backend.scripts.ci_desktop_integration verify
+          echo R02_PERSISTENCE_VERIFY_EXIT_PASS
+          echo R02_BACKEND_RESTART_BEGIN
+          : > "$DC_LAB_ROOT/shutdown-stacks.log"
+          backend_log="$DC_LAB_ROOT/uvicorn-restart.log"
+          "$DC_PYTHON" "$DC_LAB_ROOT/uvicorn-diagnostic.py" > "$backend_log" 2>&1 &
+          pid=$!
+          "$DC_PYTHON" - <<'PY'
+          import json, time, urllib.request
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          for attempt in range(60):
+              try:
+                  with opener.open("http://127.0.0.1:8008/health", timeout=2) as r:
+                      assert json.load(r)["db"] == "ok"
+                  break
+              except (OSError, AssertionError, ValueError, KeyError):
+                  time.sleep(1)
+          else:
+              raise RuntimeError("Restart health failed")
+          PY
+          echo R02_DRIVER_RESTART_BEGIN
+          timeout --kill-after=10s 150s node frontend/scripts/ci-desktop-integration.mjs --verify-restart
+          echo R02_DRIVER_RESTART_EXIT_PASS
+          LAB
+      - name: Upload synthetic browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dc-desktop-integration-synthetic
+          path: ${{ runner.temp }}/dc-integration-evidence/*.png
+          if-no-files-found: ignore
+          retention-days: 3
+  r02-desktop-final-full-runtime-dependencies:
+    needs: inventory
+    runs-on: windows-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify exact convergence HEAD
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw 'HEAD_MISMATCH' }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+          architecture: x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.3'
+      - name: Build guarded same-origin synthetic frontend
+        working-directory: frontend
+        shell: pwsh
+        env:
+          VITE_API_URL: http://127.0.0.1:8008
+          VITE_ENABLE_HTTPS: 'false'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($file in @('.env','.env.local','.env.production','.env.production.local')) {
+            if (Test-Path -LiteralPath $file) { throw 'PRIVATE_FRONTEND_ENV_REFUSED' }
+          }
+          npm ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'FRONTEND_DEPS_FAILED' }
+          npm run build:rehearsal
+          if ($LASTEXITCODE -ne 0) { throw 'FRONTEND_BUILD_FAILED' }
+          node scripts/ci-pwa-assets.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'PWA_ASSET_CONTRACT_FAILED' }
+          node --check scripts/ci-desktop-integration.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'BROWSER_DRIVER_SYNTAX_FAILED' }
+      - name: Install isolated Playwright Chromium test tooling
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $env:RUNNER_TEMP ("dc-browser-tools-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
+          New-Item -ItemType Directory -Path $tools | Out-Null
+          '{"private":true,"name":"dc-browser-ci","version":"0.0.0"}' | Set-Content -LiteralPath (Join-Path $tools 'package.json') -Encoding ascii
+          npm install --prefix $tools --ignore-scripts --no-audit --no-fund --save-exact --registry https://registry.npmjs.org playwright-core@1.61.0
+          if ($LASTEXITCODE -ne 0) { throw 'PLAYWRIGHT_TOOL_INSTALL_FAILED' }
+          $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $tools 'browsers'
+          node (Join-Path $tools 'node_modules\playwright-core\cli.js') install chromium
+          if ($LASTEXITCODE -ne 0) { throw 'PLAYWRIGHT_CHROMIUM_INSTALL_FAILED' }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value ("DC_BROWSER_TOOLS=" + $tools) -Encoding utf8
+          node --check frontend/scripts/ci-r02-windows-browser.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'PIPE_CONTROLLER_SYNTAX_FAILED' }
+          Write-Host 'R02_DESKTOP_PLAYWRIGHT_TOOLING_PASS'
+      - name: Provision native MinGW64 libraries on disposable GitHub runner
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bash = 'C:\msys64\usr\bin\bash.exe'
+          if (-not (Test-Path -LiteralPath $bash -PathType Leaf)) { throw 'MSYS2_RUNNER_MISSING' }
+          $env:MSYSTEM = 'MINGW64'
+          $env:CHERE_INVOKING = '1'
+          # Do not disable package signatures or use Git's MSYS runtime DLLs.
+          & $bash -lc 'set -e; pacman-conf SigLevel; pacman -Syu --noconfirm'
+          if ($LASTEXITCODE -ne 0) { throw 'MSYS2_UPDATE_FAILED' }
+          & $bash -lc 'set -e; pacman -Syu --noconfirm; pacman -S --needed --noconfirm mingw-w64-x86_64-file mingw-w64-x86_64-pango; pacman -Q mingw-w64-x86_64-file mingw-w64-x86_64-pango; pacman -Qo /mingw64/bin/libmagic-1.dll /mingw64/bin/libpango-1.0-0.dll /mingw64/bin/libgobject-2.0-0.dll /mingw64/bin/libpangoft2-1.0-0.dll /mingw64/share/misc/magic.mgc'
+          if ($LASTEXITCODE -ne 0) { throw 'MINGW_NATIVE_PROVISION_FAILED' }
+          foreach ($dll in @('libmagic-1.dll','libpango-1.0-0.dll','libgobject-2.0-0.dll','libpangoft2-1.0-0.dll')) {
+            $file = Join-Path 'C:\msys64\mingw64\bin' $dll
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "NATIVE_DLL_MISSING $dll" }
+            Write-Host ('R02_NATIVE_DLL_SHA256 ' + $dll + '=' + (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant())
+          }
+          Write-Host 'R02_MINGW_NATIVE_PROVISION_PASS'
+      - name: Rebuild required inputs and verify remaining integrated desktop closeout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lab = Join-Path $env:RUNNER_TEMP ('dc-full-deps-' + [guid]::NewGuid().ToString('N'))
+          try {
+            python -m venv $lab
+            if ($LASTEXITCODE -ne 0) { throw 'VENV_FAILED' }
+            $py = Join-Path $lab 'Scripts\python.exe'
+            & $py -m pip --isolated install --disable-pip-version-check --no-cache-dir --only-binary=:all: --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+            if ($LASTEXITCODE -ne 0) { throw 'CPU_WHEEL_INSTALL_FAILED' }
+            # Build only explicitly reviewed, hash-pinned source-only distributions.
+            & $py -m pip --isolated install --disable-pip-version-check --no-cache-dir --only-binary=:all: --index-url https://pypi.org/simple 'setuptools==82.0.0' 'wheel==0.46.3'
+            if ($LASTEXITCODE -ne 0) { throw 'PINNED_WHEEL_BUILDER_INSTALL_FAILED' }
+            $wheelhouse = Join-Path $lab 'verified-wheelhouse'
+            New-Item -ItemType Directory -Path $wheelhouse | Out-Null
+            $approved = @(
+              @{ project='svglib'; version='1.5.1'; file='svglib-1.5.1.tar.gz'; sha='3ae765d3a9409ee60c0fb4d24c2deb6a80617aa927054f5bcd7fc98f0695e587'; wheelPattern='^svglib-1\.5\.1-py3-none-any\.whl$' },
+              @{ project='http-ece'; version='1.2.1'; file='http_ece-1.2.1.tar.gz'; sha='8c6ab23116bbf6affda894acfd5f2ca0fb8facbcbb72121c11c75c33e7ce8cff'; wheelPattern='^http_ece-1\.2\.1-(py3|py2\.py3)-none-any\.whl$' }
+            )
+            $constraints = Join-Path $lab 'reviewed-source-constraints.txt'
+            # Use the complete qualified graph before resolution.
+            $qualified = Get-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'scripts\r02-desktop-proven-versions.json') -Raw | ConvertFrom-Json
+            $pins = @($qualified.packages.PSObject.Properties)
+            if ($qualified.schema -ne 1 -or $qualified.python -cne '3.12.10' -or $pins.Count -ne 187) { throw 'INVALID_QUALIFIED_GRAPH' }
+            foreach ($pin in $pins) {
+              if ($pin.Name -notmatch '^[a-z0-9][a-z0-9_.-]*$' -or $pin.Value -notmatch '^[A-Za-z0-9.+!_-]+$') { throw 'INVALID_QUALIFIED_PIN' }
+              Add-Content -LiteralPath $constraints -Value ($pin.Name + '==' + $pin.Value) -Encoding ascii
+            }
+            Write-Host ('J5_03C_QUALIFIED_CONSTRAINTS_PASS count=' + $pins.Count)
+            foreach ($entry in $approved) {
+              $sdist = Join-Path $lab $entry.file
+              $release = Invoke-RestMethod -Uri ("https://pypi.org/pypi/{0}/{1}/json" -f $entry.project,$entry.version)
+              $source = @($release.urls | Where-Object { $_.filename -ceq $entry.file -and $_.packagetype -ceq 'sdist' })
+              if ($source.Count -ne 1 -or $source[0].digests.sha256 -cne $entry.sha -or $source[0].yanked) { throw ("SOURCE_IDENTITY_MISMATCH " + $entry.project) }
+              $uri = [uri]$source[0].url
+              if ($uri.Scheme -cne 'https' -or $uri.Host -cne 'files.pythonhosted.org' -or $uri.UserInfo) { throw 'SOURCE_ORIGIN_REFUSED' }
+              Invoke-WebRequest -Uri $uri -OutFile $sdist
+              if ((Get-FileHash -LiteralPath $sdist -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha) { throw ("SOURCE_HASH_MISMATCH " + $entry.project) }
+              Write-Host ("R02_REVIEWED_SOURCE_SHA256_PASS " + $entry.project)
+              & $py -m pip --isolated wheel --disable-pip-version-check --no-cache-dir --no-index --no-deps --no-build-isolation --wheel-dir $wheelhouse $sdist
+              if ($LASTEXITCODE -ne 0) { throw ("LOCAL_WHEEL_BUILD_FAILED " + $entry.project) }
+              $wheels = @(Get-ChildItem -LiteralPath $wheelhouse -File | Where-Object { $_.Name -cmatch $entry.wheelPattern })
+              if ($wheels.Count -ne 1) { throw ("WHEEL_IDENTITY_MISMATCH " + $entry.project) }
+              Write-Host ("R02_REVIEWED_LOCAL_WHEEL_SHA256 " + $entry.project + "=" + (Get-FileHash -LiteralPath $wheels[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant())
+              $pin = $qualified.packages.PSObject.Properties[$entry.project]
+              if ($null -eq $pin -or $pin.Value -cne $entry.version) { throw ('UNQUALIFIED_SOURCE_VERSION ' + $entry.project) }
+            }
+            if (@(Get-ChildItem -LiteralPath $wheelhouse -File).Count -ne $approved.Count) { throw 'UNEXPECTED_WHEELHOUSE_CONTENT' }
+            # Resolve the entire dependency graph before mutating the full environment.
+            # No generic source fallback, including transitive packages.
+            $report = Join-Path $lab 'wheel-resolution.json'
+            $requirements = Join-Path $env:GITHUB_WORKSPACE 'backend\requirements-windows-build.txt'
+            $resolver = @('--disable-pip-version-check','--no-cache-dir','--only-binary=:all:','--index-url','https://pypi.org/simple','--find-links',$wheelhouse,'-c',$constraints,'-r',$requirements)
+            & $py -m pip --isolated install @resolver --dry-run --report $report
+            if ($LASTEXITCODE -ne 0) { throw 'FULL_WINDOWS_BINARY_GRAPH_RESOLUTION_FAILED' }
+            $plan = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+            foreach ($item in $plan.install) {
+              $url = [uri]$item.download_info.url
+              if (-not $url.AbsolutePath.EndsWith('.whl',[StringComparison]::OrdinalIgnoreCase)) { throw 'NON_WHEEL_IN_RESOLUTION' }
+              if ($url.Scheme -eq 'file') {
+                if ((Split-Path -Parent $url.LocalPath) -ne $wheelhouse) { throw 'UNAPPROVED_LOCAL_WHEEL' }
+              } elseif ($url.Scheme -cne 'https' -or $url.Host -cne 'files.pythonhosted.org') {
+                throw 'UNAPPROVED_RESOLVER_ORIGIN'
+              }
+              # Constrain resolved versions so actual installation cannot silently re-resolve.
+              if ($item.metadata.name -notmatch '^[A-Za-z0-9_.-]+$' -or $item.metadata.version -notmatch '^[A-Za-z0-9.+!_-]+$') { throw 'INVALID_RESOLVER_METADATA' }
+              $canonical = $item.metadata.name.ToLowerInvariant() -replace '[-_.]+','-'
+              $pin = $qualified.packages.PSObject.Properties[$canonical]
+              if ($null -eq $pin -or $pin.Value -cne $item.metadata.version) { throw ('UNQUALIFIED_RESOLUTION ' + $canonical) }
+            }
+            Write-Host ("R02_FULL_WINDOWS_BINARY_GRAPH_RESOLUTION_PASS count=" + @($plan.install).Count)
+            & $py -m pip --isolated install @resolver
+            if ($LASTEXITCODE -ne 0) { throw 'FULL_WINDOWS_WHEEL_INSTALL_FAILED' }
+            & $py -m pip check
+            if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_CONSISTENCY_FAILED' }
+            $env:HOME = $lab
+            $env:USERPROFILE = $lab
+            $env:APPDATA = $lab
+            $env:LOCALAPPDATA = $lab
+            $env:DC_NATIVE_MINGW_BIN = 'C:\msys64\mingw64\bin'
+            $env:HF_HUB_OFFLINE = '1'
+            $env:TRANSFORMERS_OFFLINE = '1'
+            $env:PYTHONDONTWRITEBYTECODE = '1'
+            # Capitalize the previous independent qualification; fail on version drift.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_desktop_proven_versions.py')
+            if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_REQUALIFICATION_REQUIRED' }
+            # Reconstruct the sidecar using the existing exact native hash lock.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_stage_native_bundle.py')
+            if ($LASTEXITCODE -ne 0) { throw 'NATIVE_BUNDLE_CLOSURE_FAILED' }
+            # No separate native bundle, storage or preflight reruns.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_backend_rehearsal_harness.py') --desktop-final-only
+            if ($LASTEXITCODE -ne 0) { throw 'BACKEND_FROZEN_REHEARSAL_FAILED' }
+          } finally {
+            if (Test-Path -LiteralPath $lab) { Remove-Item -LiteralPath $lab -Recurse -Force }
+          }
+          if (Test-Path -LiteralPath $lab) { throw 'FULL_WINDOWS_LAB_CLEANUP_FAILED' }
+          Write-Host 'R02_FULL_WINDOWS_DEPENDENCY_REHEARSAL_CLEANUP_PASS'
+      - name: Upload synthetic desktop screenshots only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r02-packaged-desktop-synthetic-evidence
+          path: |
+            ${{ runner.temp }}\dc-packaged-desktop-evidence\*.png
+            ${{ runner.temp }}\dc-packaged-desktop-evidence\head.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove isolated browser tooling
+        if: always()
+        shell: pwsh
+        run: |
+          $tools = Join-Path $env:RUNNER_TEMP ("dc-browser-tools-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $tools) { Remove-Item -LiteralPath $tools -Recurse -Force }
+          if (Test-Path -LiteralPath $tools) { throw 'BROWSER_TOOL_CLEANUP_FAILED' }
+  r01-fue-team-ui-desktop-integration:
+    needs: inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify exact convergence HEAD
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Validate integration driver syntax
+        run: node --check frontend/scripts/ci-fue-team-ui.mjs
+      - name: Validate all Python source syntax
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          files = sorted(Path('backend').rglob('*.py'))
+          for p in files:
+              ast.parse(p.read_text(encoding='utf-8-sig'), filename=str(p))
+          print(f'BACKEND_AST_PASS files={len(files)}')
+          PY
+      - name: Install native runtime prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsqlcipher-dev libmagic1 libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libgl1 libglib2.0-0t64
+      - name: Install pinned Python dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+          python -m pip install --no-cache-dir --index-url https://pypi.org/simple -r backend/requirements.txt
+          python -m pip check
+          echo PYTHON_DEPENDENCIES_PASS
+      - name: Create fresh encrypted LAB and run actual FastAPI without external network
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-rehearsal.XXXXXXXX")
+          ns="dc-rehearsal-$GITHUB_RUN_ID"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          export DC_LAB_ROOT="$lab"
+          export DC_PYTHON="$(command -v python)"
+          export DC_CHECKOUT="$GITHUB_WORKSPACE"
+          export DC_EVIDENCE="$RUNNER_TEMP/dc-integration-evidence"
+          mkdir -p "$DC_EVIDENCE"
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" bash -s <<'LAB'
+          set -euo pipefail
+          umask 077
+          cd "$DC_CHECKOUT"
+          export HOME="$DC_LAB_ROOT/home"
+          export XDG_CONFIG_HOME="$HOME/config" XDG_RUNTIME_DIR="$HOME/runtime" XDG_DATA_HOME="$HOME/data"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME" "$DC_LAB_ROOT/rehearsal-media"
+          export ENVIRONMENT=e2e_install_rehearsal
+          export ALLOWED_ORIGINS=http://127.0.0.1:5173
+          export DC_SYNTH_PASSWORD="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          export VITE_API_URL=http://127.0.0.1:8008 VITE_ENABLE_HTTPS=false
+          export DATABASE_URL="sqlite:///$DC_LAB_ROOT/fresh-rehearsal.db"
+          export MEDIA_ROOT="$DC_LAB_ROOT/rehearsal-media"
+          export SECRET_KEY="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export CABINET_MASTER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export SQLCIPHER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export MOBILE_PAIRING_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export DIGITALCROWN_ISOLATED_RUNTIME=true TELEMETRY_ENABLED=false
+          export GOOGLE_CLIENT_ID='' GOOGLE_CLIENT_SECRET='' SMTP_HOST='' PATIENT_COMPANION_RELAY_URL='' PATIENT_COMPANION_RELAY_BOOTSTRAP_SECRET=''
+          export DIGITALCROWN_ISOLATION_DB_FINGERPRINT="$("$DC_PYTHON" -c 'import os; from backend.core.runtime_safety import database_target_fingerprint; print(database_target_fingerprint(os.environ["DATABASE_URL"]))')"
+          test ! -e "$DC_LAB_ROOT/fresh-rehearsal.db"
+          test "$(ip -o link show | wc -l)" -eq 1
+          echo LAB_LOOPBACK_ONLY
+          "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
+          "$DC_PYTHON" -m backend.scripts.ci_fk_runtime_probe
+          "$DC_PYTHON" -m backend.scripts.ci_desktop_integration seed
+          "$DC_PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port 8008 > "$DC_LAB_ROOT/uvicorn.log" 2>&1 &
+          pid=$!
+          trap 'rc=$?; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; if [ "$rc" -ne 0 ]; then tail -n 60 "$DC_LAB_ROOT/uvicorn.log" | sed -E "s/([[:xdigit:]]{64})/[MASKED]/g"; fi' EXIT
+          "$DC_PYTHON" - <<'PY'
+          import json, time, urllib.request
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          def get(path):
+              with opener.open('http://127.0.0.1:8008' + path, timeout=2) as r:
+                  assert r.status == 200
+                  return json.load(r)
+          for attempt in range(60):
+              try:
+                  root = get('/health')
+                  assert root['status'] == 'ok' and root['db'] == 'ok'
+                  break
+              except (OSError, AssertionError, ValueError, KeyError):
+                  time.sleep(1)
+          else:
+              raise SystemExit('BACKEND_HEALTH_BLOCKED')
+          result = get('/api/health')
+          assert result['status'] == 'ok' and result['database'] == 'ok'
+          assert result['environment'] == 'e2e_install_rehearsal'
+          assert get('/api/health/db')['status'] == 'ok'
+          assert get('/api/health/storage')['status'] == 'ok'
+          print('BACKEND_HTTP_PASS: /health, /api/health, /api/health/db, /api/health/storage')
+          PY
+          (
+            cd frontend
+            exec ./node_modules/.bin/vite --host 127.0.0.1 --port 5173 --strictPort
+          ) > "$DC_LAB_ROOT/vite.log" 2>&1 &
+          vite_pid=$!
+          chrome_pid=
+          trap 'rc=$?; kill "$pid" "$vite_pid" ${chrome_pid:+"$chrome_pid"} 2>/dev/null || true; wait "$pid" "$vite_pid" ${chrome_pid:+"$chrome_pid"} 2>/dev/null || true; exit "$rc"' EXIT
+          ready=false
+          for attempt in $(seq 1 40); do
+            if curl --noproxy '*' --fail --silent http://127.0.0.1:5173/login >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser)
+          "$chrome" --headless --no-sandbox --disable-dev-shm-usage --disable-background-networking --disable-sync --disable-extensions --no-first-run --no-default-browser-check --window-size=1440,900 --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="$DC_LAB_ROOT/chrome" http://127.0.0.1:5173/login > "$DC_LAB_ROOT/chrome.log" 2>&1 &
+          chrome_pid=$!
+          timeout 300s node frontend/scripts/ci-fue-team-ui.mjs
+          kill "$pid"
+          wait "$pid" || true
+          "$DC_PYTHON" -m backend.scripts.ci_desktop_integration verify
+          "$DC_PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port 8008 > "$DC_LAB_ROOT/uvicorn-restart.log" 2>&1 &
+          pid=$!
+          "$DC_PYTHON" - <<'PY'
+          import json, time, urllib.request
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          for attempt in range(60):
+              try:
+                  with opener.open("http://127.0.0.1:8008/health", timeout=2) as r:
+                      assert json.load(r)["db"] == "ok"
+                  break
+              except (OSError, AssertionError, ValueError, KeyError):
+                  time.sleep(1)
+          else:
+              raise RuntimeError("Restart health failed")
+          PY
+          timeout 150s node frontend/scripts/ci-fue-team-ui.mjs --verify-restart
+          LAB
+      - name: Upload synthetic browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dc-fue-team-archive-ui-synthetic
+          path: ${{ runner.temp }}/dc-integration-evidence/*.png
+          if-no-files-found: ignore
+          retention-days: 3
+  r02-sci04-synthetic:
+    needs: inventory
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install pinned isolated HTTP test dependencies
+        run: python -m pip install pydantic==2.6.3 pydantic-settings==2.2.1 SQLAlchemy==2.0.28 fastapi==0.115.6 starlette==0.41.3 httpx==0.28.1 python-dotenv==1.2.1 python-jose==3.5.0 passlib==1.7.4 email-validator==2.3.0 python-multipart==0.0.31
+      - name: Install exact frontend lockfile
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw 'HEAD_MISMATCH' }
+          python -I -B scripts/ci_r02_sci02.py
+          if ($LASTEXITCODE -ne 0) { throw 'SCI02_FAILED' }
+          python -I -B scripts/ci_r02_sci04.py
+          if ($LASTEXITCODE -ne 0) { throw 'SCI04_FAILED' }
+          node --experimental-strip-types --test scripts/ci_r02_sci03.test.mts
+          if ($LASTEXITCODE -ne 0) { throw 'SCI03_FAILED' }
+          $fixture = Join-Path $env:RUNNER_TEMP 'sci05-response.json'
+          try {
+            python -I -B scripts/ci_r02_sci05_http.py $fixture
+            if ($LASTEXITCODE -ne 0) { throw 'SCI05_HTTP_FAILED' }
+            node --experimental-strip-types --test scripts/ci_r02_sci05_wire.test.mts
+            if ($LASTEXITCODE -ne 0) { throw 'SCI05_WIRE_FAILED' }
+            $tools = Join-Path $env:RUNNER_TEMP ('sci05-tools-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $tools | Out-Null
+            try {
+              '{"private":true}' | Set-Content -LiteralPath (Join-Path $tools 'package.json') -Encoding ascii
+              npm install --prefix $tools --ignore-scripts --no-audit --no-fund --save-exact playwright-core@1.61.0
+              if ($LASTEXITCODE -ne 0) { throw 'SCI05_PLAYWRIGHT_INSTALL_FAILED' }
+              $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $tools 'browsers'
+              node (Join-Path $tools 'node_modules/playwright-core/cli.js') install chromium
+              if ($LASTEXITCODE -ne 0) { throw 'SCI05_CHROMIUM_INSTALL_FAILED' }
+              $env:SCI05_TOOLS = $tools
+              node frontend/scripts/ci-r02-sci05-browser.mjs
+              if ($LASTEXITCODE -ne 0) { throw 'SCI05_BROWSER_FAILED' }
+            } finally { if (Test-Path -LiteralPath $tools) { Remove-Item -LiteralPath $tools -Recurse -Force } }
+          } finally {
+            if (Test-Path $fixture) { Remove-Item -LiteralPath $fixture }
+          }
+      - name: Retain synthetic browser evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: sci05-synthetic-browser-evidence
+          path: ${{ runner.temp }}/sci05-browser-evidence/
+          if-no-files-found: error
+          retention-days: 7
+  r02-sci10-source-gates:
+    needs: inventory
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Verify exact HEAD and fail-closed contracts
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw 'HEAD_MISMATCH' }
+          python -I -B scripts/ci_r02_ammps_provenance.py
+          if ($LASTEXITCODE -ne 0) { throw 'AMMPS_REGRESSION_FAILED' }
+          python -I -B scripts/ci_r02_sci10.py
+          if ($LASTEXITCODE -ne 0) { throw 'SCI10_GATE_FAILED' }
+  r02-build-guard-guard-and-rehearsal:
+    needs: inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Syntax and dependency preparation
+        working-directory: frontend
+        run: |
+          node --check scripts/build-guard.mjs
+          node --check scripts/ci-build-guard.mjs
+          npm ci --ignore-scripts --no-audit --no-fund
+      - name: Guard contract and actual isolated rehearsal build
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ns="dc-build-$GITHUB_RUN_ID"
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-build.XXXXXXXX")
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true HOME="$lab" TMPDIR="$lab" DC_CHECKOUT="$GITHUB_WORKSPACE" GITHUB_SHA="$GITHUB_SHA" bash -s <<'LAB'
+          set -euo pipefail
+          cd "$DC_CHECKOUT/frontend"
+          test "$(ip -o link show | wc -l)" -eq 1
+          echo BUILD_LOOPBACK_ONLY
+          node scripts/ci-build-guard.mjs
+          test ! -e dist
+          mkdir dist
+          printf 'synthetic-dist-must-stay-unchanged\n' > dist/sentinel
+          sha256sum dist/sentinel > "$HOME/dist.sha256"
+          # No real build, no private env, no actual cabinet, no release packaging.
+          export VITE_API_URL=http://127.0.0.1:8008 VITE_ENABLE_HTTPS=false
+          npm run build:rehearsal
+          sha256sum -c "$HOME/dist.sha256"
+          test "$(find dist -type f | wc -l)" -eq 1
+          node --input-type=module -e 'import fs from "node:fs"; import assert from "node:assert/strict"; const m=JSON.parse(fs.readFileSync("dist-rehearsal/build-manifest.json")); assert.equal(m.commit,process.env.GITHUB_SHA);assert.equal(m.mode,"rehearsal");assert.equal(m.outputDir,"dist-rehearsal");assert(fs.existsSync("dist-rehearsal/index.html"));console.log("REHEARSAL_BUILD_EXACT_HEAD_PASS")'
+          node scripts/ci-pwa-assets.mjs
+          ./node_modules/.bin/vitest run --config scripts/ci-r02-business.config.mjs
+          echo R02_TARGETED_COMPONENT_CONTRACTS_PASS
+          LAB

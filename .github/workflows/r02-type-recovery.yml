@@ -1,0 +1,53 @@
+name: R0.2 - strict type recovery diagnostics
+on:
+  push:
+    branches: [ci/dc-mvp-integration-20261124, ci/r02-conservative-cleanup-20261125]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  review-proposal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare pinned compiler
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Record strict diagnostics without modifying source
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/type-evidence"
+          ns="dc-type-$GITHUB_RUN_ID"
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-type.XXXXXXXX")
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" HOME="$lab" TMPDIR="$lab" GITHUB_ACTIONS=true DC_UNUSED_PROPOSAL=yes DC_CHECKOUT="$GITHUB_WORKSPACE" DC_EVIDENCE="$RUNNER_TEMP/type-evidence" bash -s <<'LAB'
+          set -euo pipefail
+          cd "$DC_CHECKOUT/frontend"
+          test "$(ip -o link show | wc -l)" -eq 1
+          set +e
+          ./node_modules/.bin/tsc -b --pretty false > "$DC_EVIDENCE/strict-before.txt" 2>&1
+          before=$?
+          set -e
+          echo "STRICT_COMMITTED_SOURCE_EXIT=$before"
+          cat "$DC_EVIDENCE/strict-before.txt"
+          git diff --exit-code -- src
+          exit "$before"
+          LAB
+      - name: Upload strict diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dc-type-recovery-strict
+          path: ${{ runner.temp }}/type-evidence/
+          if-no-files-found: error
+          retention-days: 3

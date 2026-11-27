@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import re
+from copy import deepcopy
 from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional
@@ -24,6 +25,19 @@ _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _OFFICIAL_AMMPS_HOSTS = {"ammps.gov.ma", "www.ammps.gov.ma"}
 _UNAVAILABLE_EVIDENCE = "OFFICIAL_SOURCE_EXPLICIT_NO_RCP"
 _MANIFEST: Optional[Dict[str, Any]] = None
+# Capture integrity is not source authenticity. No promotion without an explicit
+# reviewed, exact-byte manifest pin; no environment override or auto-enrollment.
+_APPROVED_PROMOTION_MANIFEST_SHA256: Optional[str] = None
+_PRESENTATION_ID_RE = re.compile(r"^ammps-reg:[0-9a-f]{24}$")
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("RCP_DUPLICATE_JSON_KEY")
+        result[key] = value
+    return result
 
 
 def _load_manifest() -> Dict[str, Any]:
@@ -32,14 +46,33 @@ def _load_manifest() -> Dict[str, Any]:
         return _MANIFEST
 
     try:
-        raw = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.warning("Manifest RCP AMMPS indisponible (%s)", exc)
-        _MANIFEST = {}
-        return _MANIFEST
-
-    if not isinstance(raw, dict) or not isinstance(raw.get("entries"), list):
-        logger.warning("Manifest RCP AMMPS invalide")
+        payload = _MANIFEST_PATH.read_bytes()
+        raw = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object)
+        if (not isinstance(raw, dict) or raw.get("schema_version") != "m1b-rcp.1"
+                or raw.get("authority") != "AMMPS"
+                or raw.get("source_scope") != "OFFICIAL_RCP_CAPTURE_MANIFEST"
+                or raw.get("runtime_behavior_change") is not False
+                or not isinstance(raw.get("entries"), list)):
+            raise ValueError("RCP_MANIFEST_INVALID")
+        seen = set()
+        pin = _APPROVED_PROMOTION_MANIFEST_SHA256
+        approved = (isinstance(pin, str) and bool(_SHA256_RE.fullmatch(pin))
+                    and hashlib.sha256(payload).hexdigest() == pin)
+        for entry in raw["entries"]:
+            if not isinstance(entry, dict):
+                raise ValueError("RCP_ENTRY_INVALID")
+            ident = entry.get("regulatory_presentation_id")
+            if not isinstance(ident, str) or not _PRESENTATION_ID_RE.fullmatch(ident) or ident in seen:
+                raise ValueError("RCP_PRESENTATION_ID_INVALID_OR_DUPLICATE")
+            seen.add(ident)
+            if not entry_is_fail_closed(entry):
+                raise ValueError("RCP_ENTRY_INCOHERENT")
+            if entry.get("extracted_clinical_fields") != {}:
+                raise ValueError("RCP_CLINICAL_EXTRACTION_NOT_APPROVED")
+            if entry.get("capture_status") != "PENDING_DOWNLOAD" and not approved:
+                raise ValueError("RCP_PROMOTION_NOT_APPROVED")
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        logger.warning("Manifest RCP AMMPS indisponible (%s)", type(exc).__name__)
         _MANIFEST = {}
         return _MANIFEST
 
@@ -48,10 +81,15 @@ def _load_manifest() -> Dict[str, Any]:
 
 
 def _is_official_ammps_url(value: Any) -> bool:
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str) or not value or value.strip() != value:
         return False
-    parsed = urlparse(value.strip())
-    return parsed.scheme == "https" and parsed.hostname in _OFFICIAL_AMMPS_HOSTS
+    try:
+        parsed = urlparse(value)
+        return (parsed.scheme == "https" and parsed.hostname in _OFFICIAL_AMMPS_HOSTS
+                and parsed.username is None and parsed.password is None
+                and parsed.port in (None, 443))
+    except ValueError:
+        return False
 
 
 def _is_safe_local_artifact_path(value: Any) -> bool:
@@ -139,12 +177,12 @@ def get_rcp_evidence(regulatory_presentation_id: str) -> Optional[Dict[str, Any]
         if not isinstance(entry, dict):
             continue
         if entry.get("regulatory_presentation_id") == wanted:
-            return dict(entry)
+            return deepcopy(entry)
     return None
 
 
 def snapshot_is_verified(entry: Dict[str, Any]) -> bool:
-    """Vrai uniquement si métadonnées et octets de l'artefact local concordent."""
+    """Intégrité locale uniquement, jamais preuve indépendante de provenance officielle."""
     if entry.get("capture_status") != "SNAPSHOT_VERIFIED":
         return False
     sha256 = entry.get("rcp_sha256")

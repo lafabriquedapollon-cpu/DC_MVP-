@@ -1,0 +1,49 @@
+name: J5-01 provenance laboratory (NOT A RELEASE)
+on:
+  push:
+    branches: [ci/j5-01-release-pipeline-20261127]
+    paths:
+      - 'scripts/ci_j5_01_trust_lab.py'
+      - '.github/workflows/j5-01-trust-lab.yml'
+permissions: {}
+jobs:
+  attest-inert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Prepare inert subject at exact HEAD
+        run: python3 scripts/ci_j5_01_trust_lab.py make
+      - name: Attest inert subject only
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: ${{ runner.temp }}/trust02-inert-subject.txt
+      - name: Cleanup inert subject
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/trust02-inert-subject.txt"
+  verify-inert:
+    needs: attest-inert
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Independently reconstruct inert subject
+        run: python3 scripts/ci_j5_01_trust_lab.py make
+      - name: Verify real provenance and synthetic owner approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_j5_01_trust_lab.py verify
+      - name: Cleanup inert subject
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/trust02-inert-subject.txt"

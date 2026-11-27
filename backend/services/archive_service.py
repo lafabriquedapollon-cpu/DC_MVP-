@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple, BinaryIO
 
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, desc, func
+from sqlalchemy import and_, or_, desc, func, select
 import shutil
 
 from backend import models
@@ -50,6 +50,10 @@ def _validate_archive_filename(filename: str) -> None:
         len(base) == 4 and base[:3] in {"COM", "LPT"} and base[3] in "000000000"
     ):
         raise ValueError("Nom de fichier Windows réservé")
+
+
+class ReferencedArchiveDeletionDenied(ValueError):
+    """A retained clinical or financial reference requires archive preservation."""
 
 
 class ArchiveService:
@@ -626,7 +630,7 @@ class ArchiveService:
         return doc
     
     def permanent_delete(self, document_id: int) -> bool:
-        """Supprime définitivement un document sans réactiver ses écritures financières."""
+        """Refuse toute purge runtime non qualifiée; préserve données et médias."""
         doc = self.db.query(models.DocumentArchive).filter(
             models.DocumentArchive.id == document_id
         ).first()
@@ -634,51 +638,29 @@ class ArchiveService:
         if not doc:
             return False
 
-        generated_note = f"{_GENERATED_PAYMENT_PREFIX}{document_id}"
-        trashed_note = f"{_TRASHED_PAYMENT_PREFIX}{document_id}"
-        voided_note = f"{_VOIDED_PAYMENT_PREFIX}{document_id}"
-        document_payments = self.db.query(models.Payment).filter(
-            models.Payment.notes.in_([generated_note, trashed_note])
-        ).all()
-        for payment in document_payments:
-            payment.notes = voided_note
+        # Preserve all declared inbound references, including SET NULL/CASCADE
+        # relationships that would otherwise erase clinical or financial provenance.
+        for table in models.Base.metadata.tables.values():
+            for fk in table.foreign_keys:
+                if fk.column.table.name == models.DocumentArchive.__tablename__ and fk.column.name == "id":
+                    if self.db.execute(select(1).select_from(table).where(fk.parent == document_id).limit(1)).first():
+                        raise ReferencedArchiveDeletionDenied("Document lié à un historique clinique ou financier : archivage uniquement.")
+        notes = [
+            f"{prefix}{document_id}"
+            for prefix in (_GENERATED_PAYMENT_PREFIX, _TRASHED_PAYMENT_PREFIX, _VOIDED_PAYMENT_PREFIX)
+        ]
+        if self.db.query(models.Payment.id).filter(models.Payment.notes.in_(notes)).first():
+            raise ReferencedArchiveDeletionDenied("Document lié à un paiement : archivage uniquement.")
 
-        # Tout Acte encore lié doit rester hors comptabilité après disparition du
-        # DocumentArchive. On conserve la ligne pour audit mais on la soft-delete.
-        all_linked_actes = self.db.query(models.Acte).filter(
-            models.Acte.document_archive_id == document_id,
-        ).all()
-        self._trash_pending_installments(
-            document_id,
-            [acte.id for acte in all_linked_actes if acte.id is not None],
+        # Runtime filesystem unlink cannot be made atomic with all producers
+        # of archive/media references. Do not silently delete metadata or files.
+        # A separately qualified offline maintenance workflow is required.
+        raise ReferencedArchiveDeletionDenied(
+            "Purge définitive indisponible en fonctionnement normal : "
+            "une maintenance hors ligne sécurisée est nécessaire. "
+            "Le document et son fichier sont conservés."
         )
-        delete_at = datetime.now()
-        for acte in all_linked_actes:
-            if acte.deleted_at is None:
-                acte.deleted_at = delete_at
-        
-        # Supprimer le fichier physique
-        try:
-            file_path = self._resolve_archive_storage_path(doc)
-            if file_path.exists():
-                file_path.unlink()
-        except Exception as e:
-            print(f"Erreur suppression fichier: {e}")
-        
-        # Supprimer la miniature si existe
-        if doc.thumbnail_path:
-            try:
-                thumb_path = Path(doc.thumbnail_path)
-                if thumb_path.exists():
-                    thumb_path.unlink()
-            except:
-                pass
-        
-        # Supprimer de la base
-        self.db.delete(doc)
-        self.db.commit()
-        
-        return True
+
     
     def cleanup_expired_trash(self) -> int:
         """
@@ -695,8 +677,12 @@ class ArchiveService:
         
         count = 0
         for doc in expired_docs:
-            if self.permanent_delete(doc.id):
-                count += 1
+            try:
+                if self.permanent_delete(doc.id):
+                    count += 1
+            except ReferencedArchiveDeletionDenied:
+                # Retention takes precedence over expired-trash cleanup.
+                continue
         
         return count
     

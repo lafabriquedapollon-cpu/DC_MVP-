@@ -1,0 +1,25 @@
+name: SCI-09-10 scientific resource safety
+on:
+  push:
+    branches: [ci/r02-sci09-10-20261126, ci/r03-convergence-20261126]
+permissions:
+  contents: read
+jobs:
+  source-gates:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Verify exact HEAD and fail-closed contracts
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw 'HEAD_MISMATCH' }
+          python -I -B scripts/ci_r02_ammps_provenance.py
+          if ($LASTEXITCODE -ne 0) { throw 'AMMPS_REGRESSION_FAILED' }
+          python -I -B scripts/ci_r02_sci10.py
+          if ($LASTEXITCODE -ne 0) { throw 'SCI10_GATE_FAILED' }

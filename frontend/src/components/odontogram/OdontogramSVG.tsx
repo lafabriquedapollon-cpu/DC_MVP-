@@ -220,7 +220,6 @@ export const OdontogramSVG: React.FC<OdontogramSVGProps> = ({
   selectedSurface,
   onSurfaceClick,
   onSurfaceHover,
-  showNumbers = false,
   readOnly = false,
   className = '',
   multiSelectedTeeth = [],
@@ -330,10 +329,11 @@ export const OdontogramSVG: React.FC<OdontogramSVGProps> = ({
         >
           <defs>
             <filter id="extractLines">
+              {/* Reconstructed grayscale filter; clinical rendering requires separate visual validation. */}
               <feColorMatrix type="matrix" values="
-                "REDACTED_PHONE"
-                "REDACTED_PHONE"
-                "REDACTED_PHONE"
+                0.2126 0.7152 0.0722 0 0
+                0.2126 0.7152 0.0722 0 0
+                0.2126 0.7152 0.0722 0 0
                 0 0 0 1 0" />
               <feComponentTransfer>
                 <feFuncR type="linear" slope="-3" intercept="2.8" />

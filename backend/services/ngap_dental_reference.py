@@ -11,6 +11,7 @@ the latter evolve independently and must not be inferred from a coefficient row.
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -86,18 +87,24 @@ def validate_ngap_dental_reference(payload: dict[str, Any]) -> dict[str, Any]:
 
         if not isinstance(act, str) or not act.strip():
             raise ValueError(f"Missing normalized act label for {code}")
-        if entry_type not in _ALLOWED_ENTRY_TYPES:
+        if not isinstance(entry_type, str) or entry_type not in _ALLOWED_ENTRY_TYPES:
             raise ValueError(f"Unsupported NGAP dental entry type for {code}")
 
+        special_type = {"D630": "ceiling", "D718": "anesthesia", "D719": "anesthesia",
+                        "D722": "anesthesia", "D723": "anesthesia",
+                        "D757": "calculation_rule", "D816": "quote_required"}.get(code, "act")
+        if entry_type != special_type:
+            raise ValueError(f"NGAP dental entry type mismatch for {code}")
         if entry_type in {"calculation_rule", "quote_required"}:
             if coefficient is not None:
                 raise ValueError(f"{code} must not invent a fixed coefficient")
-        elif not isinstance(coefficient, (int, float)) or isinstance(coefficient, bool) or coefficient <= 0:
+        elif not isinstance(coefficient, (int, float)) or isinstance(coefficient, bool) or not math.isfinite(coefficient) or coefficient <= 0:
             raise ValueError(f"Invalid NGAP dental coefficient for {code}")
 
         if anesthesia_coefficient is not None and (
             not isinstance(anesthesia_coefficient, (int, float))
             or isinstance(anesthesia_coefficient, bool)
+            or not math.isfinite(anesthesia_coefficient)
             or anesthesia_coefficient <= 0
         ):
             raise ValueError(f"Invalid anesthesia coefficient for {code}")
@@ -173,9 +180,22 @@ def validate_ngap_dental_provenance(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("NGAP_DUPLICATE_JSON_KEY")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value: str) -> Any:
+    raise ValueError("NGAP_NONFINITE_JSON")
+
+
 def _load_json_object(path: Path | str, *, context: str) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
+        payload = json.load(handle, object_pairs_hook=_unique_json_object, parse_constant=_reject_nonfinite)
     if not isinstance(payload, dict):
         raise ValueError(f"{context} root must be an object")
     return payload

@@ -19,6 +19,7 @@ import logging
 import os
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -47,14 +48,19 @@ AMMPS_RMMG_SOURCE: Dict[str, Any] = {
     "current_marketing_status_verified": False,
 }
 
+# Recovered October snapshot is a candidate, not an approved deployment asset.
+# A separate documented rights/provenance decision must pin its exact bytes.
+# No environment-variable override, automatic trust-on-first-use or network fetch.
+_AMMPS_APPROVED_SNAPSHOT_SHA256: Optional[str] = None
+_AMMPS_SNAPSHOT_DATE = "2026-10-01"
 AMMPS_CURRENT_SOURCE: Dict[str, Any] = {
-    "id": "ammps-medications-current-2026-09-15",
-    "label": "AMMPS — Base de données des médicaments, snapshot courant",
+    "id": "ammps-medications-current-2026-10-01",
+    "label": "AMMPS — Base de données des médicaments, snapshot documentaire daté",
     "license": "non_specifiee",
     "source_url": "https://www.ammps.gov.ma/recherche-medicaments",
-    "snapshot_date": "2026-09-15",
-    "freshness": "current_snapshot",
-    "current_marketing_status_verified": True,
+    "snapshot_date": _AMMPS_SNAPSHOT_DATE,
+    "freshness": "dated_snapshot",
+    "current_marketing_status_verified": False,
 }
 
 _MEDS: List[Dict[str, Any]] = []
@@ -73,6 +79,75 @@ def _read_records(path: str, source: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+def _official_ammps_url(value: Any) -> bool:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        return False
+    try:
+        url = urlsplit(value)
+        return (url.scheme == "https" and url.hostname in {"ammps.gov.ma", "www.ammps.gov.ma"}
+                and url.username is None and url.password is None and url.port in (None, 443))
+    except ValueError:
+        return False
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("AMMPS_DUPLICATE_JSON_KEY")
+        result[key] = value
+    return result
+
+
+def _read_current_records(path: str) -> List[Dict[str, Any]]:
+    """All-or-nothing identity and provenance admission; never clinical approval."""
+    pin = _AMMPS_APPROVED_SNAPSHOT_SHA256
+    if not isinstance(pin, str) or not re.fullmatch(r"[0-9a-f]{64}", pin):
+        raise ValueError("AMMPS_SNAPSHOT_NOT_APPROVED")
+    with open(path, "rb") as handle:
+        payload = handle.read()
+    if hashlib.sha256(payload).hexdigest() != pin:
+        raise ValueError("AMMPS_SNAPSHOT_HASH_MISMATCH")
+    raw = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_json_object)
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("AMMPS_SNAPSHOT_INVALID_ROOT")
+    records = []
+    seen = set()
+    identity_fields = ("nom", "dci", "dosage", "unite", "forme", "presentation", "epi")
+    for row in raw:
+        if not isinstance(row, dict) or any(not isinstance(row.get(k), str) for k in identity_fields):
+            raise ValueError("AMMPS_IDENTITY_INVALID")
+        if any(not row[k].strip() for k in identity_fields if k != "unite"):
+            raise ValueError("AMMPS_IDENTITY_INCOMPLETE")
+        if (row.get("source_snapshot_date") != _AMMPS_SNAPSHOT_DATE
+                or row.get("market_status_checked_at") != _AMMPS_SNAPSHOT_DATE):
+            raise ValueError("AMMPS_SNAPSHOT_DATE_MISMATCH")
+        if not _official_ammps_url(row.get("source_page_url")):
+            raise ValueError("AMMPS_SOURCE_URL_INVALID")
+        record = {**row, "_source": dict(AMMPS_CURRENT_SOURCE)}
+        expected_id = _regulatory_presentation_id(record)
+        if row.get("regulatory_presentation_id") != expected_id or expected_id in seen:
+            raise ValueError("AMMPS_PRESENTATION_ID_INVALID_OR_DUPLICATE")
+        seen.add(expected_id)
+        # This contract recognizes only pending RCPs. A verified claim needs a
+        # separate exact-PDF evidence gate, never a self-asserted catalog field.
+        if (row.get("rcp_snapshot_status") != "PENDING_DOWNLOAD"
+                or row.get("rcp_sha256") is not None or row.get("rcp_checked_at") is not None
+                or type(row.get("rcp_link_observed")) is not bool
+                or (row.get("rcp_url") is not None and not _official_ammps_url(row["rcp_url"]))):
+            raise ValueError("AMMPS_RCP_UNSUPPORTED_CLAIM")
+        if row.get("amm_status") not in {"PENDING_VERIFICATION", "AMM RETIREE", "AMM ENREGISTREE"}:
+            raise ValueError("AMMPS_AUTHORIZATION_STATUS_INVALID")
+        if not isinstance(row.get("market_status"), str):
+            raise ValueError("AMMPS_MARKET_STATUS_INVALID")
+        # Preserve dated observations, but do not expose them as verified status.
+        record["observed_amm_status"] = record.pop("amm_status")
+        record["observed_market_status"] = record.pop("market_status")
+        record["amm_status"] = "PENDING_VERIFICATION"
+        records.append(record)
+    return records
+
+
 def _load() -> None:
     global _MEDS, _LOADED
     if _LOADED:
@@ -85,9 +160,13 @@ def _load() -> None:
         (_AMMPS_CURRENT_DATA_PATH, AMMPS_CURRENT_SOURCE),
     ):
         try:
-            records.extend(_read_records(path, source))
+            if source is AMMPS_CURRENT_SOURCE:
+                records.extend(_read_current_records(path))
+            else:
+                records.extend(_read_records(path, source))
         except Exception as exc:
-            logger.warning("Source médicaments indisponible %s (%s)", source["id"], exc)
+            # Do not print raw catalog rows or local filesystem paths.
+            logger.warning("Source médicaments indisponible %s (%s)", source["id"], type(exc).__name__)
 
     _MEDS = records
     logger.info("Dictionnaire médicaments chargé : %d entrées", len(_MEDS))
@@ -120,7 +199,8 @@ def catalog_metadata() -> Dict[str, Any]:
         source_counts[source_id] = source_counts.get(source_id, 0) + 1
 
     sources = [
-        {**source, "record_count": source_counts.get(source["id"], 0)}
+        {**source, "record_count": source_counts.get(source["id"], 0),
+         "available": source_counts.get(source["id"], 0) > 0}
         for source in (AMMPS_CURRENT_SOURCE, AMMPS_RMMG_SOURCE, CATALOG_SOURCE)
     ]
     cnops_count = source_counts.get(CATALOG_SOURCE["id"], 0)
@@ -192,6 +272,9 @@ def _public_presentation(rec: Dict[str, Any]) -> Dict[str, Any]:
         "amm_status",
         "market_status",
         "market_status_checked_at",
+        "source_snapshot_date",
+        "observed_amm_status",
+        "observed_market_status",
         "therapeutic_class",
         "source_page_url",
         "rcp_link_observed",
@@ -333,7 +416,7 @@ def search_unified(q: str, limit: int = 30) -> List[Dict[str, Any]]:
         item = _public_presentation(rec)
         source = item.get("source") or {}
         item["neo_source_state"] = (
-            "CURRENT_REGULATORY_OVERLAY"
+            "DATED_REGULATORY_REFERENCE"
             if source.get("id") == AMMPS_CURRENT_SOURCE["id"]
             else "DOCUMENTARY_REFERENCE"
         )

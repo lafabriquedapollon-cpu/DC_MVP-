@@ -1,0 +1,33 @@
+name: J5-02C Pages closed runtime proof (NOT A RELEASE)
+on:
+  push:
+    branches: [ci/j5-02c-passkey-pages-20261127]
+permissions:
+  contents: read
+jobs:
+  closed-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check exact worker bytes and fail-closed HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'bf0c196b66ddbca038201895e245add14e8da30ac95c05691f030950190a3882  scripts/j5_passkey_pages/_worker.mjs' | sha256sum -c -
+          for base in https://approval-lab-7c28d6.pages.dev https://a1fab177.approval-lab-7c28d6.pages.dev; do
+            body="$(mktemp)"
+            headers="$(mktemp)"
+            trap 'rm -f "$body" "$headers"' EXIT
+            code="$(curl --silent --show-error --max-time 20 --output "$body" --dump-header "$headers" --write-out '%{http_code}' "$base/")"
+            printf '%s HTTP %s\n' "$base" "$code"
+            test "$code" = 503
+            test "$(cat "$body")" = 'LAB CLOSED'
+            grep -Eiq '^cache-control: *no-store' "$headers"
+            grep -Eiq '^x-robots-tag: *noindex' "$headers"
+            rm -f "$body" "$headers"
+            trap - EXIT
+          done
+          echo CLOUDFLARE_HTTPS_CLOSED_RUNTIME_PASS

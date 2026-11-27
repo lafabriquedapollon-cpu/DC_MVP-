@@ -1,0 +1,31 @@
+name: J5-02C isolated Pages browser lab (NOT A RELEASE)
+on:
+  push:
+    branches: [ci/j5-02c-passkey-pages-20261127]
+permissions:
+  contents: read
+jobs:
+  browser-lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.3'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Isolated browser dependencies
+        run: |
+          npm install --prefix scripts/j5_passkey_pages --ignore-scripts --no-audit --no-fund --save-exact playwright-core@1.61.0
+          node scripts/j5_passkey_pages/node_modules/playwright-core/cli.js install chromium
+          python -m pip install --only-binary=:all: 'webauthn==3.0.0' 'cryptography==49.0.0'
+      - name: Gate and real Chromium browser with virtual authenticator
+        run: |
+          node --check scripts/j5_passkey_pages/_worker.mjs
+          node scripts/j5_passkey_pages/browser_test.mjs
+          python -B scripts/j5_passkey_pages/verify_browser.py
+          sha256sum scripts/j5_passkey_pages/_worker.mjs

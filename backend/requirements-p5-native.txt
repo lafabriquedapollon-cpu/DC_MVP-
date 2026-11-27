@@ -1,0 +1,16 @@
+# Native parity subset derived from the public runtime lock and native contract.
+numpy==2.4.3
+onnx==1.21.0
+onnxruntime==1.25.0
+opencv-python-headless==4.13.0.92
+pillow==12.2.0
+pydantic==2.6.3
+pydantic-settings==2.2.1
+python-dotenv==1.2.1
+qrcode==8.2
+reportlab==4.4.10
+sqlcipher3==0.6.2
+torch==2.10.0
+torchaudio==2.10.0
+torchvision==0.25.0
+weasyprint==68.1

@@ -130,12 +130,45 @@ if "pysqlcipher" in SQLALCHEMY_DATABASE_URL or SQLALCHEMY_DATABASE_URL.startswit
 
     from sqlalchemy import event
 
+    def _sqlite_fk_authorizer(action, arg1, arg2, db_name, source):
+        # PRAGMA reads are permitted. Runtime SQL must never change FK enforcement
+        # or reset deferred-FK bookkeeping during an outstanding transaction.
+        if (
+            action == sqlite3.SQLITE_PRAGMA
+            and (arg1 or "").lower() in {"foreign_keys", "defer_foreign_keys"}
+            and arg2 is not None
+        ):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
     @event.listens_for(engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.close()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA foreign_keys")
+            if cursor.fetchone() != (1,):
+                raise RuntimeError("SQLite foreign key enforcement unavailable")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+        finally:
+            cursor.close()
+        # The DBAPI must support the authorizer; do not silently degrade.
+        dbapi_connection.set_authorizer(_sqlite_fk_authorizer)
+
+    @event.listens_for(engine, "checkout")
+    def verify_sqlite_foreign_keys(dbapi_connection, connection_record, connection_proxy):
+        from sqlalchemy.exc import DisconnectionError
+
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys")
+            if cursor.fetchone() != (1,):
+                # Discard a connection whose enforcement was disabled by a caller.
+                raise DisconnectionError("SQLite foreign key enforcement disabled")
+        finally:
+            cursor.close()
+        dbapi_connection.set_authorizer(_sqlite_fk_authorizer)
 else:
     engine = create_engine(
         SQLALCHEMY_DATABASE_URL,

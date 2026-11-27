@@ -19,7 +19,7 @@ import {
   Mail,
 } from 'lucide-react';
 import { EliteGhostLoader } from '../components/EliteGhostLoader';
-import { cn } from '../utils/cn';
+import '../utils/cn';
 import { 
   AreaChart, 
   Area, 
@@ -27,11 +27,7 @@ import {
   YAxis, 
   CartesianGrid, 
   Tooltip, 
-  ResponsiveContainer,
-  BarChart,
-  Cell,
-  PieChart,
-  Pie
+  ResponsiveContainer
 } from 'recharts';
 import type { HonoraireItem } from '../features/accounting/types';
 import { getHonoraireTrashTarget, groupByPatientDate } from '../features/accounting/utils';

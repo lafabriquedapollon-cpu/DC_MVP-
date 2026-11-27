@@ -9,8 +9,7 @@ interface EliteGhostLoaderProps {
 
 export const EliteGhostLoader: React.FC<EliteGhostLoaderProps> = ({ 
   text = "Initialisation de votre cabinet...", 
-  fullScreen = true,
-  size = 'large'
+  fullScreen = true
 }) => {
   const containerClass = fullScreen 
     ? "fixed inset-0 z-50 bg-slate-50/80 dark:bg-slate-950/80 backdrop-blur-2xl" 

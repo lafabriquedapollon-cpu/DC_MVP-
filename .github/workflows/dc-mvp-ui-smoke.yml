@@ -1,0 +1,185 @@
+name: DC MVP - isolated UI smoke
+on:
+  push:
+    branches: [ci/dc-mvp-smoke-20261124]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: dc-mvp-ui-smoke
+  cancel-in-progress: true
+jobs:
+  ui-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      CI: "true"
+      VITE_API_URL: http://127.0.0.1:8008
+      VITE_ENABLE_HTTPS: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Scan TypeScript syntax across all frontend sources
+        working-directory: frontend
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import ts from 'typescript';
+          let checked=0, errors=0;
+          function walk(dir) {
+            for (const entry of fs.readdirSync(dir,{withFileTypes:true})) {
+              const file=path.join(dir,entry.name);
+              if(entry.isDirectory()) { walk(file); continue; }
+              if(!entry.isFile() || !/\.tsx?$/.test(file)) continue;
+              checked++;
+              const source=ts.createSourceFile(file,fs.readFileSync(file,'utf8'),ts.ScriptTarget.Latest,true);
+              for(const d of source.parseDiagnostics) {
+                errors++;
+                const pos=source.getLineAndCharacterOfPosition(d.start || 0);
+                console.log(file+':'+(pos.line+1)+':'+(pos.character+1)+' TS'+d.code+' '+ts.flattenDiagnosticMessageText(d.messageText,' '));
+              }
+            }
+          }
+          walk('src');
+          console.log('TS_SYNTAX_SCAN: checked='+checked+' errors='+errors);
+          if(errors) process.exitCode=1;
+          JS
+      - name: Launch Vite on loopback and inspect real login UI
+        working-directory: frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/dc-ui-smoke"
+          mkdir -p "$evidence"
+          ./node_modules/.bin/vite --host 127.0.0.1 --port 5173 --strictPort > "$RUNNER_TEMP/dc-vite.log" 2>&1 &
+          vite_pid=$!
+          trap 'kill "$vite_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in $(seq 1 40); do
+            if curl --noproxy '*' --fail --silent http://127.0.0.1:5173/login > /dev/null; then
+              ready=true
+              break
+            fi
+            if ! kill -0 "$vite_pid" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            echo "::error::Vite did not serve /login on loopback"
+            tail -n 25 "$RUNNER_TEMP/dc-vite.log"
+            exit 1
+          fi
+          echo "VITE_HTTP_PASS"
+          chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser)
+          flags=(--headless --enable-logging=stderr --v=0 --no-sandbox --disable-dev-shm-usage --disable-background-networking --disable-sync --disable-extensions --no-first-run --no-default-browser-check '--proxy-server=http://127.0.0.1:9' '--proxy-bypass-list=127.0.0.1;localhost' --window-size=1440,900 --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222)
+          "$chrome" "${flags[@]}" --user-data-dir="$RUNNER_TEMP/dc-chrome" http://127.0.0.1:5173/login > "$RUNNER_TEMP/dc-chrome-dom.log" 2>&1 &
+          chrome_pid=$!
+          trap 'kill "$chrome_pid" "$vite_pid" 2>/dev/null || true' EXIT
+          timeout 110s node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import { setTimeout as sleep } from 'node:timers/promises';
+          const tmp = process.env.RUNNER_TEMP;
+          let target;
+          for (let i = 0; i < 40; i++) {
+            try {
+              const list = await (await fetch('http://127.0.0.1:9222/json/list', {signal: AbortSignal.timeout(1500)})).json();
+              target = list.find(t => t.type === 'page' && t.url.startsWith('http://127.0.0.1:5173/'));
+              if (target) break;
+            } catch {}
+            await sleep(500);
+          }
+          if (!target) throw new Error('Chromium CDP target missing');
+          const ws = new WebSocket(target.webSocketDebuggerUrl);
+          await new Promise((resolve, reject) => {
+            ws.addEventListener('open', resolve, {once:true});
+            ws.addEventListener('error', reject, {once:true});
+          });
+          let id = 0;
+          const pending = new Map();
+          ws.addEventListener('message', e => {
+            const msg = JSON.parse(e.data);
+            const p = pending.get(msg.id);
+            if (!p) return;
+            pending.delete(msg.id);
+            if (msg.error) p.reject(new Error(msg.error.message)); else p.resolve(msg.result);
+          });
+          const call = (method, params = {}) => new Promise((resolve, reject) => {
+            const n = ++id;
+            pending.set(n, {resolve,reject});
+            ws.send(JSON.stringify({id:n,method,params}));
+          });
+          const evaluate = async expression => {
+            const r = await call('Runtime.evaluate',{expression,returnByValue:true});
+            if (r.exceptionDetails) throw new Error('DOM inspection failed: ' + (r.exceptionDetails.text || 'evaluation exception'));
+            return r.result.value;
+          };
+          let state;
+          const deadline = Date.now() + 75000;
+          try {
+            while (Date.now() < deadline) {
+              try {
+                state = await evaluate(`(() => {
+                const visible = q => {
+                  const el = document.querySelector(q);
+                  return !!el && !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
+                };
+                return { path:location.pathname, email:visible('input[type=email]'), password:visible('input[type=password]'), overlay:!!document.querySelector('vite-error-overlay'), loading:!!document.body && document.body.innerText.includes('Démarrage de Digital Crown') };
+              })()`);
+              } catch (error) {
+                console.log('DOM inspection retry:', String(error).slice(0, 180));
+                await sleep(1000);
+                continue;
+              }
+              if (state.overlay || (state.path === '/login' && state.email && state.password)) break;
+              await sleep(1000);
+            }
+            const shot = await call('Page.captureScreenshot',{format:'png'});
+            fs.writeFileSync(tmp + '/dc-ui-smoke/login.png', Buffer.from(shot.data,'base64'));
+            console.log('UI_FINAL_STATE', JSON.stringify(state));
+            if (!state || state.path !== '/login' || !state.email || !state.password || state.overlay) {
+              throw new Error('UI_LOGIN_BLOCKED: real form not rendered within the bounded wait');
+            }
+            console.log('UI_LOGIN_FORM_PASS: real visible email/password controls; backend/auth not tested');
+          } finally { ws.close(); }
+          JS
+      - name: Diagnose failed browser smoke
+        if: failure()
+        shell: bash
+        run: |
+          echo '=== Vite diagnostics ==='
+          if [ -f "$RUNNER_TEMP/dc-vite.log" ]; then tail -n 100 "$RUNNER_TEMP/dc-vite.log"; fi
+          echo '=== Chromium diagnostics ==='
+          if [ -f "$RUNNER_TEMP/dc-chrome-dom.log" ]; then tail -n 50 "$RUNNER_TEMP/dc-chrome-dom.log"; fi
+          echo '=== Rendered DOM structure ==='
+          if [ -f "$RUNNER_TEMP/dc-login.html" ]; then
+            python3 - "$RUNNER_TEMP/dc-login.html" <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          import sys
+          class Probe(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.tags = {}
+              def handle_starttag(self, tag, attrs):
+                  self.tags[tag] = self.tags.get(tag, 0) + 1
+          p = Probe()
+          p.feed(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          print("DOM tag counts:", p.tags)
+          PY
+          fi
+      - name: Upload synthetic UI screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dc-mvp-login-screenshot
+          path: ${{ runner.temp }}/dc-ui-smoke/login.png
+          if-no-files-found: ignore
+          retention-days: 3

@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Activity, Bell, CalendarDays, ClipboardList, Clock3,
-  CreditCard, FileImage, FileText, FolderOpen, Image as ImageIcon,
-  LayoutDashboard, Mail, MoreHorizontal, Phone, Receipt,
+  FileText, FolderOpen, Image as ImageIcon,
+  LayoutDashboard, Receipt,
   Search, Settings, ShieldCheck, Users, type LucideIcon
 } from 'lucide-react';
 import OfficialLogo from '../../assets/logo.png';

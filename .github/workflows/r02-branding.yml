@@ -1,0 +1,182 @@
+name: R0.2 - exact logo branding FUE
+on:
+  push:
+    branches: [ci/r02-branding-20261125]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: r02-branding
+  cancel-in-progress: true
+jobs:
+  desktop-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [before, after]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify approved asset hashes and prepare exact baseline pair
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' 'e5722d95ec1d5c1663802209168a2089398abb07f1e9509f203f3fa291e2ee0f' frontend/src/assets/logo.png '2e1762a58f073e22fb8b7c59265094d5993c08e64b412c82128efe0030dee835' frontend/src/assets/logo-compact.png | sha256sum -c -
+          if [ "$VARIANT" = before ]; then
+            git show cb7895543a9f2b76e763813fa6470b025304d3b3:frontend/src/assets/logo.png > frontend/src/assets/logo.png
+            git show cb7895543a9f2b76e763813fa6470b025304d3b3:frontend/src/assets/logo-compact.png > frontend/src/assets/logo-compact.png
+            git show cb7895543a9f2b76e763813fa6470b025304d3b3:frontend/src/pages/LoginPage.tsx > frontend/src/pages/LoginPage.tsx
+            test "$(git hash-object frontend/src/assets/logo.png)" = c527c443a6a80338c2acea27188cd961232457dd
+            test "$(git hash-object frontend/src/assets/logo-compact.png)" = 1247c7548a242cf75c97abf3345f2e38b5f6d226
+          fi
+          echo BRANDING_ASSET_PROVENANCE_PASS
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Validate integration driver syntax
+        run: node --check frontend/scripts/ci-r02-branding.mjs
+      - name: Validate all Python source syntax
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          files = sorted(Path('backend').rglob('*.py'))
+          for p in files:
+              ast.parse(p.read_text(encoding='utf-8-sig'), filename=str(p))
+          print(f'BACKEND_AST_PASS files={len(files)}')
+          PY
+      - name: Install native runtime prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsqlcipher-dev libmagic1 libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libgl1 libglib2.0-0t64
+      - name: Install pinned Python dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+          python -m pip install --no-cache-dir --index-url https://pypi.org/simple -r backend/requirements.txt
+          python -m pip check
+          echo PYTHON_DEPENDENCIES_PASS
+      - name: Create fresh encrypted LAB and run actual FastAPI without external network
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-rehearsal.XXXXXXXX")
+          ns="dc-rehearsal-$GITHUB_RUN_ID"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          export DC_LAB_ROOT="$lab"
+          export DC_PYTHON="$(command -v python)"
+          export DC_CHECKOUT="$GITHUB_WORKSPACE"
+          export DC_EVIDENCE="$RUNNER_TEMP/dc-integration-evidence"
+          export DC_BRAND_VARIANT="${{ matrix.variant }}"
+          mkdir -p "$DC_EVIDENCE"
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" DC_BRAND_VARIANT="$DC_BRAND_VARIANT" bash -s <<'LAB'
+          set -euo pipefail
+          umask 077
+          cd "$DC_CHECKOUT"
+          export HOME="$DC_LAB_ROOT/home"
+          export XDG_CONFIG_HOME="$HOME/config" XDG_RUNTIME_DIR="$HOME/runtime" XDG_DATA_HOME="$HOME/data"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME" "$DC_LAB_ROOT/rehearsal-media"
+          export ENVIRONMENT=e2e_install_rehearsal
+          export ALLOWED_ORIGINS=http://127.0.0.1:5173
+          export DC_SYNTH_PASSWORD="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          export VITE_API_URL=http://127.0.0.1:8008 VITE_ENABLE_HTTPS=false
+          export DATABASE_URL="sqlite:///$DC_LAB_ROOT/fresh-rehearsal.db"
+          export MEDIA_ROOT="$DC_LAB_ROOT/rehearsal-media"
+          export SECRET_KEY="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export CABINET_MASTER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export SQLCIPHER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export MOBILE_PAIRING_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export DIGITALCROWN_ISOLATED_RUNTIME=true TELEMETRY_ENABLED=false
+          export GOOGLE_CLIENT_ID='' GOOGLE_CLIENT_SECRET='' SMTP_HOST='' PATIENT_COMPANION_RELAY_URL='' PATIENT_COMPANION_RELAY_BOOTSTRAP_SECRET=''
+          export DIGITALCROWN_ISOLATION_DB_FINGERPRINT="$("$DC_PYTHON" -c 'import os; from backend.core.runtime_safety import database_target_fingerprint; print(database_target_fingerprint(os.environ["DATABASE_URL"]))')"
+          test ! -e "$DC_LAB_ROOT/fresh-rehearsal.db"
+          test "$(ip -o link show | wc -l)" -eq 1
+          echo LAB_LOOPBACK_ONLY
+          "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
+          "$DC_PYTHON" -m backend.scripts.ci_desktop_integration seed
+          "$DC_PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port 8008 > "$DC_LAB_ROOT/uvicorn.log" 2>&1 &
+          pid=$!
+          trap 'rc=$?; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; if [ "$rc" -ne 0 ]; then tail -n 60 "$DC_LAB_ROOT/uvicorn.log" | sed -E "s/([[:xdigit:]]{64})/[MASKED]/g"; fi' EXIT
+          "$DC_PYTHON" - <<'PY'
+          import json, time, urllib.request
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          def get(path):
+              with opener.open('http://127.0.0.1:8008' + path, timeout=2) as r:
+                  assert r.status == 200
+                  return json.load(r)
+          for attempt in range(60):
+              try:
+                  root = get('/health')
+                  assert root['status'] == 'ok' and root['db'] == 'ok'
+                  break
+              except (OSError, AssertionError, ValueError, KeyError):
+                  time.sleep(1)
+          else:
+              raise SystemExit('BACKEND_HEALTH_BLOCKED')
+          result = get('/api/health')
+          assert result['status'] == 'ok' and result['database'] == 'ok'
+          assert result['environment'] == 'e2e_install_rehearsal'
+          assert get('/api/health/db')['status'] == 'ok'
+          assert get('/api/health/storage')['status'] == 'ok'
+          print('BACKEND_HTTP_PASS: /health, /api/health, /api/health/db, /api/health/storage')
+          PY
+          (
+            cd frontend
+            exec ./node_modules/.bin/vite --host 127.0.0.1 --port 5173 --strictPort
+          ) > "$DC_LAB_ROOT/vite.log" 2>&1 &
+          vite_pid=$!
+          chrome_pid=
+          trap 'rc=$?; kill "$pid" "$vite_pid" ${chrome_pid:+"$chrome_pid"} 2>/dev/null || true; wait "$pid" "$vite_pid" ${chrome_pid:+"$chrome_pid"} 2>/dev/null || true; exit "$rc"' EXIT
+          ready=false
+          for attempt in $(seq 1 40); do
+            if curl --noproxy '*' --fail --silent http://127.0.0.1:5173/login >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser)
+          "$chrome" --headless --no-sandbox --disable-dev-shm-usage --disable-background-networking --disable-sync --disable-extensions --no-first-run --no-default-browser-check --window-size=1440,900 --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="$DC_LAB_ROOT/chrome" http://127.0.0.1:5173/login > "$DC_LAB_ROOT/chrome.log" 2>&1 &
+          chrome_pid=$!
+          timeout 300s node frontend/scripts/ci-r02-branding.mjs
+          kill "$pid"
+          wait "$pid" || true
+          "$DC_PYTHON" -m backend.scripts.ci_desktop_integration verify
+          "$DC_PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port 8008 > "$DC_LAB_ROOT/uvicorn-restart.log" 2>&1 &
+          pid=$!
+          "$DC_PYTHON" - <<'PY'
+          import json, time, urllib.request
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          for attempt in range(60):
+              try:
+                  with opener.open("http://127.0.0.1:8008/health", timeout=2) as r:
+                      assert json.load(r)["db"] == "ok"
+                  break
+              except (OSError, AssertionError, ValueError, KeyError):
+                  time.sleep(1)
+          else:
+              raise RuntimeError("Restart health failed")
+          PY
+          timeout 150s node frontend/scripts/ci-r02-branding.mjs --verify-restart
+          LAB
+      - name: Upload synthetic browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dc-branding-${{ matrix.variant }}
+          path: ${{ runner.temp }}/dc-integration-evidence/*.png
+          if-no-files-found: ignore
+          retention-days: 3

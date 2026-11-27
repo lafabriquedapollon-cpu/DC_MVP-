@@ -416,17 +416,6 @@ export const PrescriptionAgenticStudio: React.FC<PrescriptionAgenticStudioProps>
     if (e.key === 'Escape') { setSuggestions({ medications: [], dosages: [], posologies: [] }); setActiveSearchId(null); }
   };
 
-  const handleFormeOpen = (e: React.MouseEvent<HTMLButtonElement>, drugId: number) => {
-    e.stopPropagation();
-    if (activeSearchId?.id === drugId && activeSearchId?.field === 'forme_dropdown') {
-      setActiveSearchId(null);
-      setFormeDropdownCoords(null);
-    } else {
-      const rect = e.currentTarget.getBoundingClientRect();
-      setFormeDropdownCoords({ top: rect.bottom + 8, left: rect.left, width: rect.width });
-      setActiveSearchId({ id: drugId, field: 'forme_dropdown' });
-    }
-  };
 
   useEffect(() => {
     if (!formeDropdownCoords) return;

@@ -5,6 +5,8 @@ The frozen protocol profile JSON is the source of composition/reference metadata
 """
 from __future__ import annotations
 import json
+import hashlib
+import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -27,23 +29,109 @@ _LABELS = {
 }
 
 
-def _load_profile() -> dict[str, Any]:
-    data=json.loads(_PROFILE_PATH.read_text(encoding="utf-8"))
-    if data.get("status")!="SOURCE_LOCKED" or data.get("pre_code_gate",{}).get("status")!="SATISFIED":
-        raise ValueError("Steiner protocol profile is not source-locked")
+# Historical byte pins identify recovered references, not a clinical approval.
+_STEINER_PIN = "e79fd5a9e27c3f4e0dbbeae2e8f0b8ba1e45b2c5fe90dda483d832a2dce217ad"
+_TWEED_PIN = "07b4dd3a8d1af6ea0c2fe371e014d94478402b1d40271571e9759459b0b50d4c"
+
+
+def _admit_profile(path: Path, digest: str, identity: str, context_key: str) -> dict[str, Any]:
+    with path.open("rb") as stream:
+        raw = stream.read(65537)
+    if len(raw) > 65536 or hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("Protocol profile integrity mismatch")
+    data = json.loads(raw)
+    if (not isinstance(data, dict)
+            or data.get("schema_version") != "ORTHO_ANALYSIS_PROTOCOL_PROFILE_V1"
+            or data.get("protocol_profile_id") != identity
+            or data.get("scientific_authority") != "LOT06_CANONICAL_MEASUREMENT_REGISTRY"
+            or data.get("status") != "SOURCE_LOCKED"
+            or data.get("pre_code_gate") != {
+                "gate": "ORTHO_ANALYSIS_PROTOCOLS_SOURCE_LOCKED",
+                "scope": identity, "status": "SATISFIED"}
+            or data.get("scope_resolutions", {}).get("AUTONOMOUS_TREATMENT") != "FORBIDDEN"
+            or data.get("scope_resolutions", {}).get("EXTRACTION_NON_EXTRACTION") != "CLINICIAN_ONLY"):
+        raise ValueError("Protocol profile contract mismatch")
+    contexts = data.get(context_key)
+    if (not isinstance(contexts, list) or not contexts
+            or any(not isinstance(item, dict)
+                   or item.get("classification_authority") is not False
+                   for item in contexts)):
+        raise ValueError("Classification authority forbidden")
+    if context_key == "reference_contexts" and any(
+            item.get("runtime_delta_authority") is not False for item in contexts):
+        raise ValueError("Runtime delta authority forbidden")
     return data
+
+
+def _load_profile() -> dict[str, Any]:
+    return _admit_profile(_PROFILE_PATH, _STEINER_PIN,
+                          "STEINER_STATIC_PROTOCOL_PROFILE_V1", "norm_sets")
 
 
 def _load_tweed_merrifield_profile() -> dict[str, Any]:
-    data=json.loads(_TWEED_MERRIFIELD_PROFILE_PATH.read_text(encoding="utf-8"))
-    if data.get("status")!="SOURCE_LOCKED" or data.get("pre_code_gate",{}).get("status")!="SATISFIED":
-        raise ValueError("Tweed-Merrifield protocol profile is not source-locked")
-    return data
+    return _admit_profile(_TWEED_MERRIFIELD_PROFILE_PATH, _TWEED_PIN,
+                          "TWEED_MERRIFIELD_DC_PROTOCOL_PROFILE_V1", "reference_contexts")
+
+
+def _uncertified_final_gate() -> dict[str, str]:
+    return {"gate": "ORTHO_ANALYSIS_PROTOCOLS_VERIFIED", "status": "OPEN"}
+
+
+# These identities are derived from the exact canonical method bridge.
+_PROTOCOL_METHODS = {
+    "M_SNA_DEG_V1": "STEINER_SNA_DEG_V1",
+    "M_SNB_DEG_V1": "STEINER_SNB_DEG_V1",
+    "M_ANB_DEG_V1": "STEINER_ANB_DEG_V1",
+    "M_U1_NA_DEG_V1": "STEINER_U1_NA_DEG_V1",
+    "M_U1_NA_MM_V1": "STEINER_U1_NA_CANONICAL_MM_V2",
+    "M_L1_NB_DEG_V1": "STEINER_L1_NB_DEG_V1",
+    "M_L1_NB_MM_V1": "STEINER_L1_NB_CANONICAL_MM_V2",
+    "M_INTERINCISAL_DEG_V1": "CRANIOM_INTERINCISAL_DEG_V1",
+    "M_OCCLUSAL_PLANE_SN_DEG_V1": "STEINER_OCCLUSAL_SN_CANONICAL_DEG_V2",
+    "M_SN_GOGN_DEG_V1": "STEINER_SN_GOGN_CANONICAL_DEG_V2",
+    "M_L1_GOGN_DEG_V1": "STEINER_L1_GOGN_CANONICAL_DEG_V2",
+    "M_SND_DEG_V1": "STEINER_SND_CANONICAL_DEG_V2",
+    "M_POG_NB_MM_V1": "STEINER_POG_NB_CANONICAL_MM_V2",
+    "M_L1_DLINE_MM_V1": "STEINER_L1_DLINE_CANONICAL_MM_V2",
+    "M_L1_DLINE_DEG_V1": "STEINER_L1_DLINE_CANONICAL_DEG_V2",
+    "M_FH_GOME_DEG_V1": "TWEED_FMA_CANONICAL_DEG_V2",
+    "M_IMPA_GOME_DEG_V1": "TWEED_IMPA_DEG_V1",
+    "M_FMIA_L1_FH_DEG_V1": "TWEED_FMIA_CANONICAL_DEG_V2",
+    "M_MERRIFIELD_Z_FH_DEG_V1": "MERRIFIELD_Z_CANONICAL_DEG_V2"
+}
+
+def _protocol_inputs(measurements):
+    result = {}
+    for item in measurements:
+        cid = item.get("canonical_measurement_id")
+        if cid not in _PROTOCOL_METHODS:
+            continue
+        if cid in result:
+            raise ValueError("Duplicate canonical protocol measurement")
+        result[cid] = item
+    return result
+
+def _safe_protocol_row(item, cid):
+    unit = "mm" if "_MM_" in cid else "deg"
+    status = item.get("availability_status")
+    value = item.get("value")
+    refs = item.get("measurement_refs")
+    method = item.get("value_authority_method_id")
+    valid = (status == "AVAILABLE" and type(value) in (int, float)
+             and math.isfinite(value) and item.get("unit") == unit
+             and method == _PROTOCOL_METHODS[cid]
+             and isinstance(refs, list) and bool(refs)
+             and all(isinstance(ref, str) and ref.strip() for ref in refs)
+             and len(set(refs)) == len(refs))
+    if valid:
+        return dict(item)
+    return {"availability_status": "NOT_COMPUTABLE", "value": None,
+            "unit": unit, "measurement_refs": [], "value_authority_method_id": None}
 
 
 def project_steiner_static_protocol(canonical_measurements: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     profile=_load_profile()
-    by_id={str(x.get("canonical_measurement_id")):dict(x) for x in canonical_measurements}
+    by_id=_protocol_inputs(canonical_measurements)
     ref_set=profile["norm_sets"][0]
     references=dict(ref_set.get("values") or {})
     base=profile["layers"]["STEINER_1953_BASE"]["required_measurement_ids"]
@@ -51,7 +139,7 @@ def project_steiner_static_protocol(canonical_measurements: Sequence[Mapping[str
     rows=[]
     for layer,ids in (("STEINER_1953_BASE",base),("STEINER_1959_EXTENSION",extension)):
         for cid in ids:
-            projected=by_id.get(cid,{})
+            projected=_safe_protocol_row(by_id.get(cid,{}), cid)
             status=str(projected.get("availability_status") or "NOT_COMPUTABLE")
             value=projected.get("value") if status=="AVAILABLE" else None
             reference=references.get(cid)
@@ -68,13 +156,13 @@ def project_steiner_static_protocol(canonical_measurements: Sequence[Mapping[str
                 "historical_reference":reference,
                 "reference_delta":delta,
                 "reference_authority":ref_set["authority"],
-                "classification_authority":bool(ref_set["classification_authority"]),
+                "classification_authority":False,
                 "interpretation_status":"REFERENCE_DISPLAY_ONLY_NO_CLASSIFICATION",
             })
     return {
         "protocol_profile_id":profile["protocol_profile_id"],
         "source_lock_gate":dict(profile["pre_code_gate"]),
-        "final_gate":dict(profile["final_gate"]),
+        "final_gate":_uncertified_final_gate(),
         "norm_set":{
             "norm_set_id":ref_set["norm_set_id"],
             "authority":ref_set["authority"],
@@ -100,14 +188,11 @@ def project_tweed_merrifield_protocol(
     canonical_measurements: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     profile = _load_tweed_merrifield_profile()
-    by_id = {
-        str(item.get("canonical_measurement_id")): dict(item)
-        for item in canonical_measurements
-    }
+    by_id = _protocol_inputs(canonical_measurements)
     rows: list[dict[str, Any]] = []
     for section_id, section in profile["profiles"].items():
         for canonical_id in section.get("required_measurement_ids", []):
-            projected = by_id.get(canonical_id, {})
+            projected = _safe_protocol_row(by_id.get(canonical_id, {}), canonical_id)
             status = str(projected.get("availability_status") or "NOT_COMPUTABLE")
             rows.append(
                 {
@@ -127,7 +212,7 @@ def project_tweed_merrifield_protocol(
     return {
         "protocol_profile_id": profile["protocol_profile_id"],
         "source_lock_gate": dict(profile["pre_code_gate"]),
-        "final_gate": dict(profile["final_gate"]),
+        "final_gate": _uncertified_final_gate(),
         "rows": rows,
         "reference_contexts": list(profile["reference_contexts"]),
         "historical_geometry_resolution": dict(profile["historical_geometry_resolution"]),

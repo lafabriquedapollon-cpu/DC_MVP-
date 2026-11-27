@@ -1,0 +1,35 @@
+name: J5-02C.5 TPM NV extend emulator admission (NOT HARDWARE)
+on:
+  push:
+    branches: [ci/j5-02c-tpm-anchor-lab-20261127]
+permissions:
+  contents: read
+jobs:
+  tpm-emulator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated dependencies and record versions
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends swtpm tpm2-tools libtss2-tcti-swtpm0t64
+          dpkg-query -W swtpm tpm2-tools libtss2-tcti-swtpm0t64
+          python -m pip install --disable-pip-version-check --only-binary=:all: 'webauthn==3.0.0' 'cryptography==49.0.0'
+          python -m pip check
+      - name: Exact checkout and isolated delta
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git diff --name-only 2fb97a16c010350e03aae5a527841dbf0127569e HEAD | sort | paste -sd ' ' -)" = '.github/workflows/j5-02c-tpm-anchor-lab.yml scripts/ci_j5_02c_tpm_anchor_lab.py'
+      - name: Previous LAB regressions
+        run: |
+          python -B -m scripts.ci_j5_02c_recovery_lab
+          python -B -m scripts.ci_j5_02c_trust_root_lab
+      - name: Real TPM command semantics on disposable swtpm
+        run: python -B -m scripts.ci_j5_02c_tpm_anchor_lab

@@ -4,21 +4,22 @@ import { WaitingRoomView } from './views/WaitingRoomView';
 import { api } from '../../../services/api';
 import { useAuthStore } from '../../../stores/useAuthStore';
 import { MobileStorage } from '../../../services/zka/MobileStorage';
+import type { Appointment, Snapshot, ApptStatus } from './types';
 
-const DEFAULT_WAITING_FIXTURE = [
-  { id: 9101, $10, patient_name: null, time: '09:00', motif: 'Détartrage', status: 'EN_ATTENTE', ticket_number: 4 },
-  { id: 9102, $10, patient_name: null, time: '09:30', motif: 'Contrôle', status: 'EN_ATTENTE', ticket_number: 12 },
+const DEFAULT_WAITING_FIXTURE: Appointment[] = [
+  { id: 9101, patient_id: null, patient_name: 'Patient fictif A', phone: null, duration_minutes: 30, time: '09:00', motif: 'Détartrage', status: 'EN_ATTENTE', ticket_number: 4 },
+  { id: 9102, patient_id: null, patient_name: 'Patient fictif B', phone: null, duration_minutes: 30, time: '09:30', motif: 'Contrôle', status: 'EN_ATTENTE', ticket_number: 12 },
 ];
 
 export function MobileG3BrowserCertHarness() {
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
   const tab = params.get('tab') || 'notifications';
   const patientId = Number(params.get('patientId') || '') || 101;
-  const patientName = params.get('patientName') || 'Sara BENALI';
+  const patientName = params.get('patientName') || 'Patient fictif';
   const ticketNumber = Number(params.get('ticket') || '') || 4;
-  const initialAppointments = useMemo(
+  const initialAppointments = useMemo<Appointment[]>(
     () => params.get('patientId')
-      ? [{ id: 9101, patient_id: patientId, patient_name: patientName, time: '09:00', motif: 'Certification photo', status: 'EN_ATTENTE', ticket_number: ticketNumber }]
+      ? [{ id: 9101, patient_id: patientId, patient_name: patientName, phone: null, duration_minutes: 30, time: '09:00', motif: 'Certification photo', status: 'EN_ATTENTE', ticket_number: ticketNumber }]
       : DEFAULT_WAITING_FIXTURE,
     [params, patientId, patientName, ticketNumber],
   );
@@ -46,7 +47,7 @@ export function MobileG3BrowserCertHarness() {
 
   const [error, setError] = useState<string | null>(null);
   const [lastNavigation, setLastNavigation] = useState<string | null>(null);
-  const snapshot = useMemo(() => ({
+  const snapshot = useMemo<Snapshot>(() => ({
     generated_at: new Date().toISOString(),
     role: 'DENTISTE',
     is_superadmin: false,
@@ -55,7 +56,7 @@ export function MobileG3BrowserCertHarness() {
     debtors: [],
   }), [appointments]);
 
-  const onStatusChange = async (id: number, status: string) => {
+  const onStatusChange = async (id: number, status: ApptStatus) => {
     setError(null);
     try {
       await api.patch(`/mobile/appointments/${id}/status`, { status });
@@ -79,7 +80,7 @@ export function MobileG3BrowserCertHarness() {
       {error && <p role="alert" className="mb-4 text-sm font-bold text-rose-600">{error}</p>}
       {lastNavigation && <p data-testid="g3-mobile-navigation">navigate:{lastNavigation}</p>}
       {tab === 'waiting-room'
-        ? <WaitingRoomView snapshot={snapshot as any} onStatusChange={onStatusChange as any} />
+        ? <WaitingRoomView snapshot={snapshot} onStatusChange={onStatusChange} />
         : <NotificationsView onNavigate={(nextTab) => setLastNavigation(nextTab)} />}
     </main>
   );
