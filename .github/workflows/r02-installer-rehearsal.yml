@@ -169,6 +169,149 @@ jobs:
               @{ project='http-ece'; version='1.2.1'; file='http_ece-1.2.1.tar.gz'; sha='8c6ab23116bbf6affda894acfd5f2ca0fb8facbcbb72121c11c75c33e7ce8cff'; wheelPattern='^http_ece-1\.2\.1-(py3|py2\.py3)-none-any\.whl$' }
             )
             $constraints = Join-Path $lab 'reviewed-source-constraints.txt'
+            # The qualified full graph, not the latest transitive resolution, is authoritative.
+            $qualified = Get-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'scripts\r02-desktop-proven-versions.json') -Raw | ConvertFrom-Json
+            $pins = @($qualified.packages.PSObject.Properties)
+            if ($qualified.schema -ne 1 -or $qualified.python -cne '3.12.10' -or $pins.Count -ne 187) { throw 'INVALID_QUALIFIED_GRAPH' }
+            foreach ($pin in $pins) {
+              if ($pin.Name -notmatch '^[a-z0-9][a-z0-9_.-]*            foreach ($entry in $approved) {
+              $sdist = Join-Path $lab $entry.file
+              $release = Invoke-RestMethod -Uri ("https://pypi.org/pypi/{0}/{1}/json" -f $entry.project,$entry.version)
+              $source = @($release.urls | Where-Object { $_.filename -ceq $entry.file -and $_.packagetype -ceq 'sdist' })
+              if ($source.Count -ne 1 -or $source[0].digests.sha256 -cne $entry.sha -or $source[0].yanked) { throw ("SOURCE_IDENTITY_MISMATCH " + $entry.project) }
+              $uri = [uri]$source[0].url
+              if ($uri.Scheme -cne 'https' -or $uri.Host -cne 'files.pythonhosted.org' -or $uri.UserInfo) { throw 'SOURCE_ORIGIN_REFUSED' }
+              Invoke-WebRequest -Uri $uri -OutFile $sdist
+              if ((Get-FileHash -LiteralPath $sdist -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha) { throw ("SOURCE_HASH_MISMATCH " + $entry.project) }
+              Write-Host ("R02_REVIEWED_SOURCE_SHA256_PASS " + $entry.project)
+              & $py -m pip --isolated wheel --disable-pip-version-check --no-cache-dir --no-index --no-deps --no-build-isolation --wheel-dir $wheelhouse $sdist
+              if ($LASTEXITCODE -ne 0) { throw ("LOCAL_WHEEL_BUILD_FAILED " + $entry.project) }
+              $wheels = @(Get-ChildItem -LiteralPath $wheelhouse -File | Where-Object { $_.Name -cmatch $entry.wheelPattern })
+              if ($wheels.Count -ne 1) { throw ("WHEEL_IDENTITY_MISMATCH " + $entry.project) }
+              Write-Host ("R02_REVIEWED_LOCAL_WHEEL_SHA256 " + $entry.project + "=" + (Get-FileHash -LiteralPath $wheels[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant())
+              $pin = $qualified.packages.PSObject.Properties[$entry.project]
+              if ($null -eq $pin -or $pin.Value -cne $entry.version) { throw ('UNQUALIFIED_SOURCE_VERSION ' + $entry.project) }
+            }
+            if (@(Get-ChildItem -LiteralPath $wheelhouse -File).Count -ne $approved.Count) { throw 'UNEXPECTED_WHEELHOUSE_CONTENT' }
+            # Resolve the entire dependency graph before mutating the full environment.
+            # No generic source fallback, including transitive packages.
+            $report = Join-Path $lab 'wheel-resolution.json'
+            $requirements = Join-Path $env:GITHUB_WORKSPACE 'backend\requirements-windows-build.txt'
+            $resolver = @('--disable-pip-version-check','--no-cache-dir','--only-binary=:all:','--index-url','https://pypi.org/simple','--find-links',$wheelhouse,'-c',$constraints,'-r',$requirements)
+            & $py -m pip --isolated install @resolver --dry-run --report $report
+            if ($LASTEXITCODE -ne 0) { throw 'FULL_WINDOWS_BINARY_GRAPH_RESOLUTION_FAILED' }
+            $plan = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+            foreach ($item in $plan.install) {
+              $url = [uri]$item.download_info.url
+              if (-not $url.AbsolutePath.EndsWith('.whl',[StringComparison]::OrdinalIgnoreCase)) { throw 'NON_WHEEL_IN_RESOLUTION' }
+              if ($url.Scheme -eq 'file') {
+                if ((Split-Path -Parent $url.LocalPath) -ne $wheelhouse) { throw 'UNAPPROVED_LOCAL_WHEEL' }
+              } elseif ($url.Scheme -cne 'https' -or $url.Host -cne 'files.pythonhosted.org') {
+                throw 'UNAPPROVED_RESOLVER_ORIGIN'
+              }
+              # Constrain resolved versions so actual installation cannot silently re-resolve.
+              if ($item.metadata.name -notmatch '^[A-Za-z0-9_.-]+$' -or $item.metadata.version -notmatch '^[A-Za-z0-9.+!_-]+$') { throw 'INVALID_RESOLVER_METADATA' }
+              $canonical = $item.metadata.name.ToLowerInvariant() -replace '[-_.]+','-'
+              $pin = $qualified.packages.PSObject.Properties[$canonical]
+              if ($null -eq $pin -or $pin.Value -cne $item.metadata.version) { throw ('UNQUALIFIED_RESOLUTION ' + $canonical) }
+              # Preserve the qualified pins instead of admitting newly resolved versions.
+            }
+            Write-Host ("R02_FULL_WINDOWS_BINARY_GRAPH_RESOLUTION_PASS count=" + @($plan.install).Count)
+            & $py -m pip --isolated install @resolver
+            if ($LASTEXITCODE -ne 0) { throw 'FULL_WINDOWS_WHEEL_INSTALL_FAILED' }
+            & $py -m pip check
+            if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_CONSISTENCY_FAILED' }
+            $env:HOME = $lab
+            $env:USERPROFILE = $lab
+            $env:APPDATA = $lab
+            $env:LOCALAPPDATA = $lab
+            $env:DC_NATIVE_MINGW_BIN = 'C:\msys64\mingw64\bin'
+            $env:HF_HUB_OFFLINE = '1'
+            $env:TRANSFORMERS_OFFLINE = '1'
+            $env:PYTHONDONTWRITEBYTECODE = '1'
+            # Capitalize the previous independent qualification; fail on version drift.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_desktop_proven_versions.py')
+            if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_REQUALIFICATION_REQUIRED' }
+            # Reconstruct the sidecar using the existing exact native hash lock.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_stage_native_bundle.py')
+            if ($LASTEXITCODE -ne 0) { throw 'NATIVE_BUNDLE_CLOSURE_FAILED' }
+            # No separate native bundle, storage or preflight reruns.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_backend_rehearsal_harness.py') --installer-only
+            if ($LASTEXITCODE -ne 0) { throw 'BACKEND_FROZEN_REHEARSAL_FAILED' }
+          } finally {
+            if (Test-Path -LiteralPath $lab) { Remove-Item -LiteralPath $lab -Recurse -Force }
+          }
+          if (Test-Path -LiteralPath $lab) { throw 'FULL_WINDOWS_LAB_CLEANUP_FAILED' }
+          Write-Host 'R02_FULL_WINDOWS_DEPENDENCY_REHEARSAL_CLEANUP_PASS'
+ -or $pin.Value -notmatch '^[A-Za-z0-9.+!_-]+            foreach ($entry in $approved) {
+              $sdist = Join-Path $lab $entry.file
+              $release = Invoke-RestMethod -Uri ("https://pypi.org/pypi/{0}/{1}/json" -f $entry.project,$entry.version)
+              $source = @($release.urls | Where-Object { $_.filename -ceq $entry.file -and $_.packagetype -ceq 'sdist' })
+              if ($source.Count -ne 1 -or $source[0].digests.sha256 -cne $entry.sha -or $source[0].yanked) { throw ("SOURCE_IDENTITY_MISMATCH " + $entry.project) }
+              $uri = [uri]$source[0].url
+              if ($uri.Scheme -cne 'https' -or $uri.Host -cne 'files.pythonhosted.org' -or $uri.UserInfo) { throw 'SOURCE_ORIGIN_REFUSED' }
+              Invoke-WebRequest -Uri $uri -OutFile $sdist
+              if ((Get-FileHash -LiteralPath $sdist -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha) { throw ("SOURCE_HASH_MISMATCH " + $entry.project) }
+              Write-Host ("R02_REVIEWED_SOURCE_SHA256_PASS " + $entry.project)
+              & $py -m pip --isolated wheel --disable-pip-version-check --no-cache-dir --no-index --no-deps --no-build-isolation --wheel-dir $wheelhouse $sdist
+              if ($LASTEXITCODE -ne 0) { throw ("LOCAL_WHEEL_BUILD_FAILED " + $entry.project) }
+              $wheels = @(Get-ChildItem -LiteralPath $wheelhouse -File | Where-Object { $_.Name -cmatch $entry.wheelPattern })
+              if ($wheels.Count -ne 1) { throw ("WHEEL_IDENTITY_MISMATCH " + $entry.project) }
+              Write-Host ("R02_REVIEWED_LOCAL_WHEEL_SHA256 " + $entry.project + "=" + (Get-FileHash -LiteralPath $wheels[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant())
+              Add-Content -LiteralPath $constraints -Value ($entry.project + '==' + $entry.version) -Encoding ascii
+            }
+            if (@(Get-ChildItem -LiteralPath $wheelhouse -File).Count -ne $approved.Count) { throw 'UNEXPECTED_WHEELHOUSE_CONTENT' }
+            # Resolve the entire dependency graph before mutating the full environment.
+            # No generic source fallback, including transitive packages.
+            $report = Join-Path $lab 'wheel-resolution.json'
+            $requirements = Join-Path $env:GITHUB_WORKSPACE 'backend\requirements-windows-build.txt'
+            $resolver = @('--disable-pip-version-check','--no-cache-dir','--only-binary=:all:','--index-url','https://pypi.org/simple','--find-links',$wheelhouse,'-c',$constraints,'-r',$requirements)
+            & $py -m pip --isolated install @resolver --dry-run --report $report
+            if ($LASTEXITCODE -ne 0) { throw 'FULL_WINDOWS_BINARY_GRAPH_RESOLUTION_FAILED' }
+            $plan = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+            foreach ($item in $plan.install) {
+              $url = [uri]$item.download_info.url
+              if (-not $url.AbsolutePath.EndsWith('.whl',[StringComparison]::OrdinalIgnoreCase)) { throw 'NON_WHEEL_IN_RESOLUTION' }
+              if ($url.Scheme -eq 'file') {
+                if ((Split-Path -Parent $url.LocalPath) -ne $wheelhouse) { throw 'UNAPPROVED_LOCAL_WHEEL' }
+              } elseif ($url.Scheme -cne 'https' -or $url.Host -cne 'files.pythonhosted.org') {
+                throw 'UNAPPROVED_RESOLVER_ORIGIN'
+              }
+              # Constrain resolved versions so actual installation cannot silently re-resolve.
+              if ($item.metadata.name -notmatch '^[A-Za-z0-9_.-]+$' -or $item.metadata.version -notmatch '^[A-Za-z0-9.+!_-]+$') { throw 'INVALID_RESOLVER_METADATA' }
+              Add-Content -LiteralPath $constraints -Value ($item.metadata.name + '==' + $item.metadata.version) -Encoding ascii
+            }
+            Write-Host ("R02_FULL_WINDOWS_BINARY_GRAPH_RESOLUTION_PASS count=" + @($plan.install).Count)
+            & $py -m pip --isolated install @resolver
+            if ($LASTEXITCODE -ne 0) { throw 'FULL_WINDOWS_WHEEL_INSTALL_FAILED' }
+            & $py -m pip check
+            if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_CONSISTENCY_FAILED' }
+            $env:HOME = $lab
+            $env:USERPROFILE = $lab
+            $env:APPDATA = $lab
+            $env:LOCALAPPDATA = $lab
+            $env:DC_NATIVE_MINGW_BIN = 'C:\msys64\mingw64\bin'
+            $env:HF_HUB_OFFLINE = '1'
+            $env:TRANSFORMERS_OFFLINE = '1'
+            $env:PYTHONDONTWRITEBYTECODE = '1'
+            # Capitalize the previous independent qualification; fail on version drift.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_desktop_proven_versions.py')
+            if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_REQUALIFICATION_REQUIRED' }
+            # Reconstruct the sidecar using the existing exact native hash lock.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_stage_native_bundle.py')
+            if ($LASTEXITCODE -ne 0) { throw 'NATIVE_BUNDLE_CLOSURE_FAILED' }
+            # No separate native bundle, storage or preflight reruns.
+            & $py -I (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci_r02_backend_rehearsal_harness.py') --installer-only
+            if ($LASTEXITCODE -ne 0) { throw 'BACKEND_FROZEN_REHEARSAL_FAILED' }
+          } finally {
+            if (Test-Path -LiteralPath $lab) { Remove-Item -LiteralPath $lab -Recurse -Force }
+          }
+          if (Test-Path -LiteralPath $lab) { throw 'FULL_WINDOWS_LAB_CLEANUP_FAILED' }
+          Write-Host 'R02_FULL_WINDOWS_DEPENDENCY_REHEARSAL_CLEANUP_PASS'
+) { throw 'INVALID_QUALIFIED_PIN' }
+              Add-Content -LiteralPath $constraints -Value ($pin.Name + '==' + $pin.Value) -Encoding ascii
+            }
+            Write-Host ('J5_03C_QUALIFIED_CONSTRAINTS_PASS count=' + $pins.Count)
             foreach ($entry in $approved) {
               $sdist = Join-Path $lab $entry.file
               $release = Invoke-RestMethod -Uri ("https://pypi.org/pypi/{0}/{1}/json" -f $entry.project,$entry.version)
