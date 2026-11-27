@@ -146,6 +146,12 @@ const pathIs=async(path)=>{try{await wait('route '+path,async()=>await pagePath(
 const shown=q=>wait('visible '+q,()=>visible(q));
 const click=async q=>assert(await evalPage('(()=>{const e=document.querySelector('+JSON.stringify(q)+');if(!e||e.disabled)return false;e.click();return true})()'));
 const browserAPI=async(path,method='GET',body)=>evalPage('(async()=>{const r=await fetch('+JSON.stringify(base+path)+',{credentials:"include",method:'+JSON.stringify(method)+',headers:{"Content-Type":"application/json"},body:'+JSON.stringify(body===undefined?undefined:JSON.stringify(body))+'});return {status:r.status,body:await r.json().catch(()=>null)}})()');
+const captureIsolatedSurface=async name=>{
+  await sleep(400);
+  assert.equal(await evalPage('document.querySelector("[data-offline-queue-viewer]")===null'),true,'Staff queue overlay leaked into '+name);
+  await capture(name);
+  console.log('LOT00_SURFACE_QUEUE_ISOLATED '+name);
+};
 const hub='[data-v15-hub]';
 const station='[data-workstation-experience="station"]';
 const control='[data-workstation-experience="control-center"]';
@@ -158,13 +164,13 @@ try{
    // Actual backend stopped by shell, frontend remains running. No network mocks.
    await assert.rejects(fetch(base+'/health',{signal:AbortSignal.timeout(2000)}));
    await go('/dashboard');await pathIs('/hub');await shown(hub);await shown('[data-hub-offline]');
-   await capture('08-offline-hub');
+   await captureIsolatedSurface('08-offline-hub');
    assert.equal(await visible('[data-workstation-experience="station"]'),false);
    await go('/setup');await pathIs('/hub');await shown(hub);await shown('[data-hub-offline]');
-   await capture('08b-offline-setup-refused');
+   await captureIsolatedSurface('08b-offline-setup-refused');
    console.log('LOT00_OFFLINE_SETUP_REFUSED_PASS');
    await click('[data-hub-experience="control"]');await pathIs('/control-center');await shown(control);
-   await capture('09-offline-control');
+   await captureIsolatedSurface('09-offline-control');
    console.log('LOT00_REAL_OFFLINE_FAIL_CLOSED_PASS');
  }else{
    await go('/hub');await shown(hub);
@@ -172,11 +178,11 @@ try{
    const fresh=await browserAPI('/api/workstation/bootstrap');
    assert.equal(fresh.status,200);assert.equal(fresh.body.authenticated,false);assert.equal(fresh.body.workstationId,null);assert.equal(fresh.body.defaultExperience,null);
    assert.equal((await api('/api/patients/')).status,401);
-   await capture('01-fresh-hub-1440');
+   await captureIsolatedSurface('01-fresh-hub-1440');
    await call('Emulation.setDeviceMetricsOverride',{width:768,height:900,deviceScaleFactor:1,mobile:false});
-   assert(await evalPage('document.documentElement.scrollWidth<=innerWidth'));await capture('02-fresh-hub-768');
+   assert(await evalPage('document.documentElement.scrollWidth<=innerWidth'));await captureIsolatedSurface('02-fresh-hub-768');
    await call('Emulation.clearDeviceMetricsOverride');
-   await click('[data-hub-experience="control"]');await pathIs('/control-center');await shown(control);await capture('03-control-fresh');
+   await click('[data-hub-experience="control"]');await pathIs('/control-center');await shown(control);await captureIsolatedSurface('03-control-fresh');
    await go('/station');await pathIs('/hub');await shown(hub);assert.equal(await evalPage('new URLSearchParams(location.search).get("select")'),'1');
    await click('[data-hub-experience="cabinet"]');await pathIs('/login');await shown('input[type=email]');
    await setField('input[type=email]','ci-owner@example.com');await setField('input[type=password]',password);assert(await clickSubmit());
@@ -184,15 +190,15 @@ try{
    await pathIs('/dashboard');
    await wait('workstation',async()=>{const r=await browserAPI('/api/workstation/bootstrap');return r.status===200&&r.body.authenticated&&r.body.workstationId});
    await go('/hub?select=1');await shown('[data-workstation-admin]');
-   await capture('04-authenticated-hub');
+   await captureIsolatedSurface('04-authenticated-hub');
    const initial=await checkMode(null);assert(initial.canManage&&initial.canConfigurePin);
    const cfg=await browserAPI('/api/workstation/owner-pin','POST',{accountPassword:password,newPin:pin});assert.equal(cfg.status,200,'configure synthetic PIN');
    const wrong=await browserAPI('/api/workstation/mode','POST',{mode:'station',ownerPin:'123456'});assert.equal(wrong.status,403);await checkMode(null);
    await mode('control_center');await go('/hub');await pathIs('/control-center');await shown(control);
-   await capture('05-control-dispatch');
+   await captureIsolatedSurface('05-control-dispatch');
    await mode('cabinet');await go('/hub');await pathIs('/dashboard');await checkMode('cabinet');
    await mode('station');await go('/hub');await pathIs('/station');await shown(station);
-   await capture('06-station-dispatch');
+   await captureIsolatedSurface('06-station-dispatch');
    for(const route of ['/dashboard','/control-center','/hub?select=1']){
      console.log('LOT00_STATION_DIRECT_ROUTE '+route);await go(route);await pathIs('/station');await shown(station);
    }
@@ -202,7 +208,7 @@ try{
    const good=await browserAPI('/api/workstation/station/escape','POST',{ownerPin:pin});assert.equal(good.status,200);
    await go('/hub?select=1');await shown(hub);await checkMode('station');
    await mode('cabinet');await go('/hub');await pathIs('/dashboard');await checkMode('cabinet');
-   await go('/hub?select=1');await shown(hub);await capture('07-recovered-hub');
+   await go('/hub?select=1');await shown(hub);await captureIsolatedSurface('07-recovered-hub');
    await assertPwa();
    console.log('LOT00_FRESH_DISPATCH_MODES_STATION_NEGATIVES_PASS');
  }
