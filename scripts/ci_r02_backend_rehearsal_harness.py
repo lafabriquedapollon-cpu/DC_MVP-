@@ -104,7 +104,7 @@ def main():
     installer_only = sys.argv[1:] == ["--installer-only"]
     require(not sys.argv[1:] or final_only or installer_only, "UNEXPECTED_HARNESS_ARGUMENT")
     if installer_only:
-        require(os.environ.get("GITHUB_REF_NAME") == "ci/r02-installer-rehearsal-20261126",
+        require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-installer-rehearsal-20261126", "ci/r03-conv04-installer-20261127"},
                 "INSTALLER_BRANCH_REQUIRED")
     if final_only:
         require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-desktop-final-20261126", "ci/r03-convergence-20261126"},
