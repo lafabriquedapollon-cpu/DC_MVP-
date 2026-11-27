@@ -156,11 +156,12 @@ def make_script(bundle, root, dest, token):
     host = os.environ["COMPUTERNAME"]
     require(re.fullmatch(r"[A-Za-z0-9-]+",host), "INSTALL_HOST_INVALID")
     script = root/"rehearsal.iss"
+    title = "Digital Crown - COMMISSIONING CI ONLY" if (bundle/"COMMISSIONING-NOT-CLINICAL.txt").is_file() else "Digital Crown - SYNTHETIC REHEARSAL ONLY"
     # The generated installer can run only within this disposable test session.
     # These are scope markers, not an authentication or clinical trust root.
     script.write_text(f'''[Setup]
 AppId=DC-REHEARSAL-{token}
-AppName=Digital Crown - SYNTHETIC REHEARSAL ONLY
+AppName={title}
 AppVersion=0.0.0
 DefaultDirName={safe_path(dest)}
 OutputDir={safe_path(root)}

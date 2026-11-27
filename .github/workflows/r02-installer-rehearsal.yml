@@ -1,7 +1,7 @@
 name: R0.2 - nonclinical Windows installer rehearsal
 on:
   push:
-    branches: [ci/r02-installer-rehearsal-20261126, ci/r03-conv04-installer-20261127, ci/j5-03c-scientific-admission-20261127, ci/j5-03e-installed-restore-20261127]
+    branches: [ci/r02-installer-rehearsal-20261126, ci/r03-conv04-installer-20261127, ci/j5-03c-scientific-admission-20261127, ci/j5-03e-installed-restore-20261127, ci/j5-04c-commissioning-setup-20261127]
 permissions:
   contents: read
 jobs:
@@ -81,6 +81,26 @@ jobs:
         with:
           python-version: '3.12.10'
           architecture: x64
+      - name: Build qualified isolated OWNER broker sidecar
+        if: github.ref_name == 'ci/j5-04c-commissioning-setup-20261127'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP ('dc-commissioning-broker-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $root | Out-Null
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value ('DC_COMMISSIONING_BROKER_ROOT=' + $root) -Encoding utf8
+          python -m venv (Join-Path $root 'venv')
+          if ($LASTEXITCODE -ne 0) { throw 'BROKER_VENV_FAILED' }
+          $brokerpy = Join-Path $root 'venv\Scripts\python.exe'
+          & $brokerpy -m pip install --disable-pip-version-check --only-binary=:all: 'pywin32==311' 'pyinstaller==6.22.3' 'webauthn==3.0.0' 'cryptography==49.0.0' 'cbor2==6.3.0'
+          if ($LASTEXITCODE -ne 0) { throw 'BROKER_DEPS_FAILED' }
+          & $brokerpy -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'BROKER_PIP_CHECK_FAILED' }
+          & $brokerpy -B -m scripts.ci_j5_02c_recovery_lab
+          if ($LASTEXITCODE -ne 0) { throw 'BROKER_REGRESSION_FAILED' }
+          & $brokerpy -m PyInstaller --noconfirm --clean --onedir --name dc-owner-commissioning --paths . --hidden-import win32timezone --distpath "$root/dist" --workpath "$root/build" --specpath "$root" scripts/j5_owner_broker.py
+          if ($LASTEXITCODE -ne 0) { throw 'BROKER_BUILD_FAILED' }
+          Write-Host 'J5_04C_COMMISSIONING_BROKER_BUILD_PASS'
       - uses: actions/setup-node@v4
         with:
           node-version: '24.22.3'
@@ -246,3 +266,16 @@ jobs:
           }
           if (Test-Path -LiteralPath $lab) { throw 'FULL_WINDOWS_LAB_CLEANUP_FAILED' }
           Write-Host 'R02_FULL_WINDOWS_DEPENDENCY_REHEARSAL_CLEANUP_PASS'
+
+      - name: Remove isolated OWNER broker build inputs
+        if: always() && github.ref_name == 'ci/j5-04c-commissioning-setup-20261127'
+        shell: pwsh
+        run: |
+          $root = $env:DC_COMMISSIONING_BROKER_ROOT
+          if ($root) {
+            $item = Get-Item -LiteralPath $root
+            if ($item.Parent.FullName -ne $env:RUNNER_TEMP -or $item.Name -notmatch '^dc-commissioning-broker-[a-f0-9]{32}$' -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'BROKER_CLEANUP_SCOPE_REFUSED' }
+            Remove-Item -LiteralPath $root -Recurse -Force
+            if (Test-Path -LiteralPath $root) { throw 'BROKER_BUILD_RESIDUE' }
+            Write-Host 'J5_04C_COMMISSIONING_BROKER_BUILD_CLEANUP_PASS'
+          }

@@ -106,8 +106,9 @@ def main():
     final_only = sys.argv[1:] == ["--desktop-final-only"]
     installer_only = sys.argv[1:] == ["--installer-only"]
     require(not sys.argv[1:] or final_only or installer_only, "UNEXPECTED_HARNESS_ARGUMENT")
+    commissioning = os.environ.get("GITHUB_REF_NAME") == "ci/j5-04c-commissioning-setup-20261127"
     if installer_only:
-        require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-installer-rehearsal-20261126", "ci/r03-conv04-installer-20261127", "ci/j5-03c-scientific-admission-20261127", "ci/j5-03e-installed-restore-20261127"},
+        require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-installer-rehearsal-20261126", "ci/r03-conv04-installer-20261127", "ci/j5-03c-scientific-admission-20261127", "ci/j5-03e-installed-restore-20261127", "ci/j5-04c-commissioning-setup-20261127"},
                 "INSTALLER_BRANCH_REQUIRED")
     if final_only:
         require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-desktop-final-20261126", "ci/r03-convergence-20261126"},
@@ -154,6 +155,17 @@ def main():
     exe = bundle / "dc_backend_rehearsal.exe"
     require(exe.is_file() and exe.open("rb").read(2) == b"MZ", "BACKEND_PE_MISSING")
     shutil.copytree(native, bundle / "native")
+    if commissioning:
+        require(installer_only, "COMMISSIONING_INSTALLER_REQUIRED")
+        broker_root=Path(os.environ["DC_COMMISSIONING_BROKER_ROOT"]).resolve(strict=True)
+        require(broker_root.parent==runner and re.fullmatch(r"dc-commissioning-broker-[a-f0-9]{32}",broker_root.name),"BROKER_BUILD_ROOT")
+        broker=broker_root/"dist"/"dc-owner-commissioning"
+        scan_unadmitted_assets(broker)
+        broker_exe=broker/"dc-owner-commissioning.exe"
+        require(broker_exe.is_file() and broker_exe.open("rb").read(2)==b"MZ","BROKER_PE_REQUIRED")
+        shutil.copytree(broker,bundle/"owner-commissioning")
+        (bundle/"COMMISSIONING-NOT-CLINICAL.txt").write_text("SYNTHETIC COMMISSIONING ONLY. No clinical data, real OWNER or release authority. CI scope only.",encoding="ascii")
+        print("J5_04C_COMMISSIONING_SIDECAR_STAGED_PASS",flush=True)
     # Reject forbidden payloads before boot. Do not publish any binary artifact.
     for file in bundle.rglob("*"):
         if file.is_file():
@@ -164,7 +176,7 @@ def main():
     print("J5_03C_UNADMITTED_ASSETS_EXCLUDED_PASS", flush=True)
     print("R02_BACKEND_REAL_PE_BUILD_PASS", flush=True)
     if installer_only:
-        with installed_bundle(bundle, runner) as installed:
+        with installed_bundle(bundle, runner, negative=commissioning) as installed:
             scan_unadmitted_assets(installed)
             print("J5_03C_INSTALLED_ASSET_EXCLUSION_PASS", flush=True)
             installed_exe = installed / exe.name
@@ -204,7 +216,7 @@ def main():
                     print("R02_INSTALLER_DIRECTORY_TREE_PASS stage=" + stage, flush=True)
                 print("R02_INSTALLER_INSTALLED_BACKEND_RESTART_PASS", flush=True)
             require(not root.exists(), "INSTALLED_DATA_LAB_RESIDUE")
-            if os.environ.get("GITHUB_REF_NAME") == "ci/j5-03e-installed-restore-20261127":
+            if commissioning or os.environ.get("GITHUB_REF_NAME") == "ci/j5-03e-installed-restore-20261127":
                 for scenario in ("success", "rollback"):
                     with tempfile.TemporaryDirectory(prefix="dc-backend-rehearsal-", dir=runner) as temp:
                         root = Path(temp).resolve(strict=True)
@@ -221,6 +233,33 @@ def main():
                         assert_directory_inventory(installed, installed_dirs)
                     require(not root.exists(), "J5_03E_RESTORE_LAB_RESIDUE")
                 print("J5_03E_INSTALLED_RESTORE_CLEANUP_PASS", flush=True)
+            if commissioning:
+                from ci_r02_installer_rehearsal import inventory
+                before=inventory(installed)
+                brokerpy=broker_root/"venv"/"Scripts"/"python.exe"
+                require(brokerpy.is_file(),"BROKER_TEST_INTERPRETER_REQUIRED")
+                broker_installed=installed/"owner-commissioning"
+                refused=subprocess.run([str(broker_installed/"dc-owner-commissioning.exe")],cwd=installed,
+                    stdin=subprocess.DEVNULL,capture_output=True,timeout=30)
+                require(refused.returncode!=0 and b"COMMISSIONING_SERVICE_ONLY" in refused.stderr,"BROKER_DIRECT_START_ACCEPTED")
+                print("J5_04C_COMMISSIONING_DIRECT_START_DENIED_PASS",flush=True)
+                result=subprocess.run([str(brokerpy),"-B","-m","scripts.ci_j5_04c_native_broker",str(broker_installed)],
+                    cwd=repo,stdin=subprocess.DEVNULL,capture_output=True,encoding="utf-8",errors="replace",timeout=300)
+                lines=result.stdout.splitlines()
+                for line in lines:
+                    if re.fullmatch(r"J5_04C_[A-Z_]+(?: [A-Za-z0-9_.=+-]+)*",line):
+                        print(line,flush=True)
+                if result.returncode:
+                    for line in result.stderr.splitlines()[-12:]:
+                        if line.startswith(("RuntimeError: ","ValueError: ","TimeoutError: ","pywintypes.error: ","AssertionError: ")) and len(line)<200:
+                            print("J5_04C_TEST_ERROR_TYPE "+line.split(":")[0],flush=True)
+                require(result.returncode==0 and {"J5_04C_NATIVE_SCM_DISTINCT_CLIENT_DIRECT_WRITER_DENIED_PASS",
+                    "J5_04C_SERVER_CHALLENGE_ENROLLMENT_REPLAY_PASS","J5_04C_RECOVERY_RESTART_NO_RELEASE_PASS",
+                    "J5_04C_NATIVE_CLEANUP_PASS"}<=set(lines),"INSTALLED_BROKER_FAILED")
+                require(inventory(installed)==before,"INSTALLED_BROKER_PAYLOAD_CHANGED")
+                assert_directory_inventory(installed,installed_dirs)
+                print("J5_04C_COMMISSIONING_INSTALLED_BROKER_PASS",flush=True)
+        if commissioning:print("J5_04C_COMMISSIONING_SINGLE_SETUP_INTEGRATED_PASS NOT_A_RELEASE",flush=True)
         print("R02_INSTALLER_INTEGRATED_PASS", flush=True)
         return
     if not final_only:
