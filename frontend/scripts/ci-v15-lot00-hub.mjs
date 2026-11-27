@@ -142,7 +142,7 @@ const denied=async(path,headers,status,detail,label)=>{
 const verifyIdentity=()=>evalPage('Boolean(document.body && document.body.innerText.toUpperCase().includes("CI-SYNTHETIC") && document.body.innerText.toUpperCase().includes("FIXTURE"))');
 
 const go=async(path)=>{const r=await call('Page.navigate',{url:web+path});assert(!r.errorText);};
-const pathIs=(path)=>wait('route '+path,async()=>await pagePath()===path);
+const pathIs=async(path)=>{try{await wait('route '+path,async()=>await pagePath()===path)}catch(e){console.log('LOT00_ROUTE_MISMATCH expected='+path+' actual='+String(await pagePath()).split('?')[0]);await capture('route-mismatch-'+path.replace(/[^a-z]/gi,'-'));throw e}};
 const shown=q=>wait('visible '+q,()=>visible(q));
 const click=async q=>assert(await evalPage('(()=>{const e=document.querySelector('+JSON.stringify(q)+');if(!e||e.disabled)return false;e.click();return true})()'));
 const browserAPI=async(path,method='GET',body)=>evalPage('(async()=>{const r=await fetch('+JSON.stringify(base+path)+',{credentials:"include",method:'+JSON.stringify(method)+',headers:{"Content-Type":"application/json"},body:'+JSON.stringify(body===undefined?undefined:JSON.stringify(body))+'});return {status:r.status,body:await r.json().catch(()=>null)}})()');
@@ -191,7 +191,7 @@ try{
    await mode('station');await go('/hub');await pathIs('/station');await shown(station);
    await capture('06-station-dispatch');
    for(const route of ['/dashboard','/control-center','/hub?select=1']){
-     await go(route);await pathIs('/station');await shown(station);
+     console.log('LOT00_STATION_DIRECT_ROUTE '+route);await go(route);await pathIs('/station');await shown(station);
    }
    const locked=await browserAPI('/api/patients/');assert.equal(locked.status,423);assert.equal(locked.body.detail,'WORKSTATION_STATION_LOCKED');
    const bad=await browserAPI('/api/workstation/station/escape','POST',{ownerPin:'123456'});assert.equal(bad.status,403);

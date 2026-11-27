@@ -124,11 +124,13 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
   const [isInitialized, setIsInitialized] = useState<boolean | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [workstationEnrollmentRequired, setWorkstationEnrollmentRequired] = useState(false);
+  const [stationLocked, setStationLocked] = useState(false);
   const location = useLocation();
 
   useEffect(() => {
     const checkAuthAndInit = async () => {
       setWorkstationEnrollmentRequired(false);
+      setStationLocked(false);
       // 1. Attendre que la base de données / le backend soit complètement chargé
       const waitForBackend = async () => {
         const MAX_ATTEMPTS = 15; // 15 × 2s = 30s max
@@ -162,6 +164,12 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
             setWorkstationEnrollmentRequired(true);
             return;
           }
+          // Resolve the server-authoritative Station lock before clinic initialization.
+          // A locked station must not be mistaken for an uninitialized cabinet.
+          if (workstationBootstrap.stationLocked && !workstationBootstrap.stationEscapeAuthorized) {
+            setStationLocked(true);
+            return;
+          }
           await useAuthStore.getState().checkAuth();
           const status = await cabinetApi.checkInitStatus();
           setIsInitialized(status.is_initialized);
@@ -181,6 +189,10 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
             || error.response?.data?.detail === 'WORKSTATION_IDENTITY_REQUIRED'
           )) {
           setWorkstationEnrollmentRequired(true);
+        } else if (axios.isAxiosError(error)
+          && error.response?.status === 423
+          && error.response?.data?.detail === 'WORKSTATION_STATION_LOCKED') {
+          setStationLocked(true);
         } else {
           console.error('Erreur vérification statut:', error);
           setIsInitialized(false);
@@ -208,6 +220,8 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
   if (workstationEnrollmentRequired) {
     return <Navigate to="/hub?enroll=1" replace />;
   }
+
+  if (stationLocked) return <Navigate to="/station" replace />;
 
   // Force le choix du mode s'il n'existe pas (Mode PROD par défaut désormais)
   const appMode = safeStorage.get('appMode');
