@@ -81,11 +81,14 @@ class Service(win32serviceutil.ServiceFramework):
             1,MAX,MAX,0,pipe_acl(c["client_sid"],c["service_sid"]))
         try:
             while not self.stopping:
+                # Poll a listening instance without disconnecting it between polls.
                 try:
-                    try:win32pipe.ConnectNamedPipe(h,None)
-                    except pywintypes.error as exc:
-                        if exc.winerror in (231,536):time.sleep(.025);continue
-                        if exc.winerror!=535:raise
+                    rc=win32pipe.ConnectNamedPipe(h,None)
+                    if rc in (231,536):time.sleep(.025);continue
+                except pywintypes.error as exc:
+                    if exc.winerror in (231,536):time.sleep(.025);continue
+                    if exc.winerror!=535:raise
+                try:
                     raw=read(h,lambda:self.stopping)
                     win32pipe.ImpersonateNamedPipeClient(h)
                     try:

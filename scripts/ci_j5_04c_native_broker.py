@@ -53,13 +53,16 @@ def request(token,pipe,op,payload,*,denied=False):
     with_handle=h
     try:
         require(not denied,"UNAUTHORIZED_PIPE_OPEN")
-        win32pipe.SetNamedPipeHandleState(h,win32pipe.PIPE_READMODE_MESSAGE|win32pipe.PIPE_NOWAIT,None,None)
+        # The data-only client does not acquire FILE_WRITE_ATTRIBUTES or GENERIC_WRITE.
         win32file.WriteFile(h,encode({"operation":op,"request_id":request_id,"payload":payload}))
         end=time.monotonic()+8
         while time.monotonic()<end:
             try:
-                rc,raw=win32file.ReadFile(h,MAX)
-                if rc==0 and raw:break
+                _,available,_=win32pipe.PeekNamedPipe(h,0)
+                if available:
+                    require(available<=MAX,"RESPONSE_SIZE")
+                    rc,raw=win32file.ReadFile(h,available)
+                    if rc==0 and raw:break
             except pywintypes.error as e:
                 if e.winerror not in (232,233):raise
             time.sleep(.025)
@@ -81,7 +84,6 @@ def main():
             for name in names:tokens.append(account(name))
             client,other=map(user_sid,tokens)
             require(client!=other and client!=admin,"USER_DISTINCT")
-            service=sid_text(win32security.LookupAccountName(None,"NT SERVICE\\"+NAME)[0]) if False else None
             command='"'+str(exe)+'" --service "'+str(root/"config.json")+'"'
             sc("create",NAME,"binPath=",command,"start=","demand","obj=","NT AUTHORITY\\LocalService");created=True
             sc("sidtype",NAME,"unrestricted")
