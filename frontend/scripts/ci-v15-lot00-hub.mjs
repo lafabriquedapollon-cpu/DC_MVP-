@@ -160,7 +160,49 @@ const checkMode=async mode=>{const r=await browserAPI('/api/workstation/bootstra
 const mode=async value=>{const r=await browserAPI('/api/workstation/mode','POST',{mode:value,ownerPin:pin});assert.equal(r.status,200,'mode '+value);assert.equal(r.body.defaultExperience,value)};
 try{
  await call('Network.enable');await call('Page.enable');
- if(process.argv.includes('--offline')){
+ if(process.argv.includes('--theme-restart')){
+   // Same browser profile, same encrypted database, new backend process.
+   const expected={selected_theme:'rose',primary_color:'#852b56',secondary_color:'#59384f',accent_color:'#b77845'};
+   const matchesPersisted=()=>evalPage('(()=>{const p='+JSON.stringify(expected)+';return [document.documentElement,document.body].every(e=>{const s=getComputedStyle(e);return e.dataset.theme===p.selected_theme&&s.getPropertyValue("--primary").trim().toLowerCase()===p.primary_color&&s.getPropertyValue("--secondary").trim().toLowerCase()===p.secondary_color&&s.getPropertyValue("--accent").trim().toLowerCase()===p.accent_color})})()');
+   await go('/hub?select=1');await shown(hub);await wait('persisted theme after restart',matchesPersisted);
+   const before=await browserAPI('/api/workstation/bootstrap');assert.equal(before.status,200);assert(before.body.authenticated&&before.body.workstationId);assert.equal(before.body.defaultExperience,'cabinet');
+   for(const k of Object.keys(expected))assert.equal(String(before.body.theme[k]).toLowerCase(),expected[k],k);
+   await captureIsolatedSurface('10-theme-after-backend-restart');
+   // Use actual keyboard traversal, not storage or CSS injection.
+   const buttons=await evalPage('Array.from(document.querySelectorAll("[data-hub-experience]")).map(e=>({id:e.dataset.hubExperience,tag:e.tagName,name:e.innerText.trim().length,disabled:e.disabled,tabIndex:e.tabIndex}))');
+   assert.equal(buttons.length,3);assert(buttons.every(b=>b.tag==='BUTTON'&&b.name>0&&!b.disabled&&b.tabIndex===0));
+   await evalPage('document.activeElement.blur()');
+   const reached=new Set();
+   for(let i=0;i<30&&reached.size<3;i++){
+     await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+     await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+     const id=await evalPage('document.activeElement?.dataset?.hubExperience||null');if(id)reached.add(id);
+   }
+   assert.deepEqual([...reached].sort(),['cabinet','control','station']);
+   await captureIsolatedSurface('11-hub-keyboard-focus');
+   console.log('LOT00_THEME_RESTART_KEYBOARD_PASS');
+   await go('/dashboard');await pathIs('/dashboard');await shown('button[title="Déconnexion"]');
+   await click('button[title="Déconnexion"]');
+   await wait('logout confirmation',()=>evalPage('Array.from(document.querySelectorAll("button")).some(b=>b.innerText.trim()==="Confirmer"&&b.getClientRects().length)'));
+   assert(await evalPage('(()=>{const b=Array.from(document.querySelectorAll("button")).find(b=>b.innerText.trim()==="Confirmer"&&b.getClientRects().length);if(!b)return false;b.click();return true})()'));
+   await pathIs('/login');await shown('input[type=email]');
+   const neutral=()=>evalPage('(()=>{return [document.documentElement,document.body].every(e=>{const s=getComputedStyle(e);return !e.dataset.theme&&s.getPropertyValue("--primary").trim()==="#003380"&&s.getPropertyValue("--secondary").trim()==="#1e40af"&&s.getPropertyValue("--accent").trim()==="#60a5fa"})})()');
+   await wait('neutral after logout',neutral);
+   await go('/hub?select=1');await shown(hub);await wait('neutral public hub',neutral);
+   const anonymous=await browserAPI('/api/workstation/bootstrap');assert.equal(anonymous.status,200);assert.equal(anonymous.body.authenticated,false);assert.equal(anonymous.body.theme??null,null);
+   assert.equal((await browserAPI('/api/clinics/me')).status,401);
+   await captureIsolatedSurface('12-hub-after-logout-neutral');
+   await click('[data-hub-experience="cabinet"]');await pathIs('/login');await shown('input[type=email]');
+   await setField('input[type=email]','ci-other@example.com');await setField('input[type=password]',password);assert(await clickSubmit());
+   await wait('second tenant login',()=>responses.some(r=>r.path==='/api/auth/login'&&r.status===200));
+   await wait('second tenant workstation',async()=>{const r=await browserAPI('/api/workstation/bootstrap');return r.status===200&&r.body.authenticated&&r.body.workstationId&&r.body.workstationId!==before.body.workstationId});
+   await go('/hub?select=1');await shown(hub);
+   const other=await browserAPI('/api/workstation/bootstrap');assert.equal(other.status,200);assert.notEqual(other.body.workstationId,before.body.workstationId);assert(other.body.theme);
+   assert.notEqual(String(other.body.theme.primary_color).toLowerCase(),expected.primary_color);
+   await wait('second tenant projected tokens',()=>evalPage('(()=>{const p='+JSON.stringify(other.body.theme)+';return [document.documentElement,document.body].every(e=>{const s=getComputedStyle(e);return e.dataset.theme===(p.selected_theme==="elite"?"":p.selected_theme)&&(!p.primary_color||s.getPropertyValue("--primary").trim().toLowerCase()===p.primary_color.toLowerCase())&&(!p.secondary_color||s.getPropertyValue("--secondary").trim().toLowerCase()===p.secondary_color.toLowerCase())&&(!p.accent_color||s.getPropertyValue("--accent").trim().toLowerCase()===p.accent_color.toLowerCase())})})()'));
+   await captureIsolatedSurface('13-hub-second-tenant');
+   console.log('LOT00_THEME_LOGOUT_TENANT_SWITCH_PASS');
+ }else if(process.argv.includes('--offline')){
    // Actual backend stopped by shell, frontend remains running. No network mocks.
    await assert.rejects(fetch(base+'/health',{signal:AbortSignal.timeout(2000)}));
    await go('/dashboard');await pathIs('/hub');await shown(hub);await shown('[data-hub-offline]');

@@ -307,6 +307,17 @@ jobs:
           pid=
           echo LOT00_OFFLINE_BEGIN
           timeout --kill-after=10s 150s node frontend/scripts/ci-v15-lot00-hub.mjs --offline
+          echo LOT00_BACKEND_RESTART_BEGIN
+          backend_log="$DC_LAB_ROOT/uvicorn-theme-restart.log"
+          "$DC_PYTHON" "$DC_LAB_ROOT/uvicorn-diagnostic.py" > "$backend_log" 2>&1 &
+          pid=$!
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl --noproxy '*' --fail --silent http://127.0.0.1:8008/health >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          timeout --kill-after=10s 180s node frontend/scripts/ci-v15-lot00-hub.mjs --theme-restart
           echo LOT00_DRIVER_PASS
           LAB
       - name: Upload synthetic browser evidence
