@@ -105,7 +105,7 @@ class Service(win32serviceutil.ServiceFramework):
                     raw=read(h,lambda:self.stopping)
                     mark("READ_OK")
                     stage="IMPERSONATE"
-                    win32pipe.ImpersonateNamedPipeClient(h)
+                    win32security.ImpersonateNamedPipeClient(h)
                     try:
                         peer=win32security.OpenThreadToken(win32api.GetCurrentThread(),win32con.TOKEN_QUERY,True)
                         try:actual=user_sid(peer)
