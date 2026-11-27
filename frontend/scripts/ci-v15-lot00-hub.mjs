@@ -160,6 +160,9 @@ try{
    await go('/dashboard');await pathIs('/hub');await shown(hub);await shown('[data-hub-offline]');
    await capture('08-offline-hub');
    assert.equal(await visible('[data-workstation-experience="station"]'),false);
+   await go('/setup');await pathIs('/hub');await shown(hub);await shown('[data-hub-offline]');
+   await capture('08b-offline-setup-refused');
+   console.log('LOT00_OFFLINE_SETUP_REFUSED_PASS');
    await click('[data-hub-experience="control"]');await pathIs('/control-center');await shown(control);
    await capture('09-offline-control');
    console.log('LOT00_REAL_OFFLINE_FAIL_CLOSED_PASS');
