@@ -1,4 +1,4 @@
-name: PHASE2-POSTMERGE exact source backup
+name: V1.5-LOT00-POSTMERGE exact source backup
 on:
   push:
     branches: [ci/phase2-postmerge-backup-20261127]
@@ -11,22 +11,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 5ec5ca6f2622dd2e0f86354838cc3b074a87f5b9
+          ref: e7de4b4fef57e27a56fc441a37c4624bd23f79fe
           persist-credentials: false
       - name: Verify and package exact source
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "5ec5ca6f2622dd2e0f86354838cc3b074a87f5b9"
-          test "$(git rev-parse HEAD^{tree})" = "fdda4687182da2c18b43801ffc3293d7513533c8"
+          test "$(git rev-parse HEAD)" = "e7de4b4fef57e27a56fc441a37c4624bd23f79fe"
+          test "$(git rev-parse HEAD^{tree})" = "c92eeb102cb29e266d74cbb9340cc7e270c6c0b1"
           git archive --format=zip --output="$RUNNER_TEMP/source.zip" HEAD
           python - <<'PY'
           import hashlib, json, os, pathlib, subprocess, zipfile, tempfile, re
           p=pathlib.Path(os.environ["RUNNER_TEMP"])
           source=p/"source.zip"
           target=p/"DIGITAL_CROWN_BACKUP.zip"
-          head="5ec5ca6f2622dd2e0f86354838cc3b074a87f5b9"
-          tree="fdda4687182da2c18b43801ffc3293d7513533c8"
+          head="e7de4b4fef57e27a56fc441a37c4624bd23f79fe"
+          tree="c92eeb102cb29e266d74cbb9340cc7e270c6c0b1"
           records=[]
           with zipfile.ZipFile(source) as z, zipfile.ZipFile(target,"w",zipfile.ZIP_DEFLATED) as out:
               for item in z.infolist():
@@ -44,11 +44,11 @@ jobs:
                   assert pathlib.PurePosixPath(name).suffix.lower() not in {".p12",".onnx",".pt",".pth",".exe"}
                   records.append({"path":name,"mode":mode,"git_blob":sha,"sha256":hashlib.sha256(data).hexdigest(),"bytes":len(data)})
                   out.writestr(item,data)
-              assert len(records)==1329
-              out.writestr("BACKUP-METADATA/MANIFEST.json",json.dumps({"project":"Digital Crown","lot":"PHASE2-POSTMERGE","date":"2026-11-27","commit":head,"tree":tree,"source_count":len(records),"ci_run":46060409329,"clinical_release":False},indent=2))
+              assert len(records)==1332
+              out.writestr("BACKUP-METADATA/MANIFEST.json",json.dumps({"project":"Digital Crown","lot":"V1.5-LOT00-POSTMERGE","date":"2026-11-27","commit":head,"tree":tree,"source_count":len(records),"ci_run":46083559116,"clinical_release":False},indent=2))
               out.writestr("BACKUP-METADATA/INVENTORY.json",json.dumps(records,indent=2))
               out.writestr("BACKUP-METADATA/RESTORE.md","Restore source only to an isolated directory. Verify inventory SHA256 and Git blob/tree. No patient data, no clinical activation. Historical private profiles are separately governed; not bundled.")
-              out.writestr("BACKUP-METADATA/EVIDENCE.md","PHASE2-POSTMERGE run 46060409329 success at qualified premerge HEAD; postmerge tree parity verified. Qualified premerge HEAD c2d72775b857b0fbd1c607ddc2317efd85d0bc59 has identical tree to merge commit; 12/12 GREEN, FUE PASS_WITH_NOTES. PR 5 merged. No clinical release. OWNER/physical TPM, scientific admission and LOT10 remain blocked. Evidence artifact IDs 15229345511, 15228701602, 15228039079, 15227889148.")
+              out.writestr("BACKUP-METADATA/EVIDENCE.md","V1.5 LOT00 PR 6 merged; R10 run 46083559116 SUCCESS at qualified ff6b408acaf46d72868000e7a4e526ccb20d1e29. Exact postmerge tree parity, 10/10 theme, 8/8 responsive, 6/6 accessibility, 198 text contrasts, synthetic restart/logout/tenant/Station/offline PASS. FUE Hub 9.5/10 scoped. Artifact 15238037546, SHA256 2fb4bacd93aeb9ee026100de1aa5c96ef2119c53f826c7467b56c2ca83308ef6. Phase2 historical run 46060409329 and artifacts 15229345511, 15228701602, 15228039079, 15227889148. No clinical release, no deployment; physical LOT10 and scientific gates remain.")
           with tempfile.TemporaryDirectory() as tmp,zipfile.ZipFile(target) as z:
               assert z.testzip() is None
               root=pathlib.Path(tmp)
@@ -60,11 +60,11 @@ jobs:
                   assert blob==r["git_blob"]
                   subprocess.run(["git","-C",tmp,"update-index","--add","--cacheinfo",r["mode"],blob,r["path"]],check=True)
               assert subprocess.check_output(["git","-C",tmp,"write-tree"],text=True).strip()==tree
-          print("PHASE2_POSTMERGE_ARCHIVE_PASS",len(records),target.stat().st_size,hashlib.sha256(target.read_bytes()).hexdigest(),tree)
+          print("V15_LOT00_POSTMERGE_ARCHIVE_PASS",len(records),target.stat().st_size,hashlib.sha256(target.read_bytes()).hexdigest(),tree)
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: phase2-postmerge-verified-source
+          name: v15-lot00-postmerge-verified-source
           path: ${{ runner.temp }}/DIGITAL_CROWN_BACKUP.zip
           retention-days: 1
           compression-level: 0
