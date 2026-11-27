@@ -75,8 +75,22 @@ def main():
     require(os.name=="nt" and os.getenv("GITHUB_ACTIONS")=="true" and os.getenv("RUNNER_ENVIRONMENT")=="github-hosted","HOSTED_WINDOWS_ONLY")
     bundle=Path(sys.argv[1]).resolve(strict=True)
     runner=Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+    exercise(bundle,runner)
+
+def exercise(bundle,runner):
     require(bundle.is_relative_to(runner) and (bundle/"dc-owner-commissioning.exe").is_file(),"BUNDLE_PATH")
-    admin=user_sid(win32security.OpenProcessToken(win32api.GetCurrentProcess(),win32con.TOKEN_QUERY))
+    # Never claim, stop, reconfigure or delete a pre-existing service.
+    manager=win32service.OpenSCManager(None,None,win32service.SC_MANAGER_CONNECT)
+    try:
+        try:existing=win32service.OpenService(manager,NAME,win32service.SERVICE_QUERY_STATUS)
+        except pywintypes.error as exc:require(exc.winerror==1060,"SERVICE_PREFLIGHT_FAILED")
+        else:
+            win32service.CloseServiceHandle(existing)
+            raise RuntimeError("SERVICE_ALREADY_EXISTS")
+    finally:win32service.CloseServiceHandle(manager)
+    token=win32security.OpenProcessToken(win32api.GetCurrentProcess(),win32con.TOKEN_QUERY)
+    try:admin=user_sid(token)
+    finally:token.Close()
     names=["dcj5a"+secrets.token_hex(4),"dcj5b"+secrets.token_hex(4)];tokens=[];created=False
     with tempfile.TemporaryDirectory(prefix="dc-owner-ci-",dir=runner) as tmp:
         root=Path(tmp);state=root/"state";state.mkdir();exe=bundle/"dc-owner-commissioning.exe"

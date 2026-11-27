@@ -1,7 +1,7 @@
 name: R0.2 - nonclinical Windows installer rehearsal
 on:
   push:
-    branches: [ci/r02-installer-rehearsal-20261126, ci/r03-conv04-installer-20261127, ci/j5-03c-scientific-admission-20261127, ci/j5-03e-installed-restore-20261127, ci/j5-04c-commissioning-setup-20261127]
+    branches: [ci/r02-installer-rehearsal-20261126, ci/r03-conv04-installer-20261127, ci/j5-03c-scientific-admission-20261127, ci/j5-03e-installed-restore-20261127, ci/j5-04c-commissioning-setup-20261127, ci/j5-04c-portable-commissioning-20261127]
 permissions:
   contents: read
 jobs:
@@ -82,7 +82,7 @@ jobs:
           python-version: '3.12.10'
           architecture: x64
       - name: Build qualified isolated OWNER broker sidecar
-        if: github.ref_name == 'ci/j5-04c-commissioning-setup-20261127'
+        if: (github.ref_name == 'ci/j5-04c-commissioning-setup-20261127' || github.ref_name == 'ci/j5-04c-portable-commissioning-20261127')
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -101,6 +101,10 @@ jobs:
           & $brokerpy -m PyInstaller --noconfirm --clean --onedir --name dc-owner-commissioning --paths . --hidden-import win32timezone --distpath "$root/dist" --workpath "$root/build" --specpath "$root" scripts/j5_owner_broker.py
           if ($LASTEXITCODE -ne 0) { throw 'BROKER_BUILD_FAILED' }
           Write-Host 'J5_04C_COMMISSIONING_BROKER_BUILD_PASS'
+          if ($env:GITHUB_REF_NAME -eq 'ci/j5-04c-portable-commissioning-20261127') {
+            & $brokerpy -m PyInstaller --noconfirm --clean --onedir --uac-admin --name dc-commissioning-check --paths . --hidden-import win32timezone --distpath "$root/dist" --workpath "$root/check-build" --specpath "$root" scripts/j5_portable_commissioning.py
+            if ($LASTEXITCODE -ne 0) { throw 'PORTABLE_CONTROLLER_BUILD_FAILED' }
+          }
       - uses: actions/setup-node@v4
         with:
           node-version: '24.22.3'
@@ -268,7 +272,7 @@ jobs:
           Write-Host 'R02_FULL_WINDOWS_DEPENDENCY_REHEARSAL_CLEANUP_PASS'
 
       - name: Remove isolated OWNER broker build inputs
-        if: always() && github.ref_name == 'ci/j5-04c-commissioning-setup-20261127'
+        if: always() && (github.ref_name == 'ci/j5-04c-commissioning-setup-20261127' || github.ref_name == 'ci/j5-04c-portable-commissioning-20261127')
         shell: pwsh
         run: |
           $root = $env:DC_COMMISSIONING_BROKER_ROOT
