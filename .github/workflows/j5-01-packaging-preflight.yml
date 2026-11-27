@@ -1,0 +1,144 @@
+name: J5-01 Windows release admission preflight (NOT A RELEASE)
+on:
+  push:
+    branches: [ci/j5-01-release-pipeline-20261127]
+permissions:
+  contents: read
+jobs:
+  windows-packaging-preflight:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify exact checkout
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw 'HEAD_MISMATCH' }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Check exact lock contracts and negative release gates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The lock checker is a standalone stdlib script; avoid backend package initialization.
+          python backend/scripts/windows_build_dependency_contract.py
+          if ($LASTEXITCODE -ne 0) { throw 'LOCK_CONTRACT_FAILED' }
+          python -m scripts.ci_r02_early_release_gate
+          if ($LASTEXITCODE -ne 0) { throw 'EARLY_RELEASE_GATE_FAILED' }
+          Write-Host 'R02_EARLY_GATE_NO_BACKEND_IMPORT_OR_WRITE_PASS'
+          # Real backend imports need the locked model/schema dependencies. Rehearsal
+          # explicitly suppresses runtime/media initialization in backend/__init__.py.
+          $guardLab = Join-Path $env:RUNNER_TEMP ('dc-guard-' + [guid]::NewGuid().ToString('N'))
+          try {
+            python -m venv $guardLab
+            if ($LASTEXITCODE -ne 0) { throw 'GUARD_VENV_FAILED' }
+            $guardPy = Join-Path $guardLab 'Scripts\python.exe'
+            & $guardPy -m pip install --disable-pip-version-check --only-binary=:all: 'SQLAlchemy==2.0.28' 'greenlet==3.3.1' 'typing_extensions==4.15.0' 'pydantic==2.6.3' 'pydantic_core==2.16.3' 'annotated-types==0.7.0' 'email-validator==2.3.0' 'dnspython==2.8.0' 'idna==3.11' 'fastapi==0.115.6' 'starlette==0.41.3' 'anyio==4.12.1'
+            if ($LASTEXITCODE -ne 0) { throw 'GUARD_DEPENDENCIES_FAILED' }
+            & $guardPy -m pip check
+            if ($LASTEXITCODE -ne 0) { throw 'GUARD_DEPENDENCIES_INCONSISTENT' }
+            $env:ENVIRONMENT = 'packaging-rehearsal'
+            & $guardPy -m backend.scripts.ci_r02_packaging_preflight
+            if ($LASTEXITCODE -ne 0) { throw 'NEGATIVE_GUARDS_FAILED' }
+            Write-Host 'R02_PACKAGING_NEGATIVE_GUARDS_PASS'
+          } finally {
+            Remove-Item Env:ENVIRONMENT -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $guardLab) { Remove-Item -LiteralPath $guardLab -Recurse -Force }
+          }
+      - name: Qualify pinned PyInstaller on an inert synthetic program only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lab = Join-Path $env:RUNNER_TEMP ('dc-packaging-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $lab | Out-Null
+          try {
+            python -m venv (Join-Path $lab 'venv')
+            if ($LASTEXITCODE -ne 0) { throw 'VENV_FAILED' }
+            $py = Join-Path $lab 'venv\Scripts\python.exe'
+            & $py -m pip install --disable-pip-version-check --only-binary=:all: 'pyinstaller==6.22.3'
+            if ($LASTEXITCODE -ne 0) { throw 'PINNED_TOOLCHAIN_UNAVAILABLE' }
+            & $py -c "import PyInstaller; assert PyInstaller.__version__ == '6.22.3'"
+            if ($LASTEXITCODE -ne 0) { throw 'TOOLCHAIN_PIN_MISMATCH' }
+            $probe = Join-Path $lab 'probe.py'
+            Set-Content -LiteralPath $probe -Value 'print("R02_SYNTHETIC_PE_EXECUTION_PASS")' -Encoding ascii
+            Push-Location $lab
+            try {
+              & $py -m PyInstaller --noconfirm --clean --onedir --name dc_synthetic_probe $probe
+              if ($LASTEXITCODE -ne 0) { throw 'SYNTHETIC_PE_BUILD_FAILED' }
+              $exe = Join-Path $lab 'dist\dc_synthetic_probe\dc_synthetic_probe.exe'
+              $out = & $exe
+              if ($LASTEXITCODE -ne 0 -or $out -ne 'R02_SYNTHETIC_PE_EXECUTION_PASS') { throw 'SYNTHETIC_PE_EXECUTION_FAILED' }
+              Write-Host $out
+              # The real publisher gate must reject this deliberately unsigned probe.
+              $unsigned = Join-Path $lab 'unsigned'
+              New-Item -ItemType Directory -Path $unsigned | Out-Null
+              $installer = Join-Path $unsigned 'DigitalCrownSetup-INSTALLABLE-CERTIFIED.exe'
+              $app = Join-Path $unsigned 'DigitalCrown.exe'
+              Copy-Item -LiteralPath $exe -Destination $installer
+              Copy-Item -LiteralPath $exe -Destination $app
+              $pin = Join-Path $lab 'synthetic-untrusted-pin.txt'
+              Set-Content -LiteralPath $pin -Value ('0' * 64) -Encoding ascii
+              $denied = $false
+              try {
+                & "$env:GITHUB_WORKSPACE\backend\scripts\verify_lot05_windows_publisher_preflight.ps1" -InstallerPath $installer -ApplicationPath $app -PublisherCertSha256PinFile $pin
+              } catch {
+                if ($_.Exception.Message -notmatch '05G_PUBLISHER_DENIED_INSTALLER_AUTHENTICODE_NOT_VALID') { throw }
+                $denied = $true
+              }
+              if (-not $denied) { throw 'UNSIGNED_PUBLISHER_ACCEPTED' }
+              Write-Host 'R02_UNSIGNED_PUBLISHER_DENIED_PASS'
+            } finally { Pop-Location }
+          } finally { Remove-Item -LiteralPath $lab -Recurse -Force }
+          Write-Host 'R02_PACKAGING_PREFLIGHT_ONLY_PASS (NOT CODE_CERTIFIED OR INSTALLABLE_CERTIFIED)'
+      - name: Exercise actual recovery entrypoint (negative only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -B -m scripts.ci_r02_launcher_admission
+          if ($LASTEXITCODE -ne 0) { throw 'LAUNCHER_ADMISSION_TEST_FAILED' }
+          $lab = Join-Path $env:RUNNER_TEMP ('dc-launch-admission-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $lab | Out-Null
+          try {
+            python -m venv (Join-Path $lab 'venv')
+            if ($LASTEXITCODE -ne 0) { throw 'VENV_FAILED' }
+            $py = Join-Path $lab 'venv\Scripts\python.exe'
+            & $py -m pip install --disable-pip-version-check --only-binary=:all: 'pyinstaller==6.22.3'
+            if ($LASTEXITCODE -ne 0) { throw 'PINNED_TOOLCHAIN_UNAVAILABLE' }
+            Push-Location $lab
+            try {
+              & $py -m PyInstaller --noconfirm --clean --onedir --name dc_recovery_admission_probe --paths "$env:GITHUB_WORKSPACE" "$env:GITHUB_WORKSPACE\run.py"
+              if ($LASTEXITCODE -ne 0) { throw 'RECOVERY_PE_BUILD_FAILED' }
+              $exe = Join-Path $lab 'dist\dc_recovery_admission_probe\dc_recovery_admission_probe.exe'
+              $sandbox = Join-Path $lab 'uncreated-data'
+              $env:DIGITALCROWN_USER_DATA_DIR = $sandbox
+              $env:DIGITALCROWN_CONFIG_DIR = $sandbox
+              $env:DIGITALCROWN_LOG_DIR = $sandbox
+              $env:DIGITALCROWN_RUNTIME_DIR = $sandbox
+              $env:MEDIA_ROOT = $sandbox
+              # Convert only the explicitly verified child refusal into test success.
+              & $py -c "import subprocess,sys,pathlib; r=subprocess.run([sys.argv[1],'--initialize-new-cabinet'],capture_output=True,text=True,timeout=30); print('R02_FROZEN_CHILD_EXIT='+str(r.returncode)); sys.exit(0 if r.returncode==2 and 'R02_LAUNCH_REFUSED_UNVERIFIED_RELEASE' in r.stderr and not pathlib.Path(sys.argv[2]).exists() else 1)" $exe $sandbox
+              if ($LASTEXITCODE -ne 0) { throw 'RECOVERY_PE_GATE_FAILED' }
+              Write-Host 'R02_REAL_FROZEN_ENTRYPOINT_REFUSED_NO_DATA_WRITE_PASS'
+            } finally { Pop-Location }
+          } finally {
+            foreach ($name in @('DIGITALCROWN_USER_DATA_DIR','DIGITALCROWN_CONFIG_DIR','DIGITALCROWN_LOG_DIR','DIGITALCROWN_RUNTIME_DIR','MEDIA_ROOT')) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $lab -Recurse -Force
+          }
+          if (Test-Path -LiteralPath $lab) { throw 'RECOVERY_LAB_CLEANUP_FAILED' }
+          Write-Host 'R02_RECOVERY_LAB_CLEANUP_PASS'
+      - name: Verify proposed authority contract and available CLI flags (no issuance)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -B -m scripts.ci_r02_recovery_authority
+          if ($LASTEXITCODE -ne 0) { throw 'AUTHORITY_CONTRACT_FAILED' }
+          $help = gh attestation verify --help | Out-String
+          if ($LASTEXITCODE -ne 0) { throw 'GH_ATTESTATION_UNAVAILABLE' }
+          foreach ($flag in @('--repo','--signer-workflow','--signer-digest','--source-digest','--source-ref','--cert-oidc-issuer','--predicate-type','--deny-self-hosted-runners','--format','--hostname')) {
+            if (-not $help.Contains($flag)) { throw "GH_FLAG_MISSING: $flag" }
+          }
+          Write-Host 'R02_PROPOSED_AUTHORITY_CONTRACT_PASS_NOT_ACTIVATED'
