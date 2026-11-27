@@ -1,7 +1,7 @@
 name: R0.2 - nonclinical Windows installer rehearsal
 on:
   push:
-    branches: [ci/r02-installer-rehearsal-20261126, ci/r03-conv04-installer-20261127, ci/j5-03c-scientific-admission-20261127, ci/j5-03e-installed-restore-20261127, ci/j5-04c-commissioning-setup-20261127, ci/j5-04c-portable-commissioning-20261127]
+    branches: [ci/r02-installer-rehearsal-20261126, ci/r03-conv04-installer-20261127, ci/j5-03c-scientific-admission-20261127, ci/j5-03e-installed-restore-20261127, ci/j5-04c-commissioning-setup-20261127, ci/j5-04c-portable-commissioning-20261127, ci/j5-04c-private-delivery-20261127]
 permissions:
   contents: read
 jobs:
@@ -82,7 +82,7 @@ jobs:
           python-version: '3.12.10'
           architecture: x64
       - name: Build qualified isolated OWNER broker sidecar
-        if: (github.ref_name == 'ci/j5-04c-commissioning-setup-20261127' || github.ref_name == 'ci/j5-04c-portable-commissioning-20261127')
+        if: (github.ref_name == 'ci/j5-04c-commissioning-setup-20261127' || (github.ref_name == 'ci/j5-04c-portable-commissioning-20261127' || github.ref_name == 'ci/j5-04c-private-delivery-20261127'))
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -101,7 +101,7 @@ jobs:
           & $brokerpy -m PyInstaller --noconfirm --clean --onedir --name dc-owner-commissioning --paths . --hidden-import win32timezone --distpath "$root/dist" --workpath "$root/build" --specpath "$root" scripts/j5_owner_broker.py
           if ($LASTEXITCODE -ne 0) { throw 'BROKER_BUILD_FAILED' }
           Write-Host 'J5_04C_COMMISSIONING_BROKER_BUILD_PASS'
-          if ($env:GITHUB_REF_NAME -eq 'ci/j5-04c-portable-commissioning-20261127') {
+          if ($env:GITHUB_REF_NAME -in @('ci/j5-04c-portable-commissioning-20261127','ci/j5-04c-private-delivery-20261127')) {
             & $brokerpy -m PyInstaller --noconfirm --clean --onedir --uac-admin --name dc-commissioning-check --paths . --hidden-import win32timezone --distpath "$root/dist" --workpath "$root/check-build" --specpath "$root" scripts/j5_portable_commissioning.py
             if ($LASTEXITCODE -ne 0) { throw 'PORTABLE_CONTROLLER_BUILD_FAILED' }
           }
@@ -272,7 +272,7 @@ jobs:
           Write-Host 'R02_FULL_WINDOWS_DEPENDENCY_REHEARSAL_CLEANUP_PASS'
 
       - name: Remove isolated OWNER broker build inputs
-        if: always() && (github.ref_name == 'ci/j5-04c-commissioning-setup-20261127' || github.ref_name == 'ci/j5-04c-portable-commissioning-20261127')
+        if: always() && (github.ref_name == 'ci/j5-04c-commissioning-setup-20261127' || (github.ref_name == 'ci/j5-04c-portable-commissioning-20261127' || github.ref_name == 'ci/j5-04c-private-delivery-20261127'))
         shell: pwsh
         run: |
           $root = $env:DC_COMMISSIONING_BROKER_ROOT
@@ -282,4 +282,90 @@ jobs:
             Remove-Item -LiteralPath $root -Recurse -Force
             if (Test-Path -LiteralPath $root) { throw 'BROKER_BUILD_RESIDUE' }
             Write-Host 'J5_04C_COMMISSIONING_BROKER_BUILD_CLEANUP_PASS'
+          }
+
+      - name: Upload sealed commissioning manifest
+        if: success() && github.ref_name == 'ci/j5-04c-private-delivery-20261127'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dc-sealed-manifest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dc-commissioning-transfer-${{ github.run_id }}-${{ github.run_attempt }}/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload sealed commissioning part 1
+        if: success() && github.ref_name == 'ci/j5-04c-private-delivery-20261127'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dc-sealed-01-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dc-commissioning-transfer-${{ github.run_id }}-${{ github.run_attempt }}/part-01.bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload sealed commissioning part 2
+        if: success() && github.ref_name == 'ci/j5-04c-private-delivery-20261127'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dc-sealed-02-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dc-commissioning-transfer-${{ github.run_id }}-${{ github.run_attempt }}/part-02.bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload sealed commissioning part 3
+        if: success() && github.ref_name == 'ci/j5-04c-private-delivery-20261127'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dc-sealed-03-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dc-commissioning-transfer-${{ github.run_id }}-${{ github.run_attempt }}/part-03.bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload sealed commissioning part 4
+        if: success() && github.ref_name == 'ci/j5-04c-private-delivery-20261127'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dc-sealed-04-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dc-commissioning-transfer-${{ github.run_id }}-${{ github.run_attempt }}/part-04.bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload sealed commissioning part 5
+        if: success() && github.ref_name == 'ci/j5-04c-private-delivery-20261127'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dc-sealed-05-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dc-commissioning-transfer-${{ github.run_id }}-${{ github.run_attempt }}/part-05.bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload sealed commissioning part 6
+        if: success() && github.ref_name == 'ci/j5-04c-private-delivery-20261127'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dc-sealed-06-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dc-commissioning-transfer-${{ github.run_id }}-${{ github.run_attempt }}/part-06.bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload sealed commissioning part 7
+        if: success() && github.ref_name == 'ci/j5-04c-private-delivery-20261127'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dc-sealed-07-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dc-commissioning-transfer-${{ github.run_id }}-${{ github.run_attempt }}/part-07.bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Remove sealed transport staging
+        if: always() && github.ref_name == 'ci/j5-04c-private-delivery-20261127'
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP ("dc-commissioning-transfer-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $root) {
+            $item = Get-Item -LiteralPath $root
+            if ($item.Parent.FullName -ne $env:RUNNER_TEMP -or $item.Name -notmatch '^dc-commissioning-transfer-[0-9]+-[0-9]+$' -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'SEALED_CLEANUP_SCOPE_REFUSED' }
+            Remove-Item -LiteralPath $root -Recurse -Force
+            if (Test-Path -LiteralPath $root) { throw 'SEALED_CLEANUP_RESIDUE' }
+            Write-Host 'J5_04C_SEALED_STAGING_CLEANUP_PASS'
           }

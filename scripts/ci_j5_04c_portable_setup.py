@@ -90,7 +90,8 @@ end;
             raise RuntimeError("PORTABLE_INNO_BUILD_FAILED")
         setup=root/"DigitalCrown-Commissioning-Setup.exe"
         require(setup.is_file() and setup.open("rb").read(2)==b"MZ","PORTABLE_SETUP_MISSING")
-        print("J5_04C_PORTABLE_PE_PASS bytes="+str(setup.stat().st_size)+" sha256="+digest(setup),flush=True)
+        setup_hash=digest(setup)
+        print("J5_04C_PORTABLE_PE_PASS bytes="+str(setup.stat().st_size)+" sha256="+setup_hash,flush=True)
         args=["/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-"]
         escape=root/"refused"
         require(run([setup,*args,"/DIR="+str(escape)],env,root,60)!=0 and not dest.exists() and not escape.exists(),"PORTABLE_REDIRECT_ACCEPTED")
@@ -122,5 +123,8 @@ end;
             require(not dest.exists(),"PORTABLE_UNINSTALL_RESIDUE")
             wait_inno_uninstall_helper(root)
         print("J5_04C_PORTABLE_NATIVE_INSTALL_SELFTEST_UNINSTALL_PASS NOT_A_RELEASE",flush=True)
+        if os.environ.get("GITHUB_REF_NAME")=="ci/j5-04c-private-delivery-20261127":
+            from ci_j5_04c_sealed_delivery import seal
+            seal(setup,runner,setup_hash)
     require(not root.exists(),"PORTABLE_TEMP_RESIDUE")
     print("J5_04C_PORTABLE_CLEANUP_PASS",flush=True)

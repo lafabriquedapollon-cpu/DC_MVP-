@@ -106,10 +106,10 @@ def main():
     final_only = sys.argv[1:] == ["--desktop-final-only"]
     installer_only = sys.argv[1:] == ["--installer-only"]
     require(not sys.argv[1:] or final_only or installer_only, "UNEXPECTED_HARNESS_ARGUMENT")
-    portable = os.environ.get("GITHUB_REF_NAME") == "ci/j5-04c-portable-commissioning-20261127"
+    portable = os.environ.get("GITHUB_REF_NAME") in {"ci/j5-04c-portable-commissioning-20261127", "ci/j5-04c-private-delivery-20261127"}
     commissioning = portable or os.environ.get("GITHUB_REF_NAME") == "ci/j5-04c-commissioning-setup-20261127"
     if installer_only:
-        require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-installer-rehearsal-20261126", "ci/r03-conv04-installer-20261127", "ci/j5-03c-scientific-admission-20261127", "ci/j5-03e-installed-restore-20261127", "ci/j5-04c-commissioning-setup-20261127", "ci/j5-04c-portable-commissioning-20261127"},
+        require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-installer-rehearsal-20261126", "ci/r03-conv04-installer-20261127", "ci/j5-03c-scientific-admission-20261127", "ci/j5-03e-installed-restore-20261127", "ci/j5-04c-commissioning-setup-20261127", "ci/j5-04c-portable-commissioning-20261127", "ci/j5-04c-private-delivery-20261127"},
                 "INSTALLER_BRANCH_REQUIRED")
     if final_only:
         require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-desktop-final-20261126", "ci/r03-convergence-20261126"},
