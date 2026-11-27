@@ -12,8 +12,10 @@ import subprocess
 import tempfile
 import time
 import unittest
+import threading
+from contextlib import contextmanager
 
-from scripts.ci_j5_02c_trust_root_lab import snapshot, EXPECTED, ARTIFACT
+from scripts.ci_j5_02c_trust_root_lab import snapshot, EXPECTED, ARTIFACT, BoundLab
 from scripts.ci_j5_02c_recovery_lab import Lab, fixture, assertion, registration, sha, canon, TTL
 
 INDEX = "0x01500020"
@@ -214,6 +216,145 @@ class Tests(unittest.TestCase):
             self.assertEqual(read(),want)
         finally:
             self.tpm.run("tpm2_flushcontext",str(session),ok=False)
+
+class TPMBoundLab(BoundLab):
+    """Reuse bound WebAuthn service; substitute TPM extend for SQLite anchor.
+    Synthetic emulator only; no physical TPM path and no HTTP endpoint.
+    """
+    @classmethod
+    def provision_fixture(cls,path,tpm,primary,backup,*,clock):
+        path=pathlib.Path(path)
+        if path.exists(): raise Denied("already provisioned")
+        tpm.define()
+        core=Lab(path)
+        core.bootstrap_fixture(primary,backup)
+        with core.tx() as db:
+            db.execute("CREATE TABLE approval_context(id TEXT PRIMARY KEY, context BLOB NOT NULL)")
+            db.execute("CREATE TABLE receipts(id TEXT PRIMARY KEY, context BLOB NOT NULL, epoch INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0)")
+            db.execute("CREATE TABLE credential_policy(id TEXT PRIMARY KEY, backup_eligible INTEGER NOT NULL)")
+            db.execute("INSERT INTO credential_policy VALUES (?,0)",(primary[0],))
+            db.execute("INSERT INTO credential_policy VALUES (?,1)",(backup[0],))
+            db.execute("CREATE TABLE tpm_checkpoint(id INTEGER PRIMARY KEY CHECK(id=1), prev BLOB NOT NULL, seq INTEGER NOT NULL, clock INTEGER NOT NULL)")
+            now=clock()
+            prev=bytes(32)
+            payload=digest(prev,0,snapshot(db),now)
+            if tpm.extend(payload)!=sha(prev+payload): raise Denied("genesis mismatch")
+            db.execute("INSERT INTO tpm_checkpoint VALUES (1,?,?,?)",(prev,0,now))
+        return cls(path,tpm,clock=clock)
+    def __init__(self,path,tpm,*,clock):
+        self.path=pathlib.Path(path)
+        self.tpm=tpm
+        self.clock=clock
+        self.local=threading.local()
+        with self.tx(): pass
+    @contextmanager
+    def tx(self):
+        if getattr(self.local,"db",None) is not None:
+            yield self.local.db
+            return
+        if not self.path.is_file() or self.path.is_symlink(): raise Denied("missing local state")
+        db=sqlite3.connect(self.path.resolve().as_uri()+"?mode=rw",uri=True,isolation_level=None,timeout=10)
+        db.row_factory=sqlite3.Row
+        rejected=None
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            cp=db.execute("SELECT prev,seq,clock FROM tpm_checkpoint WHERE id=1").fetchone()
+            if cp is None: raise Denied("missing checkpoint")
+            prev,seq,high=cp
+            before=snapshot(db)
+            current=sha(prev+digest(prev,seq,before,high))
+            if self.tpm.read()!=current: raise Denied("anchor mismatch")
+            now=self.clock()
+            if type(now) is not int or now<high: raise Denied("clock rollback")
+            self.local.db,self.local.now=db,now
+            db.execute("SAVEPOINT operation")
+            try:
+                yield db
+            except Exception as exc:
+                db.execute("ROLLBACK TO operation")
+                rejected=exc
+            db.execute("RELEASE operation")
+            after=snapshot(db)
+            # Persist high-water even for denied operations; do not write if
+            # neither state nor time changed.
+            if after!=before or now!=high:
+                payload=digest(current,seq+1,after,now)
+                expected=sha(current+payload)
+                if self.tpm.extend(payload)!=expected: raise Denied("extend mismatch")
+                self.before_main_commit_fixture()
+                db.execute("UPDATE tpm_checkpoint SET prev=?,seq=?,clock=? WHERE id=1",(current,seq+1,now))
+            db.commit()
+            if rejected is not None: raise rejected
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            self.local.db=None
+            self.local.now=None
+            db.close()
+
+class IntegratedTests(unittest.TestCase):
+    def setUp(self):
+        t=tempfile.TemporaryDirectory(prefix="dc-tpm-int-");self.addCleanup(t.cleanup)
+        self.root=pathlib.Path(t.name)
+        self.tpm=Emulator(self.root);self.addCleanup(self.tpm.close)
+        self.db=self.root/"restore.sqlite";self.old=self.root/"old.sqlite"
+        self.now=1000
+        self.p,self.b,self.c=fixture(),fixture(),fixture()
+        self.lab=TPMBoundLab.provision_fixture(self.db,self.tpm,self.p[:2],self.b[:2],clock=lambda:self.now)
+    def open(self): return TPMBoundLab(self.db,self.tpm,clock=lambda:self.now)
+    def approve(self,f):
+        q=self.lab.issue_approval(f[0],dict(EXPECTED),ARTIFACT)
+        r=self.lab.finish_approval(q[0],assertion(f,q[1]),dict(EXPECTED),ARTIFACT)
+        self.assertEqual(r["status"],"SYNTHETIC_APPROVAL_ONLY")
+        return q
+    def candidate(self):
+        q=self.lab.issue_registration()
+        self.lab.register(q[0],registration(self.c,q[1]))
+        q=self.lab.issue("prove",self.c[0])
+        self.lab.finish(q[0],assertion(self.c,q[1]))
+    def test_14_bound_receipt_restart_and_single_use(self):
+        q=self.approve(self.p)
+        self.tpm.stop();self.tpm.start();self.lab=self.open()
+        self.assertTrue(self.lab.receipt_valid(q[0],dict(EXPECTED),ARTIFACT))
+        self.assertEqual(self.lab.redeem_fixture(q[0],dict(EXPECTED),ARTIFACT),"INERT_FIXTURE_ONLY")
+        self.assertFalse(self.open().receipt_valid(q[0],dict(EXPECTED),ARTIFACT))
+        with self.assertRaises(ValueError):self.lab.redeem_fixture(q[0],dict(EXPECTED),ARTIFACT)
+    def test_15_revoked_credential_rollback(self):
+        self.candidate()
+        shutil.copyfile(self.db,self.old)
+        q=self.lab.issue("rotate",self.p[0],self.c[0])
+        self.lab.finish(q[0],assertion(self.p,q[1]))
+        self.approve(self.c)
+        with self.assertRaises(ValueError):self.approve(self.p)
+        shutil.copyfile(self.old,self.db)
+        with self.assertRaisesRegex(Denied,"anchor mismatch"):self.open()
+    def test_16_receipt_restore_denied(self):
+        q=self.approve(self.p)
+        shutil.copyfile(self.db,self.old)
+        self.lab.redeem_fixture(q[0],dict(EXPECTED),ARTIFACT)
+        shutil.copyfile(self.old,self.db)
+        with self.assertRaisesRegex(Denied,"anchor mismatch"):self.open()
+    def test_17_recovery_backup_and_old_primary(self):
+        self.candidate()
+        q=self.lab.issue("recover",self.b[0],self.c[0])
+        self.lab.finish(q[0],assertion(self.b,q[1],flags=5))
+        self.approve(self.c)
+        with self.assertRaises(ValueError):self.approve(self.p)
+    def test_18_rejected_expiry_persists_time(self):
+        q=self.lab.issue_approval(self.p[0],dict(EXPECTED),ARTIFACT)
+        self.now+=TTL
+        with self.assertRaises(ValueError):
+            self.lab.finish_approval(q[0],assertion(self.p,q[1]),dict(EXPECTED),ARTIFACT)
+        self.now-=1
+        with self.assertRaisesRegex(Denied,"clock rollback"):self.open()
+    def test_19_intercommit_failure(self):
+        q=self.lab.issue_approval(self.p[0],dict(EXPECTED),ARTIFACT)
+        def fail():raise RuntimeError("injected")
+        self.lab.before_main_commit_fixture=fail
+        with self.assertRaisesRegex(RuntimeError,"injected"):
+            self.lab.finish_approval(q[0],assertion(self.p,q[1]),dict(EXPECTED),ARTIFACT)
+        with self.assertRaisesRegex(Denied,"anchor mismatch"):self.open()
 
 if __name__=="__main__":
     unittest.main(verbosity=2)
