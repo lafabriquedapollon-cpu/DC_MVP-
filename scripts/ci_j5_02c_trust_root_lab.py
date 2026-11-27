@@ -20,6 +20,7 @@ from scripts.ci_j5_02c_recovery_lab import (
     Lab, RP, ORIGIN, TTL, canon, sha, b64, decode, fixture, assertion, registration
 )
 import secrets
+import cbor2
 
 DOMAIN = "DIGITAL-CROWN/J5-02C.4/SYNTHETIC/NOT-A-RELEASE"
 SOURCE_SHA = "1264f103507ddcc3d442c31e475df11ed00d8203"
@@ -36,7 +37,7 @@ class Denied(ValueError): pass
 
 def snapshot(db):
     schema = [tuple(r) for r in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")]
-    tables = ("state","credentials","challenges","approval_context","receipts")
+    tables = ("state","credentials","challenges","approval_context","receipts","credential_policy")
     def typed(v):
         if isinstance(v, bytes): return ["blob",v.hex()]
         return [type(v).__name__,v]
@@ -57,7 +58,10 @@ class BoundLab(Lab):
         core.bootstrap_fixture(primary,backup)
         with core.tx() as db:
             db.execute("CREATE TABLE approval_context(id TEXT PRIMARY KEY, context BLOB NOT NULL)")
-            db.execute("CREATE TABLE receipts(id TEXT PRIMARY KEY, context BLOB NOT NULL, epoch INTEGER NOT NULL)")
+            db.execute("CREATE TABLE receipts(id TEXT PRIMARY KEY, context BLOB NOT NULL, epoch INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0)")
+            db.execute("CREATE TABLE credential_policy(id TEXT PRIMARY KEY, backup_eligible INTEGER NOT NULL)")
+            db.execute("INSERT INTO credential_policy VALUES (?,0)",(primary[0],))
+            db.execute("INSERT INTO credential_policy VALUES (?,1)",(backup[0],))
             digest=snapshot(db)
         anchor.touch(exist_ok=False)
         with sqlite3.connect(anchor) as db:
@@ -80,6 +84,9 @@ class BoundLab(Lab):
         if not self.path.is_file() or not self.anchor.is_file() or self.path.is_symlink() or self.anchor.is_symlink(): raise Denied("state or anchor missing")
         a=sqlite3.connect(self.anchor.resolve().as_uri()+"?mode=rw",uri=True,isolation_level=None,timeout=10)
         d=None
+        row=None
+        now=None
+        committed=False
         try:
             a.execute("BEGIN IMMEDIATE")
             d=sqlite3.connect(self.path.resolve().as_uri()+"?mode=rw",uri=True,isolation_level=None,timeout=10)
@@ -96,11 +103,18 @@ class BoundLab(Lab):
             # not a rollback of the anchor. No automatic repair or lowering the anchor.
             a.execute("UPDATE anchor SET digest=?,high_water=?,version=? WHERE id=1",(updated,now,row[2]+1))
             a.commit()
+            committed=True
             self.before_main_commit_fixture()
             d.commit()
         except BaseException:
             if d is not None: d.rollback()
-            a.rollback()
+            # Preserve time high-water even for rejected requests. Otherwise an
+            # expired challenge could become valid after a backward clock jump.
+            if not committed and row is not None and type(now) is int and now>=row[1]:
+                a.execute("UPDATE anchor SET high_water=? WHERE id=1",(now,))
+                a.commit()
+            else:
+                a.rollback()
             raise
         finally:
             self.local.db=None
@@ -112,8 +126,23 @@ class BoundLab(Lab):
         with self.tx():
             return super().issue_registration(now=self.local.now)
     def register(self,nonce,credential):
-        with self.tx():
-            return super().register(nonce,credential,now=self.local.now)
+        with self.tx() as db:
+            cid=super().register(nonce,credential,now=self.local.now)
+            auth=cbor2.loads(decode(credential["response"]["attestationObject"]))["authData"]
+            db.execute("INSERT INTO credential_policy VALUES (?,?)",(cid,int(not auth[32]&8)))
+            return cid
+    @staticmethod
+    def check_backup_flags(db,actor,proof):
+        row=db.execute("SELECT backup_eligible FROM credential_policy WHERE id=?",(actor,)).fetchone()
+        if row is None: raise Denied("missing credential policy")
+        auth=decode(proof["response"]["authenticatorData"])
+        if len(auth)!=37 or bool(auth[32]&8)==bool(row["backup_eligible"]): raise Denied("backup eligibility mismatch")
+    def policy(self,db,action,actor,target):
+        row=super().policy(db,action,actor,target)
+        if action=="replace_backup":
+            eligible=db.execute("SELECT backup_eligible FROM credential_policy WHERE id=?",(target,)).fetchone()
+            if eligible is None or eligible[0]!=1: raise Denied("synced backup denied")
+        return row
     def issue(self,action,actor,target=None):
         if action=="approve": raise Denied("bound approval required")
         with self.tx():
@@ -122,6 +151,8 @@ class BoundLab(Lab):
         with self.tx() as db:
             row=db.execute("SELECT action FROM challenges WHERE id=?",(nonce,)).fetchone()
             if row is not None and row["action"]=="approve": raise Denied("bound approval required")
+            challenge=db.execute("SELECT actor FROM challenges WHERE id=?",(nonce,)).fetchone()
+            if challenge is not None: self.check_backup_flags(db,challenge["actor"],proof)
             return super().finish(nonce,proof,now=self.local.now)
     @staticmethod
     def context(record,artifact):
@@ -149,13 +180,21 @@ class BoundLab(Lab):
             # The current role, epoch, signature, RP, origin, challenge and TTL
             # are validated by the previously qualified lifecycle.
             super().finish(nonce,proof,now=self.local.now)
-            db.execute("INSERT INTO receipts VALUES (?,?,?)",(nonce,ctx,self.epoch(db)))
+            self.check_backup_flags(db,proof["id"],proof)
+            db.execute("INSERT INTO receipts(id,context,epoch) VALUES (?,?,?)",(nonce,ctx,self.epoch(db)))
             return {"status":"SYNTHETIC_APPROVAL_ONLY","id":nonce,"context_sha256":sha(ctx).hex()}
     def receipt_valid(self,nonce,record,artifact):
         ctx=self.context(record,artifact)
         with self.tx() as db:
-            r=db.execute("SELECT context,epoch FROM receipts WHERE id=?",(nonce,)).fetchone()
-            return r is not None and r["context"]==ctx and r["epoch"]==self.epoch(db)
+            r=db.execute("SELECT context,epoch,consumed FROM receipts WHERE id=?",(nonce,)).fetchone()
+            return r is not None and r["context"]==ctx and r["epoch"]==self.epoch(db) and not r["consumed"]
+    def redeem_fixture(self,nonce,record,artifact):
+        ctx=self.context(record,artifact)
+        with self.tx() as db:
+            r=db.execute("SELECT context,epoch,consumed FROM receipts WHERE id=?",(nonce,)).fetchone()
+            if r is None or r["context"]!=ctx or r["epoch"]!=self.epoch(db) or r["consumed"]: raise Denied("receipt invalid")
+            db.execute("UPDATE receipts SET consumed=1 WHERE id=?",(nonce,))
+            return "INERT_FIXTURE_ONLY"
 
 class Tests(unittest.TestCase):
     def setUp(self):
@@ -266,6 +305,34 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(Denied,"rollback"): self.open()
     def test_22_separate_location(self):
         with self.assertRaises(Denied): BoundLab(self.path,self.path.parent/"other.sqlite",clock=lambda:self.now)
+
+    def test_23_expired_then_clock_rollback(self):
+        q=self.issue();self.now+=TTL
+        with self.assertRaises(ValueError): self.finish(q)
+        self.now-=1
+        with self.assertRaisesRegex(Denied,"clock"): self.open()
+    def test_24_receipt_single_use(self):
+        q=self.issue();self.finish(q)
+        self.assertEqual(self.lab.redeem_fixture(q[0],dict(EXPECTED),ARTIFACT),"INERT_FIXTURE_ONLY")
+        self.assertFalse(self.open().receipt_valid(q[0],dict(EXPECTED),ARTIFACT))
+        with self.assertRaises(Denied): self.lab.redeem_fixture(q[0],dict(EXPECTED),ARTIFACT)
+    def test_25_synced_backup_denied(self):
+        self.candidate()
+        with self.assertRaisesRegex(Denied,"synced backup"): self.lab.issue("replace_backup",self.p[0],self.c[0])
+    def test_26_non_sync_backup_fixture(self):
+        q=self.lab.issue_registration()
+        self.lab.register(q[0],registration(self.c,q[1],flags=0x45))
+        q=self.lab.issue("prove",self.c[0])
+        with self.assertRaisesRegex(Denied,"eligibility"): self.lab.finish(q[0],assertion(self.c,q[1]))
+        self.lab.finish(q[0],assertion(self.c,q[1],flags=5))
+        q=self.lab.issue("replace_backup",self.p[0],self.c[0])
+        self.lab.finish(q[0],assertion(self.p,q[1]))
+        n=fixture();q=self.lab.issue_registration()
+        self.lab.register(q[0],registration(n,q[1]))
+        q=self.lab.issue("prove",n[0]);self.lab.finish(q[0],assertion(n,q[1]))
+        q=self.lab.issue("recover",self.c[0],n[0])
+        with self.assertRaisesRegex(Denied,"eligibility"): self.lab.finish(q[0],assertion(self.c,q[1]))
+        self.lab.finish(q[0],assertion(self.c,q[1],flags=5))
 
 if __name__=="__main__":
     unittest.main(verbosity=2)
