@@ -19,7 +19,8 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install verifier dependencies
-        run: python -m pip install --disable-pip-version-check --only-binary=:all: 'webauthn==3.0.0' 'cryptography==49.0.0'
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: 'webauthn==3.0.0' 'cryptography==49.0.0'
       - name: Create exact inert subject
         run: python -B -m scripts.ci_j5_04_certification_chain make
       - name: Attest only inert LAB text
