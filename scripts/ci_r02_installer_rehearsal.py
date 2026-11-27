@@ -293,6 +293,36 @@ def wait_absent(dest, root, log):
     print("R02_INSTALLER_EMPTY_DIR_CLOSEOUT_PASS dirs="+str(count),flush=True)
 
 
+def wait_inno_uninstall_helper(root):
+    """Allow the native Inno self-removal helper to finish in the lab TEMP.
+
+    Do not delete a live helper, ignore cleanup errors or touch another TEMP.
+    A timeout is a real closeout failure.
+    """
+    runner=Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+    temp=root/"temp"
+    require(root.parent==runner and root.name.startswith("dc-installer-rehearsal-")
+            and ordinary(root) and temp.is_dir() and ordinary(temp),
+            "UNINSTALL_HELPER_SCOPE_REFUSED")
+    deadline=time.monotonic()+60
+    while True:
+        require(ordinary(temp),"UNINSTALL_HELPER_TEMP_REPARSE")
+        entries=list(temp.iterdir())
+        pending=[]
+        for p in entries:
+            if re.fullmatch(r"is-[A-Za-z0-9]+-uninstall\.tmp",p.name,re.IGNORECASE):
+                try:
+                    require(ordinary(p) and p.is_dir(),"UNINSTALL_HELPER_PATH_REFUSED")
+                except FileNotFoundError:
+                    continue
+                pending.append(p)
+        if not pending:
+            print("R02_INSTALLER_NATIVE_HELPER_EXIT_PASS",flush=True)
+            return
+        require(time.monotonic()<deadline,"UNINSTALL_HELPER_EXIT_TIMEOUT")
+        time.sleep(.25)
+
+
 @contextmanager
 def installed_bundle(bundle, runner, negative=False):
     require(os.name=="nt" and os.environ.get("GITHUB_ACTIONS")=="true", "WINDOWS_CI_ONLY")
@@ -364,6 +394,7 @@ def installed_bundle(bundle, runner, negative=False):
                          "/LOG="+str(uninstall_log)],env,root,900)==0,
                     "INNO_UNINSTALL_FAILED")
             wait_absent(dest,root,uninstall_log)
+            wait_inno_uninstall_helper(root)
             require((root/"outside-sentinel.txt").read_bytes()==b"synthetic preserve","UNINSTALL_OUTSIDE_MUTATION")
             print("R02_INSTALLER_UNINSTALL_CLEAN_PASS",flush=True)
     require(not root.exists(),"INSTALL_LAB_RESIDUE")
