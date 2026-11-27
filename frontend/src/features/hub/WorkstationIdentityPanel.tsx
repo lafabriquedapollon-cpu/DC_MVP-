@@ -121,10 +121,10 @@ export const WorkstationIdentityPanel = ({ current }: { current: WorkstationStat
   };
 
   return (
-    <section data-workstation-identity className="mt-6 rounded-elite-lg border border-border-main bg-card-bg p-5 shadow-elite sm:p-6">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+    <section data-workstation-identity className="min-w-0 [overflow-wrap:anywhere] mt-6 rounded-elite-lg border border-border-main bg-card p-5 shadow-elite sm:p-6">
+      <div className="min-w-0 [overflow-wrap:anywhere] flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-primary">
+          <div className="min-w-0 [overflow-wrap:anywhere] flex items-center gap-2 text-primary">
             <Link2 size={18} aria-hidden="true" />
             <span className="text-xs font-black uppercase tracking-widest">Identité des postes</span>
           </div>
@@ -136,13 +136,13 @@ export const WorkstationIdentityPanel = ({ current }: { current: WorkstationStat
         <button
           type="button"
           onClick={() => void refresh()}
-          className="inline-flex min-h-11 items-center gap-2 self-start rounded-elite-sm border border-border-main bg-main-bg px-3 text-xs font-black text-main"
+          className="inline-flex min-h-11 items-center gap-2 self-start rounded-elite-sm border border-border-main bg-background px-3 text-xs font-black text-text-main"
         >
           <RefreshCw size={15} aria-hidden="true" /> Actualiser
         </button>
       </div>
 
-      <div className="mt-5 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+      <div className="min-w-0 [overflow-wrap:anywhere] mt-5 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
         <label className="text-xs font-black uppercase tracking-wide text-text-muted">
           PIN propriétaire pour les actions sensibles
           <input
@@ -151,14 +151,14 @@ export const WorkstationIdentityPanel = ({ current }: { current: WorkstationStat
             pattern="[0-9]*"
             value={ownerPin}
             onChange={(event) => setOwnerPin(event.target.value.replace(/\D/g, '').slice(0, 8))}
-            className="mt-2 min-h-11 w-full rounded-elite-sm border border-border-main bg-main-bg px-3 text-sm font-semibold text-main outline-none focus:border-primary"
+            className="mt-2 min-h-11 w-full min-w-0 rounded-elite-sm border border-border-main bg-background px-3 text-sm font-semibold text-text-main outline-none focus:border-primary"
           />
         </label>
         <button
           type="button"
           disabled={busy !== null || !current.pinConfigured}
           onClick={issuePairingCode}
-          className="self-end min-h-11 rounded-elite-sm bg-primary px-4 text-sm font-black text-card-bg disabled:opacity-50"
+          className="self-end min-h-11 rounded-elite-sm bg-primary px-4 text-sm font-black text-on-primary disabled:opacity-50"
         >
           {busy === 'pairing' ? 'Génération…' : 'Nouveau code d’appairage'}
         </button>
@@ -167,24 +167,24 @@ export const WorkstationIdentityPanel = ({ current }: { current: WorkstationStat
       {pairing && (
         <div className="mt-4 rounded-elite-sm border border-primary/20 bg-primary/5 p-4">
           <p className="text-xs font-black uppercase tracking-widest text-primary">Code temporaire</p>
-          <p className="mt-2 font-outfit text-3xl font-black tracking-widest text-main">{pairing.code}</p>
+          <p className="mt-2 font-outfit text-3xl font-black tracking-widest text-text-main">{pairing.code}</p>
           <p className="mt-1 text-xs font-semibold text-text-muted">Usage unique · expiration automatique dans 10 minutes.</p>
         </div>
       )}
 
-      <div data-station-fallback-config className="mt-5 rounded-elite-sm border border-border-main bg-main-bg p-4">
+      <div data-station-fallback-config className="mt-5 rounded-elite-sm border border-border-main bg-background p-4">
         <p className="text-xs font-black uppercase tracking-widest text-primary">Identification de secours Station</p>
         <p className="mt-1 text-xs font-semibold text-text-muted">
           Le QR/NFC reste prioritaire. Choisissez uniquement le fallback accepté si le patient n’a pas son téléphone.
         </p>
-        <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+        <div className="min-w-0 [overflow-wrap:anywhere] mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
           <label className="text-xs font-black text-text-muted">
             Méthode de secours
             <select
               aria-label="Méthode d’identification de secours"
               value={fallbackMode}
               onChange={(event) => setFallbackMode(event.target.value as StationFallbackMode)}
-              className="mt-2 min-h-11 w-full rounded-elite-sm border border-border-main bg-card-bg px-3 text-sm font-semibold text-main"
+              className="mt-2 min-h-11 w-full min-w-0 rounded-elite-sm border border-border-main bg-card px-3 text-sm font-semibold text-text-main"
             >
               <option value="phone_dob">Téléphone + date de naissance</option>
               <option value="name_dob">Nom + prénom + date de naissance</option>
@@ -195,7 +195,7 @@ export const WorkstationIdentityPanel = ({ current }: { current: WorkstationStat
             type="button"
             disabled={busy !== null || !current.pinConfigured}
             onClick={() => void saveFallbackMode()}
-            className="self-end min-h-11 rounded-elite-sm border border-border-main bg-card-bg px-4 text-xs font-black text-main disabled:opacity-50"
+            className="self-end min-h-11 rounded-elite-sm border border-border-main bg-card px-4 text-xs font-black text-text-main disabled:opacity-50"
           >
             {busy === 'fallback' ? 'Enregistrement…' : 'Enregistrer'}
           </button>
@@ -204,11 +204,11 @@ export const WorkstationIdentityPanel = ({ current }: { current: WorkstationStat
 
       <div className="mt-5 space-y-3">
         {items.map((item) => (
-          <article key={item.workstationId} className="rounded-elite-sm border border-border-main bg-main-bg p-4">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+          <article key={item.workstationId} className="rounded-elite-sm border border-border-main bg-background p-4">
+            <div className="min-w-0 [overflow-wrap:anywhere] flex flex-col gap-3 lg:flex-row lg:items-center">
               <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-sm font-black text-main">
+                <div className="min-w-0 [overflow-wrap:anywhere] flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-black text-text-main">
                     {item.displayName || (item.workstationId === current.workstationId ? 'Ce poste' : 'Poste sans nom')}
                   </span>
                   {item.workstationId === current.workstationId && (
@@ -226,7 +226,7 @@ export const WorkstationIdentityPanel = ({ current }: { current: WorkstationStat
               </div>
 
               {!item.revoked && (
-                <div className="flex flex-col gap-2 sm:flex-row">
+                <div className="min-w-0 [overflow-wrap:anywhere] flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                   <label className="sr-only" htmlFor={`station-name-${item.workstationId}`}>Nom du poste</label>
                   <input
                     id={`station-name-${item.workstationId}`}
@@ -234,13 +234,13 @@ export const WorkstationIdentityPanel = ({ current }: { current: WorkstationStat
                     maxLength={80}
                     onChange={(event) => setNames((currentNames) => ({ ...currentNames, [item.workstationId]: event.target.value }))}
                     placeholder="Ex. Accueil 1"
-                    className="min-h-11 min-w-0 rounded-elite-sm border border-border-main bg-card-bg px-3 text-sm font-semibold text-main outline-none focus:border-primary"
+                    className="min-h-11 min-w-0 rounded-elite-sm border border-border-main bg-card px-3 text-sm font-semibold text-text-main outline-none focus:border-primary"
                   />
                   <button
                     type="button"
                     disabled={busy !== null}
                     onClick={() => void rename(item)}
-                    className="inline-flex min-h-11 items-center justify-center gap-2 rounded-elite-sm border border-border-main bg-card-bg px-3 text-xs font-black text-main disabled:opacity-50"
+                    className="inline-flex min-h-11 items-center justify-center gap-2 rounded-elite-sm border border-border-main bg-card px-3 text-xs font-black text-text-main disabled:opacity-50"
                   >
                     <Pencil size={14} aria-hidden="true" /> Renommer
                   </button>
@@ -248,7 +248,7 @@ export const WorkstationIdentityPanel = ({ current }: { current: WorkstationStat
                     type="button"
                     disabled={busy !== null}
                     onClick={() => void revoke(item)}
-                    className="inline-flex min-h-11 items-center justify-center gap-2 rounded-elite-sm border border-border-main bg-card-bg px-3 text-xs font-black text-main disabled:opacity-50"
+                    className="inline-flex min-h-11 items-center justify-center gap-2 rounded-elite-sm border border-border-main bg-card px-3 text-xs font-black text-text-main disabled:opacity-50"
                   >
                     <ShieldX size={14} aria-hidden="true" />
                     {confirmRevokeId === item.workstationId ? 'Confirmer la révocation' : 'Révoquer'}
@@ -261,7 +261,7 @@ export const WorkstationIdentityPanel = ({ current }: { current: WorkstationStat
                         setConfirmRevokeId(null);
                         setFeedback('');
                       }}
-                      className="inline-flex min-h-11 items-center justify-center rounded-elite-sm border border-border-main bg-card-bg px-3 text-xs font-black text-main disabled:opacity-50"
+                      className="inline-flex min-h-11 items-center justify-center rounded-elite-sm border border-border-main bg-card px-3 text-xs font-black text-text-main disabled:opacity-50"
                     >
                       Annuler
                     </button>

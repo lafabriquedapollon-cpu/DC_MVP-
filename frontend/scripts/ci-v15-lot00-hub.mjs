@@ -248,7 +248,7 @@ try{
        const over=(f,b)=>[f[0]*f[3]+b[0]*(1-f[3]),f[1]*f[3]+b[1]*(1-f[3]),f[2]*f[3]+b[2]*(1-f[3]),1];
        const lum=p=>p.slice(0,3).map(x=>x<=.04045?x/12.92:((x+.055)/1.055)**2.4).reduce((a,x,i)=>a+x*[.2126,.7152,.0722][i],0);
        const ratio=(a,b)=>(Math.max(lum(a),lum(b))+.05)/(Math.min(lum(a),lum(b))+.05);
-       const textNodes=()=>{const nodes=[];const w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);let n;while(n=w.nextNode()){const e=n.parentElement;if(!n.textContent.trim()||!e||e.closest('script,style,[aria-hidden="true"],:disabled')||!e.getClientRects().length||getComputedStyle(e).visibility==='hidden')continue;nodes.push(n)}return nodes};
+       const textNodes=()=>{const nodes=[];const w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);let n;while(n=w.nextNode()){const e=n.parentElement;if(!n.textContent.trim()||!e||e.closest('script,style,[aria-hidden="true"],:disabled,.sr-only')||!e.getClientRects().length||getComputedStyle(e).visibility==='hidden')continue;const range=document.createRange();range.selectNodeContents(n);if(!Array.from(range.getClientRects()).some(r=>r.width>0&&r.height>0))continue;nodes.push(n)}return nodes};
        const nodes=textNodes();const contrast=[];let imageBackground=0;
        for(const n of nodes){
          const e=n.parentElement,s=getComputedStyle(e),chain=[];for(let p=e;p;p=p.parentElement)chain.unshift(p);
@@ -281,7 +281,7 @@ try{
        return {textCount:nodes.length,contrast,imageBackground,zoom};
      }.toString()+')()');
      try{await capture('r9-'+name+'-'+width+'-text200');}finally{await evalPage('window.__dcHubAuditRestore?.()')}
-     const pass=result.contrast.length>0&&result.contrast.every(x=>x.pass)&&result.zoom.allDoubled&&result.zoom.clipped.length===0&&result.zoom.documentWidth<=result.zoom.viewport+1;
+     const pass=result.contrast.length>0&&result.imageBackground===0&&result.contrast.length===result.textCount&&result.contrast.every(x=>x.pass)&&result.zoom.allDoubled&&result.zoom.clipped.length===0&&result.zoom.documentWidth<=result.zoom.viewport+1;
      a11yResults.push({name,width,pass,...result});
      console.log('LOT00_HUB_A11Y '+JSON.stringify({name,width,pass,textCount:result.textCount,contrastCount:result.contrast.length,contrastFailures:result.contrast.filter(x=>!x.pass),imageBackground:result.imageBackground,zoom:result.zoom}));
    };
