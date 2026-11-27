@@ -1,10 +1,22 @@
 name: R0.2 - nonclinical Windows installer rehearsal
 on:
   push:
-    branches: [ci/r02-installer-rehearsal-20261126, ci/r03-conv04-installer-20261127]
+    branches: [ci/r02-installer-rehearsal-20261126, ci/r03-conv04-installer-20261127, ci/j5-03c-scientific-admission-20261127]
 permissions:
   contents: read
 jobs:
+  scientific-admission:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Asset exclusion regression
+        run: python -B -m scripts.ci_j5_03c_asset_exclusion_tests
   uninstall-closeout:
     runs-on: windows-2025
     timeout-minutes: 15
@@ -54,7 +66,7 @@ jobs:
           python -I -B scripts/ci_r02_installer_uninstall_closeout.py
           if ($LASTEXITCODE -ne 0) { throw 'UNINSTALL_CLOSEOUT_FAILED' }
   installed-runtime:
-    needs: uninstall-closeout
+    needs: [uninstall-closeout, scientific-admission]
     runs-on: windows-2025
     timeout-minutes: 80
     steps:

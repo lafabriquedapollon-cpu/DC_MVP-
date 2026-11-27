@@ -14,6 +14,7 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ci_r02_windows_desktop import stage_assets, desktop_cycle
 from ci_r02_installer_rehearsal import installed_bundle, directory_inventory, assert_directory_inventory
+from ci_j5_03c_asset_exclusion import scan as scan_unadmitted_assets
 
 
 def require(ok, marker):
@@ -104,7 +105,7 @@ def main():
     installer_only = sys.argv[1:] == ["--installer-only"]
     require(not sys.argv[1:] or final_only or installer_only, "UNEXPECTED_HARNESS_ARGUMENT")
     if installer_only:
-        require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-installer-rehearsal-20261126", "ci/r03-conv04-installer-20261127"},
+        require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-installer-rehearsal-20261126", "ci/r03-conv04-installer-20261127", "ci/j5-03c-scientific-admission-20261127"},
                 "INSTALLER_BRANCH_REQUIRED")
     if final_only:
         require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-desktop-final-20261126", "ci/r03-convergence-20261126"},
@@ -157,9 +158,13 @@ def main():
             require(file.name.lower() not in {".env", ".env.local", "firebase_creds.json"}
                     and file.suffix.lower() not in {".db", ".sqlite", ".sqlite3", ".onnx", ".pt", ".pth"},
                     "FORBIDDEN_BUNDLE_PAYLOAD")
+    scan_unadmitted_assets(bundle)
+    print("J5_03C_UNADMITTED_ASSETS_EXCLUDED_PASS", flush=True)
     print("R02_BACKEND_REAL_PE_BUILD_PASS", flush=True)
     if installer_only:
         with installed_bundle(bundle, runner) as installed:
+            scan_unadmitted_assets(installed)
+            print("J5_03C_INSTALLED_ASSET_EXCLUSION_PASS", flush=True)
             installed_exe = installed / exe.name
             installed_dirs = directory_inventory(installed)
             require("_internal/backend/static/uploads" not in installed_dirs,
