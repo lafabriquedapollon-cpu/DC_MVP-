@@ -13,12 +13,12 @@ regChallenge=rand();
 reg=await navigator.credentials.create({publicKey:{challenge:regChallenge,rp:{id:rp,name:'Passkey LAB fictif'},user:{id:rand(),name:'fixture-'+b64(rand()).slice(0,12),displayName:'Test fictif'},pubKeyCredParams:[{type:'public-key',alg:-7}],authenticatorSelection:{residentKey:'preferred',userVerification:'required'},attestation:'none',timeout:60000}});
 if(!reg)throw Error();
 el('status').textContent='Passkey de test créée. Pas encore de vérification indépendante.';el('sign').disabled=false;
-}catch(e){fail();}};
+}catch(e){console.warn('LAB_BROWSER_ERROR',e?.name||'Error');fail();}};
 el('sign').onclick=async()=>{el('sign').disabled=true;try{
 authChallenge=rand();auth=await navigator.credentials.get({publicKey:{challenge:authChallenge,rpId:rp,allowCredentials:[{type:'public-key',id:reg.rawId}],userVerification:'required',timeout:60000}});
 if(!auth||auth.id!==reg.id)throw Error();
 el('status').textContent='Preuve produite. Vérification indépendante requise.';el('export').disabled=false;
-}catch(e){fail();}};
+}catch(e){console.warn('LAB_BROWSER_ERROR',e?.name||'Error');fail();}};
 el('export').onclick=()=>{const proof={domain:'DIGITAL-CROWN/PASSKEY-BROWSER-LAB/NOT-A-RELEASE/v1',rp,origin:location.origin,registrationChallenge:b64(regChallenge),authenticationChallenge:b64(authChallenge),registration:serialize(reg),authentication:serialize(auth)};const url=URL.createObjectURL(new Blob([JSON.stringify(proof)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='passkey-lab-proof.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 </script></html>`;
 const headers={"Cache-Control":"no-store","X-Content-Type-Options":"nosniff","Referrer-Policy":"no-referrer","X-Robots-Tag":"noindex, nofollow, noarchive","X-Frame-Options":"DENY","Permissions-Policy":"publickey-credentials-create=(self), publickey-credentials-get=(self)"};
