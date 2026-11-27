@@ -32,6 +32,8 @@ def run(command, env, cwd, expected, timeout):
             values = json.loads(line.split("=", 1)[1])
             require(all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", v) for v in values), "INVALID_IMPORT_NAME")
             observed.update(values)
+        elif re.fullmatch(r"J5_03E_[A-Z_]+(?: [A-Za-z0-9_.=+-]+)?", line):
+            print(line, flush=True)
         elif re.fullmatch(r"(?:R02_BACKEND_[A-Z_-]+|R02_DESKTOP_[A-Z_]+|R02_INSTALLER_[A-Z_]+|R02_RELOCATED_NATIVE_[A-Z_]+)(?: [A-Za-z0-9_.=+-]+)*", line) or re.fullmatch(r"(?:FASTAPI_IMPORT_PASS|OPERATOR_BASELINE_METADATA_PASS|PRINT_AUDIT_[A-Z_]+|SQLCIPHER_WRONG_KEY_DENIED_PASS|NONEMPTY_BASELINE_REFUSED_PASS|SYNTHETIC_FIXTURE_FK_INTEGRITY_PASS|FRESH_SQLCIPHER_BASELINE_PASS|SYNTHETIC_FIXTURE_PASS)(?: [A-Za-z0-9_.=+-]+)*", line):
             print(line, flush=True)
     require(out.returncode == 0 and expected in lines, "BACKEND_CHILD_FAILED " + expected)
@@ -105,7 +107,7 @@ def main():
     installer_only = sys.argv[1:] == ["--installer-only"]
     require(not sys.argv[1:] or final_only or installer_only, "UNEXPECTED_HARNESS_ARGUMENT")
     if installer_only:
-        require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-installer-rehearsal-20261126", "ci/r03-conv04-installer-20261127", "ci/j5-03c-scientific-admission-20261127"},
+        require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-installer-rehearsal-20261126", "ci/r03-conv04-installer-20261127", "ci/j5-03c-scientific-admission-20261127", "ci/j5-03e-installed-restore-20261127"},
                 "INSTALLER_BRANCH_REQUIRED")
     if final_only:
         require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-desktop-final-20261126", "ci/r03-convergence-20261126"},
@@ -202,6 +204,23 @@ def main():
                     print("R02_INSTALLER_DIRECTORY_TREE_PASS stage=" + stage, flush=True)
                 print("R02_INSTALLER_INSTALLED_BACKEND_RESTART_PASS", flush=True)
             require(not root.exists(), "INSTALLED_DATA_LAB_RESIDUE")
+            if os.environ.get("GITHUB_REF_NAME") == "ci/j5-03e-installed-restore-20261127":
+                for scenario in ("success", "rollback"):
+                    with tempfile.TemporaryDirectory(prefix="dc-backend-rehearsal-", dir=runner) as temp:
+                        root = Path(temp).resolve(strict=True)
+                        env = child_env(root, lab)
+                        media = root / "rehearsal-media"
+                        media.mkdir()
+                        env.update(DC_INSTALLER_REHEARSAL="true", DC_DESKTOP_HEAD=os.environ["GITHUB_SHA"],
+                                   DC_RESTORE_LAB="true", DC_RESTORE_SCENARIO=scenario,
+                                   MEDIA_ROOT=str(media), CABINET_PORT="8008",
+                                   ALLOWED_ORIGINS="http://127.0.0.1:8008")
+                        run([str(installed_exe), "init"], env, root, "R02_BACKEND_FROZEN_INIT_PASS", 180)
+                        run([str(installed_exe), "restore-lab"], env, root,
+                            "J5_03E_INSTALLED_RESTORE_" + scenario.upper() + "_PASS", 240)
+                        assert_directory_inventory(installed, installed_dirs)
+                    require(not root.exists(), "J5_03E_RESTORE_LAB_RESIDUE")
+                print("J5_03E_INSTALLED_RESTORE_CLEANUP_PASS", flush=True)
         print("R02_INSTALLER_INTEGRATED_PASS", flush=True)
         return
     if not final_only:

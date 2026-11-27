@@ -8,6 +8,7 @@ import re
 import socket
 import sqlite3
 import stat
+import subprocess
 import sys
 import urllib.request
 import urllib.error
@@ -40,7 +41,8 @@ def checked_root():
                 "DIGITALCROWN_LOG_DIR", "DIGITALCROWN_RUNTIME_DIR", "MEDIA_ROOT",
                 "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"):
         path = Path(os.environ[key])
-        require(path == root and ordinary(path), "INVALID_ISOLATED_PATH " + key)
+        expected = root / "rehearsal-media" if key == "MEDIA_ROOT" and os.environ.get("DC_RESTORE_LAB") == "true" else root
+        require(path == expected and ordinary(path), "INVALID_ISOLATED_PATH " + key)
     env = root / "empty-rehearsal.env"
     require(Path(os.environ["DIGITALCROWN_ENV_FILE"]) == env and env.is_file()
             and ordinary(env) and env.stat().st_size == 0, "INVALID_ENV_FILE")
@@ -62,6 +64,16 @@ def network_guard(event, args):
         if args[0] not in {"127.0.0.1", "::1", "localhost", None}:
             raise PermissionError("REHEARSAL_DNS_REFUSED")
     elif event in {"subprocess.Popen", "os.system", "os.startfile", "os.spawn"}:
+        # Only the installed restore LAB controller can spawn its exact own PE
+        # with one of two fixed health stages, never an arbitrary command.
+        if (event == "subprocess.Popen" and getattr(sys, "frozen", False)
+                and os.environ.get("DC_RESTORE_LAB") == "true"
+                and sys.argv[1:] == ["restore-lab"]
+                and args[0] == sys.executable
+                and args[1] in {subprocess.list2cmdline([sys.executable, stage])
+                                for stage in ("restore-health", "restore-fail-health")}
+                and args[2] == os.environ["DC_LAB_ROOT"]):
+            return
         raise PermissionError("REHEARSAL_PROCESS_REFUSED")
 
 
@@ -190,7 +202,12 @@ def main():
     require(len(sys.argv) == (2 if frozen else 4), "INVALID_ARGUMENTS")
     stage = sys.argv[1]
     desktop = stage in {"desktop-init", "desktop-serve", "desktop-restart"}
-    require(stage in {"init", "serve", "restart"} or (desktop and frozen), "INVALID_STAGE")
+    restore = stage in {"restore-lab", "restore-health", "restore-fail-health"}
+    require(stage in {"init", "serve", "restart"} or (desktop and frozen)
+            or (restore and frozen and os.environ.get("DC_RESTORE_LAB") == "true"
+                and os.environ.get("DC_INSTALLER_REHEARSAL") == "true"), "INVALID_STAGE")
+    if restore:
+        require(os.environ.get("DC_RESTORE_SCENARIO") in {"success", "rollback"}, "INVALID_RESTORE_SCENARIO")
     initial = stage in {"init", "desktop-init"}
     require((initial and not db.exists()) or (not initial and db.is_file()), "INVALID_DB_STATE")
     source = Path(sys._MEIPASS) if frozen else Path(sys.argv[2]).resolve(strict=True)
@@ -239,7 +256,7 @@ def main():
         if os.environ.get("DC_INSTALLER_REHEARSAL") == "true":
             from backend.core.media_paths import get_imaging_root
             imaging = get_imaging_root().resolve(strict=True)
-            require(imaging == root / "uploads" and ordinary(imaging),
+            require(imaging == Path(os.environ["MEDIA_ROOT"]) / "uploads" and ordinary(imaging),
                     "INSTALLED_MEDIA_ROOT_NOT_ISOLATED")
             sentinel = imaging / "ci-install-rehearsal-sentinel.bin"
             if initial:
@@ -249,6 +266,21 @@ def main():
                     and sentinel.read_bytes() == b"synthetic media persistence",
                     "INSTALLED_MEDIA_PERSISTENCE_FAILED")
             print("R02_INSTALLER_MEDIA_PERSISTENCE_PASS", flush=True)
+        if restore:
+            from backend.core.schema_runtime import assert_database_at_current_head
+            assert_database_at_current_head(database.engine)
+            if stage == "restore-fail-health":
+                database.engine.dispose()
+                print("J5_03E_INJECTED_STARTUP_FAILURE", flush=True)
+                return
+            if stage == "restore-health":
+                asyncio.run(exercise_http(app, desktop=True, stop_file=root / "stop-restore-health"))
+                database.engine.dispose()
+                print("J5_03E_REAL_RESTART_HEALTH_PASS", flush=True)
+                return
+            from ci_j5_03e_installed_restore import exercise_restore
+            exercise_restore(root, db)
+            return
         if initial:
             from backend.scripts.ci_fresh_backend_rehearsal import main as baseline
             baseline()

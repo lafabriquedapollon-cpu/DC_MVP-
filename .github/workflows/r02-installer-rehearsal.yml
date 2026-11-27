@@ -1,7 +1,7 @@
 name: R0.2 - nonclinical Windows installer rehearsal
 on:
   push:
-    branches: [ci/r02-installer-rehearsal-20261126, ci/r03-conv04-installer-20261127, ci/j5-03c-scientific-admission-20261127]
+    branches: [ci/r02-installer-rehearsal-20261126, ci/r03-conv04-installer-20261127, ci/j5-03c-scientific-admission-20261127, ci/j5-03e-installed-restore-20261127]
 permissions:
   contents: read
 jobs:
