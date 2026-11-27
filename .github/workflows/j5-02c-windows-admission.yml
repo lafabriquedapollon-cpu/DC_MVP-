@@ -1,0 +1,47 @@
+name: J5-02C.6 Windows admission contract (NOT A RELEASE)
+on:
+  push:
+    branches: [ci/j5-02c-windows-admission-20261127]
+permissions:
+  contents: read
+jobs:
+  windows-admission:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exact checkout and isolated delta
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git diff --name-only a7a19760f54f900fc8835e82f1ce66af11fc38cf HEAD | sort | paste -sd ' ' -)" = '.github/workflows/j5-02c-windows-admission.yml docs/J5-02C6-WINDOWS-ADMISSION.md scripts/ci_j5_02c_windows_admission.py'
+      - name: Native Windows access checks and read-only TBS
+        run: python -B -m scripts.ci_j5_02c_windows_admission
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends swtpm tpm2-tools libtss2-tcti-swtpm0t64
+          dpkg-query -W swtpm tpm2-tools libtss2-tcti-swtpm0t64
+          python -m pip install --disable-pip-version-check --only-binary=:all: 'webauthn==3.0.0' 'cryptography==49.0.0'
+          python -m pip check
+      - name: Previous 77 tests
+        run: |
+          python -B -m scripts.ci_j5_02c_recovery_lab
+          python -B -m scripts.ci_j5_02c_trust_root_lab
+          python -B -m scripts.ci_j5_02c_tpm_anchor_lab
