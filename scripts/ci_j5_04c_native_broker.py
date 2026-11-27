@@ -136,6 +136,11 @@ def main():
             require(call("status")["release_enabled"] is False,"RELEASE_GATE")
             print("J5_04C_RECOVERY_RESTART_NO_RELEASE_PASS",flush=True)
         finally:
+            trace=state/"broker-status.log"
+            if trace.is_file():
+                for line in trace.read_text(encoding="ascii").splitlines()[-50:]:
+                    if len(line)<100 and all(c.isalnum() or c in "_ - " for c in line):
+                        print("J5_04C_SERVICE_TRACE "+line,flush=True)
             if created:
                 subprocess.run([str(SC),"stop",NAME],capture_output=True,timeout=30)
                 wait_stopped();sc("delete",NAME)

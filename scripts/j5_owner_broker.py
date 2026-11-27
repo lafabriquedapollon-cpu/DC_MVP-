@@ -78,36 +78,55 @@ class Service(win32serviceutil.ServiceFramework):
             require(groups.get(c["service_sid"],0)&4,"SERVICE_SID_REQUIRED")
         finally:token.Close()
         store=Store(path)
+        trace=path.parent/"broker-status.log"
+        def mark(stage,exc=None):
+            # Fixed stage and numeric native error only; never request contents.
+            with trace.open("a",encoding="ascii") as out:
+                out.write(stage+(" "+type(exc).__name__+" "+str(getattr(exc,"winerror",0)) if exc else "")+"\n")
+        mark("STORE_OPEN")
         h=win32pipe.CreateNamedPipe(c["pipe"],win32pipe.PIPE_ACCESS_DUPLEX|FIRST,
             win32pipe.PIPE_TYPE_MESSAGE|win32pipe.PIPE_READMODE_MESSAGE|win32pipe.PIPE_NOWAIT|REJECT_REMOTE,
             1,MAX,MAX,0,pipe_acl(c["client_sid"],c["service_sid"]))
+        mark("PIPE_CREATED")
         try:
             while not self.stopping:
                 # Poll a listening instance without disconnecting it between polls.
                 try:
                     rc=win32pipe.ConnectNamedPipe(h,None)
                     if rc in (231,536):time.sleep(.025);continue
+                    mark("CONNECT_RETURN_"+str(rc))
                 except pywintypes.error as exc:
                     if exc.winerror in (231,536):time.sleep(.025);continue
-                    if exc.winerror!=535:raise
+                    if exc.winerror!=535:
+                        mark("CONNECT_FAILED",exc);raise
+                    mark("CONNECT_ALREADY")
+                stage="READ"
                 try:
                     raw=read(h,lambda:self.stopping)
+                    mark("READ_OK")
+                    stage="IMPERSONATE"
                     win32pipe.ImpersonateNamedPipeClient(h)
                     try:
                         peer=win32security.OpenThreadToken(win32api.GetCurrentThread(),win32con.TOKEN_QUERY,True)
                         try:actual=user_sid(peer)
                         finally:peer.Close()
                     finally:win32security.RevertToSelf()
+                    stage="PEER"
                     require(actual==c["client_sid"],"PEER_DENIED")
+                    mark("PEER_OK")
+                    stage="REQUEST"
                     req=json.loads(raw,object_pairs_hook=unique)
                     require(type(req)is dict and set(req)=={"operation","request_id","payload"} and
                             isinstance(req["request_id"],str) and re.fullmatch("[a-f0-9]{32}",req["request_id"]),"REQUEST_SCHEMA")
                     try:result={"ok":True,"request_id":req["request_id"],"result":store.dispatch(req["operation"],req["payload"])}
                     except Exception:result={"ok":False,"request_id":req["request_id"],"error":"DENIED"}
+                    stage="WRITE"
                     write(h,encode(result))
+                    mark("WRITE_OK")
+                    stage="ACK"
                     # A bounded ack avoids losing the response on disconnect.
                     require(read(h,lambda:self.stopping)==b"ACK","ACK")
-                except Exception:pass
+                except Exception as exc:mark(stage,exc)
                 finally:
                     try:win32pipe.DisconnectNamedPipe(h)
                     except pywintypes.error:pass
