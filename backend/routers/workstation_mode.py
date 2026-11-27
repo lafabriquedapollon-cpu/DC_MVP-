@@ -555,6 +555,22 @@ def enforce_authenticated_workstation_access(
     )
 
 
+def _workstation_theme(db: Session, employer_id: int) -> dict | None:
+    # Display-only projection; never expose clinic identity, contacts or records.
+    config = db.query(models.CabinetConfig).filter(
+        models.CabinetConfig.owner_id == employer_id
+    ).first()
+    if config is None:
+        return None
+    return {
+        "selected_theme": config.selected_theme,
+        "primary_color": config.primary_color,
+        "secondary_color": config.secondary_color,
+        "accent_color": config.accent_color,
+        "app_accent_color": getattr(config, "app_accent_color", None),
+    }
+
+
 def _state_payload(request: Request, row: models.WorkstationMode, user: models.User, db: Session) -> dict:
     policy = _security_policy(db, _employer_id(user))
     session_jti = _access_session_jti(request)
@@ -567,6 +583,7 @@ def _state_payload(request: Request, row: models.WorkstationMode, user: models.U
         "pinConfigured": bool(policy and policy.owner_pin_hash),
         "canManage": _authorized_admin(user),
         "canConfigurePin": _can_configure_pin(user),
+        "theme": _workstation_theme(db, _employer_id(user)),
         "stationLocked": row.default_experience == "station",
         "stationEscapeAuthorized": escape_authorized,
         "stationEscapeExpiresAt": _escape_expires_at(request, row, user, session_jti=session_jti),
@@ -636,6 +653,7 @@ async def bootstrap_state(
         "stationEscapeAuthorized": escape_authorized,
         "stationEscapeExpiresAt": escape_expires_at,
         "enrollmentRequired": False,
+        "theme": _workstation_theme(db, employer_id) if current_user is not None and employer_id is not None else None,
         **auth_context,
     }
 

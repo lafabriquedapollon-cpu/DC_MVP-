@@ -23,6 +23,7 @@ import { authService } from './services/auth';
 import { CabinetAuthTransitionBoundary } from './components/Auth/CabinetAuthTransitionBoundary';
 import { PatientDraftRouteGuard } from './features/patients/PatientDraftRouteGuard';
 import { workstationModeService } from './services/workstationMode';
+import { applyRuntimeTheme } from './services/runtimeTheme';
 
 // Chargés à la demande
 const PatientList     = lazy(() => import('./features/patients/PatientList').then(m => ({ default: m.PatientList })));
@@ -124,31 +125,40 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
   const [isInitialized, setIsInitialized] = useState<boolean | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [workstationEnrollmentRequired, setWorkstationEnrollmentRequired] = useState(false);
+  const [stationLocked, setStationLocked] = useState(false);
+  const [authorityUnavailable, setAuthorityUnavailable] = useState(false);
   const location = useLocation();
 
   useEffect(() => {
     const checkAuthAndInit = async () => {
       setWorkstationEnrollmentRequired(false);
+      setStationLocked(false);
+      setAuthorityUnavailable(false);
+      setIsInitialized(null);
       // 1. Attendre que la base de données / le backend soit complètement chargé
       const waitForBackend = async () => {
         const MAX_ATTEMPTS = 15; // 15 × 2s = 30s max
         for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
           try {
-            await axios.get(`${API_BASE}/health`);
-            break;
+            await axios.get(`${API_BASE}/health`, { timeout: 1500 });
+            return true;
           } catch (error: any) {
             if (error.response && error.response.status !== 502 && error.response.status !== 503) {
-              break;
+              return false;
             }
             if (attempt < MAX_ATTEMPTS - 1) {
               await new Promise(resolve => setTimeout(resolve, 2000));
             }
           }
         }
+        return false;
       };
 
       try {
-        await waitForBackend();
+        if (!(await waitForBackend())) {
+          setAuthorityUnavailable(true);
+          return;
+        }
         const authStatus = await authService.isAuthenticated();
         setIsAuthenticated(authStatus);
 
@@ -162,8 +172,18 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
             setWorkstationEnrollmentRequired(true);
             return;
           }
+          // Resolve the server-authoritative Station lock before clinic initialization.
+          // A locked station must not be mistaken for an uninitialized cabinet.
+          if (workstationBootstrap.stationLocked && !workstationBootstrap.stationEscapeAuthorized) {
+            setStationLocked(true);
+            return;
+          }
           await useAuthStore.getState().checkAuth();
           const status = await cabinetApi.checkInitStatus();
+          if (typeof status.is_initialized !== 'boolean') {
+            setAuthorityUnavailable(true);
+            return;
+          }
           setIsInitialized(status.is_initialized);
 
           if (status.is_initialized && !safeStorage.get('appMode')) {
@@ -181,9 +201,15 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
             || error.response?.data?.detail === 'WORKSTATION_IDENTITY_REQUIRED'
           )) {
           setWorkstationEnrollmentRequired(true);
+        } else if (axios.isAxiosError(error)
+          && error.response?.status === 423
+          && error.response?.data?.detail === 'WORKSTATION_STATION_LOCKED') {
+          setStationLocked(true);
         } else {
+          // An unavailable authority is not evidence of an uninitialized clinic.
           console.error('Erreur vérification statut:', error);
-          setIsInitialized(false);
+          setAuthorityUnavailable(true);
+          setIsInitialized(null);
         }
       } finally {
         setIsLoading(false);
@@ -197,6 +223,13 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
     return <DigitalCrownLoader text="Démarrage de Digital Crown…" />;
   }
 
+  if (authorityUnavailable) {
+    // Public authentication/legal surfaces remain accessible; clinical/setup routes
+    // require an actual server decision and recover through the data-free Hub.
+    if (['/login', '/register', '/terms', '/privacy'].includes(location.pathname)) return <>{children}</>;
+    return <Navigate to="/hub?mode-check=failed" replace />;
+  }
+
   // BYPASS AUTH : Si on est sur /login et pas connecté, on laisse passer pour afficher la page
   if (!isAuthenticated) {
     if (['/login', '/register', '/terms', '/privacy'].includes(location.pathname)) return <>{children}</>;
@@ -208,6 +241,8 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
   if (workstationEnrollmentRequired) {
     return <Navigate to="/hub?enroll=1" replace />;
   }
+
+  if (stationLocked) return <Navigate to="/station" replace />;
 
   // Force le choix du mode s'il n'existe pas (Mode PROD par défaut désormais)
   const appMode = safeStorage.get('appMode');
@@ -374,11 +409,6 @@ function App() {
 
   // Application globale du thème (Persistance) et Paramètres IA
   useEffect(() => {
-    const savedTheme = localStorage.getItem('digitalcrown_theme');
-    if (savedTheme) {
-      document.body.dataset.theme = savedTheme;
-    }
-
     const applySettings = () => {
       // Mode Performance
       const isPerfMode = safeStorage.get('performanceMode') === 'true';
@@ -407,6 +437,12 @@ function App() {
 // Keep the existing route table intact inside a single data-router root.
 // The draft exit guard must mount ABOVE nested Routes and MainLayout animations.
 function CabinetRouteTree() {
+  const location = useLocation();
+  useEffect(() => {
+    if (['/login','/register','/landing','/download','/activate','/welcome','/terms','/privacy'].includes(location.pathname)) {
+      applyRuntimeTheme(null);
+    }
+  }, [location.pathname]);
   return (
     <PatientDraftRouteGuard>
       <OfflineQueueViewer />

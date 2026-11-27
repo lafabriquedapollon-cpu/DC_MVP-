@@ -15,6 +15,7 @@ const OfflineQueueViewerContent: React.FC = () => {
         initial={{ y: 50, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         exit={{ y: 50, opacity: 0 }}
+        data-offline-queue-viewer
         className="fixed bottom-20 left-4 right-4 z-50 pointer-events-none"
       >
         <div className="bg-slate-900 text-white rounded-2xl p-4 shadow-xl pointer-events-auto border border-slate-800">
@@ -71,8 +72,11 @@ const OfflineQueueViewerContent: React.FC = () => {
 export const OfflineQueueViewer: React.FC = () => {
   const location = useLocation();
 
-  // Public wall is isolated from staff/offline operational state entirely:
-  // do not mount the queue hook, do not read staff MobileStorage, render nothing.
-  if (location.pathname === '/station/wall') return null;
+  // Workstation recovery and public kiosk surfaces must not mount staff queue
+  // storage or obscure local controls. Hub and Control Center retain their own
+  // server status. All other routes keep the existing queue viewer unchanged.
+  const { pathname } = location;
+  if (pathname === '/hub' || pathname === '/control-center'
+    || pathname === '/station' || pathname.startsWith('/station/')) return null;
   return <OfflineQueueViewerContent />;
 };

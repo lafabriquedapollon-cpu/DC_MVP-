@@ -128,9 +128,9 @@ export const WorkstationModeAdminPanel = () => {
 
   if (bootstrap?.enrollmentRequired) {
     return (
-      <section data-workstation-enrollment className="mt-6 rounded-elite-lg border border-primary/20 bg-card-bg p-5 shadow-elite sm:p-6">
-        <div className="flex items-start gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-elite-sm bg-primary/10 text-primary">
+      <section data-workstation-enrollment className="min-w-0 [overflow-wrap:anywhere] mt-6 rounded-elite-lg border border-primary/20 bg-card p-5 shadow-elite sm:p-6">
+        <div className="min-w-0 [overflow-wrap:anywhere] flex items-start gap-3">
+          <div className="min-w-0 [overflow-wrap:anywhere] flex h-10 w-10 shrink-0 items-center justify-center rounded-elite-sm bg-primary/10 text-primary">
             <ShieldCheck size={19} />
           </div>
           <div>
@@ -142,7 +142,7 @@ export const WorkstationModeAdminPanel = () => {
           </div>
         </div>
 
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+        <div className="min-w-0 [overflow-wrap:anywhere] mt-5 grid gap-3 sm:grid-cols-2">
           <label className="text-xs font-black uppercase tracking-wide text-text-muted">
             Nom de cette borne
             <input
@@ -150,7 +150,7 @@ export const WorkstationModeAdminPanel = () => {
               maxLength={80}
               onChange={(event) => setPairingName(event.target.value)}
               placeholder="Ex. Accueil 1"
-              className="mt-2 min-h-11 w-full rounded-elite-sm border border-border-main bg-main-bg px-3 text-sm font-semibold text-main outline-none focus:border-primary"
+              className="mt-2 min-h-11 w-full min-w-0 rounded-elite-sm border border-border-main bg-background px-3 text-sm font-semibold text-text-main outline-none focus:border-primary"
             />
           </label>
           <label className="text-xs font-black uppercase tracking-wide text-text-muted">
@@ -161,7 +161,7 @@ export const WorkstationModeAdminPanel = () => {
               value={pairingCode}
               onChange={(event) => setPairingCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
               placeholder="000000"
-              className="mt-2 min-h-11 w-full rounded-elite-sm border border-border-main bg-main-bg px-3 text-sm font-semibold text-main outline-none focus:border-primary"
+              className="mt-2 min-h-11 w-full min-w-0 rounded-elite-sm border border-border-main bg-background px-3 text-sm font-semibold text-text-main outline-none focus:border-primary"
             />
           </label>
         </div>
@@ -169,15 +169,15 @@ export const WorkstationModeAdminPanel = () => {
           type="button"
           disabled={busy !== null || pairingCode.length !== 6 || !pairingName.trim()}
           onClick={pair}
-          className="mt-3 min-h-11 rounded-elite-sm bg-primary px-5 text-sm font-black text-card-bg transition-elite disabled:opacity-50"
+          className="mt-3 min-h-11 rounded-elite-sm bg-primary px-5 text-sm font-black text-on-primary transition-elite disabled:opacity-50"
         >
           {busy === 'pair' ? 'Appairage…' : 'Appairer cette borne'}
         </button>
 
         {bootstrap.canConfigurePin ? (
-          <details className="mt-4 rounded-elite-sm border border-border-main bg-main-bg p-4">
-            <summary className="cursor-pointer text-sm font-black text-main">Récupération propriétaire sans code</summary>
-            <div className="mt-3 flex flex-col gap-3 sm:flex-row">
+          <details className="mt-4 rounded-elite-sm border border-border-main bg-background p-4">
+            <summary className="cursor-pointer text-sm font-black text-text-main">Récupération propriétaire sans code</summary>
+            <div className="min-w-0 [overflow-wrap:anywhere] mt-3 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
               <label className="flex-1 text-xs font-black uppercase tracking-wide text-text-muted">
                 Mot de passe du compte propriétaire
                 <input
@@ -185,14 +185,14 @@ export const WorkstationModeAdminPanel = () => {
                   value={enrollmentPassword}
                   onChange={(event) => setEnrollmentPassword(event.target.value)}
                   autoComplete="current-password"
-                  className="mt-2 min-h-11 w-full rounded-elite-sm border border-border-main bg-card-bg px-3 text-sm font-semibold text-main outline-none focus:border-primary"
+                  className="mt-2 min-h-11 w-full min-w-0 rounded-elite-sm border border-border-main bg-card px-3 text-sm font-semibold text-text-main outline-none focus:border-primary"
                 />
               </label>
               <button
                 type="button"
                 disabled={busy !== null || !enrollmentPassword}
                 onClick={enroll}
-                className="self-end min-h-11 rounded-elite-sm border border-border-main bg-card-bg px-5 text-sm font-black text-main disabled:opacity-50"
+                className="self-end min-h-11 rounded-elite-sm border border-border-main bg-card px-5 text-sm font-black text-text-main disabled:opacity-50"
               >
                 {busy === 'enroll' ? 'Vérification…' : 'Réenregistrer le poste'}
               </button>
@@ -246,10 +246,10 @@ export const WorkstationModeAdminPanel = () => {
   };
 
   return (
-    <section data-workstation-admin className="mt-6 rounded-elite-lg border border-border-main bg-card-bg p-5 shadow-elite sm:p-6">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+    <section data-workstation-admin className="min-w-0 [overflow-wrap:anywhere] mt-6 rounded-elite-lg border border-border-main bg-card p-5 shadow-elite sm:p-6">
+      <div className="min-w-0 [overflow-wrap:anywhere] flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-primary">
+          <div className="min-w-0 [overflow-wrap:anywhere] flex items-center gap-2 text-primary">
             <MonitorCog size={18} />
             <span className="text-xs font-black uppercase tracking-widest">Configuration du poste</span>
           </div>
@@ -258,24 +258,24 @@ export const WorkstationModeAdminPanel = () => {
             {state.displayName ? `Poste : ${state.displayName}. ` : ''}Le serveur reste l'autorité. Un changement permanent exige le PIN propriétaire.
           </p>
         </div>
-        <div className="inline-flex items-center gap-2 self-start rounded-elite-sm border border-border-main bg-main-bg px-3 py-2 text-xs font-black text-text-muted">
+        <div className="inline-flex items-center gap-2 self-start rounded-elite-sm border border-border-main bg-background px-3 py-2 text-xs font-black text-text-muted">
           <ShieldCheck size={15} />
           {state.pinConfigured ? 'PIN configuré' : 'PIN à configurer'}
         </div>
       </div>
 
       {!state.pinConfigured && !state.canConfigurePin && (
-        <p className="mt-5 rounded-elite-sm border border-border-main bg-main-bg p-3 text-sm font-semibold text-text-muted">
+        <p className="mt-5 rounded-elite-sm border border-border-main bg-background p-3 text-sm font-semibold text-text-muted">
           Le propriétaire principal doit d'abord configurer le PIN de ce cabinet.
         </p>
       )}
 
       {state.canConfigurePin && (
-        <details className="mt-5 rounded-elite-sm border border-border-main bg-main-bg p-4">
-          <summary className="cursor-pointer text-sm font-black text-main">
+        <details className="mt-5 rounded-elite-sm border border-border-main bg-background p-4">
+          <summary className="cursor-pointer text-sm font-black text-text-main">
             {state.pinConfigured ? 'Changer le PIN propriétaire' : 'Configurer le PIN propriétaire'}
           </summary>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <div className="min-w-0 [overflow-wrap:anywhere] mt-4 grid gap-3 sm:grid-cols-2">
             <label className="text-xs font-black uppercase tracking-wide text-text-muted">
               Mot de passe du compte
               <input
@@ -283,7 +283,7 @@ export const WorkstationModeAdminPanel = () => {
                 value={accountPassword}
                 onChange={(event) => setAccountPassword(event.target.value)}
                 autoComplete="current-password"
-                className="mt-2 min-h-11 w-full rounded-elite-sm border border-border-main bg-card-bg px-3 text-sm font-semibold text-main outline-none focus:border-primary"
+                className="mt-2 min-h-11 w-full min-w-0 rounded-elite-sm border border-border-main bg-card px-3 text-sm font-semibold text-text-main outline-none focus:border-primary"
               />
             </label>
             <label className="text-xs font-black uppercase tracking-wide text-text-muted">
@@ -295,7 +295,7 @@ export const WorkstationModeAdminPanel = () => {
                 value={newPin}
                 onChange={(event) => setNewPin(event.target.value.replace(/\D/g, '').slice(0, 8))}
                 autoComplete="new-password"
-                className="mt-2 min-h-11 w-full rounded-elite-sm border border-border-main bg-card-bg px-3 text-sm font-semibold text-main outline-none focus:border-primary"
+                className="mt-2 min-h-11 w-full min-w-0 rounded-elite-sm border border-border-main bg-card px-3 text-sm font-semibold text-text-main outline-none focus:border-primary"
               />
             </label>
           </div>
@@ -303,7 +303,7 @@ export const WorkstationModeAdminPanel = () => {
             type="button"
             disabled={busy !== null || !accountPassword || !newPin}
             onClick={savePin}
-            className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-elite-sm bg-primary px-4 text-sm font-black text-card-bg transition-elite disabled:opacity-50"
+            className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-elite-sm bg-primary px-4 text-sm font-black text-on-primary transition-elite disabled:opacity-50"
           >
             <KeyRound size={16} />
             {busy === 'pin' ? 'Enregistrement…' : 'Enregistrer le PIN'}
@@ -311,7 +311,7 @@ export const WorkstationModeAdminPanel = () => {
         </details>
       )}
 
-      <div className="mt-5 grid gap-3 md:grid-cols-3">
+      <div className="min-w-0 [overflow-wrap:anywhere] mt-5 grid gap-3 md:grid-cols-3">
         {(Object.keys(modeLabels) as WorkstationExperience[]).map((mode) => (
           <button
             key={mode}
@@ -319,14 +319,14 @@ export const WorkstationModeAdminPanel = () => {
             disabled={!state.pinConfigured || busy !== null}
             onClick={() => setSelectedMode(mode)}
             aria-pressed={selectedMode === mode}
-            className={`min-h-11 rounded-elite-sm border px-3 text-sm font-black transition-elite disabled:opacity-50 ${selectedMode === mode ? 'border-primary bg-primary/10 text-primary' : 'border-border-main bg-main-bg text-main hover:border-primary/40'}`}
+            className={`min-h-11 rounded-elite-sm border px-3 text-sm font-black transition-elite disabled:opacity-50 ${selectedMode === mode ? 'border-primary bg-primary/10 text-primary' : 'border-border-main bg-background text-text-main hover:border-primary/40'}`}
           >
             {modeLabels[mode]}
           </button>
         ))}
       </div>
 
-      <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+      <div className="min-w-0 [overflow-wrap:anywhere] mt-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
         <label className="flex-1 text-xs font-black uppercase tracking-wide text-text-muted">
           PIN propriétaire
           <input
@@ -336,14 +336,14 @@ export const WorkstationModeAdminPanel = () => {
             value={ownerPin}
             onChange={(event) => setOwnerPin(event.target.value.replace(/\D/g, '').slice(0, 8))}
             disabled={!state.pinConfigured || busy !== null}
-            className="mt-2 min-h-11 w-full rounded-elite-sm border border-border-main bg-main-bg px-3 text-sm font-semibold text-main outline-none focus:border-primary disabled:opacity-50"
+            className="mt-2 min-h-11 w-full min-w-0 rounded-elite-sm border border-border-main bg-background px-3 text-sm font-semibold text-text-main outline-none focus:border-primary disabled:opacity-50"
           />
         </label>
         <button
           type="button"
           disabled={!state.pinConfigured || busy !== null || !ownerPin}
           onClick={saveMode}
-          className="self-end min-h-11 rounded-elite-sm bg-primary px-5 text-sm font-black text-card-bg transition-elite disabled:border disabled:border-border-main disabled:bg-main-bg disabled:text-text-muted disabled:opacity-100"
+          className="self-end min-h-11 rounded-elite-sm bg-primary px-5 text-sm font-black text-on-primary transition-elite disabled:border disabled:border-border-main disabled:bg-background disabled:text-text-muted disabled:opacity-100"
         >
           {busy === 'mode' ? 'Application…' : 'Appliquer ce mode'}
         </button>

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../../../../services/api';
+import { applyRuntimeTheme } from '../../../../services/runtimeTheme';
 import { safeStorage } from '../../../../hooks/useLocalStorage';
 import type { CabinetProfile, ContactsJson } from '../types';
 import toast from 'react-hot-toast';
@@ -185,63 +186,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       console.warn('Error fetching profile, using fallback', err);
     } finally {
       set({ loading: false, isDirty: false });
-      get().applyTheme({ persist: profileLoaded });
+      if (profileLoaded) get().applyTheme({ persist: true });
     }
   },
 
   applyTheme: (options = { persist: true }) => {
-    const { profile } = get();
-    const finalTheme = profile.selected_theme || 'elite';
-
-    document.body.dataset.theme = finalTheme === 'elite' ? '' : finalTheme;
-    document.documentElement.dataset.theme = finalTheme === 'elite' ? '' : finalTheme;
-    if (options.persist !== false) {
-      localStorage.setItem('digitalcrown_theme', finalTheme);
-    }
-
-    if (profile.primary_color) {
-      document.documentElement.style.setProperty('--primary', profile.primary_color);
-      document.body.style.setProperty('--primary', profile.primary_color);
-
-      const hex = profile.primary_color.replace('#', '');
-      const r = parseInt(hex.substr(0, 2), 16);
-      const g = parseInt(hex.substr(2, 2), 16);
-      const b = parseInt(hex.substr(4, 2), 16);
-      const yiq = ((r * 299) + (g * 587) + (b * 114)) / 1000;
-      const textOnPrimary = (yiq >= 128) ? '#0f172a' : '#ffffff';
-      document.documentElement.style.setProperty('--text-on-primary', textOnPrimary);
-      document.body.style.setProperty('--text-on-primary', textOnPrimary);
-    } else {
-      document.documentElement.style.removeProperty('--primary');
-      document.body.style.removeProperty('--primary');
-      document.documentElement.style.removeProperty('--text-on-primary');
-      document.body.style.removeProperty('--text-on-primary');
-    }
-
-    if (profile.secondary_color) {
-      document.documentElement.style.setProperty('--secondary', profile.secondary_color);
-    } else {
-      document.documentElement.style.removeProperty('--secondary');
-    }
-
-    if (profile.accent_color) {
-      document.documentElement.style.setProperty('--accent', profile.accent_color);
-    } else {
-      document.documentElement.style.removeProperty('--accent');
-    }
-
-    if (profile.app_accent_color) {
-      document.documentElement.style.setProperty('--app-accent', profile.app_accent_color);
-    }
-
-    let metaThemeColor = document.querySelector('meta[name="theme-color"]');
-    if (!metaThemeColor) {
-      metaThemeColor = document.createElement('meta');
-      metaThemeColor.setAttribute('name', 'theme-color');
-      document.head.appendChild(metaThemeColor);
-    }
-    const isDark = ['prestige', 'graphite'].includes(finalTheme);
-    metaThemeColor.setAttribute('content', isDark ? '#020617' : '#f8fafc');
+    applyRuntimeTheme(get().profile, options.persist !== false);
   },
 
   updateProfile: (updates) => {
@@ -249,7 +199,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       profile: { ...state.profile, ...updates },
       isDirty: true,
     }));
-    if (updates.selected_theme || updates.primary_color || updates.accent_color) {
+    if (['selected_theme', 'primary_color', 'secondary_color', 'accent_color', 'app_accent_color'].some(key => Object.prototype.hasOwnProperty.call(updates, key))) {
       get().applyTheme({ persist: false });
     }
   },

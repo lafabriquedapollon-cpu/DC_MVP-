@@ -1,4 +1,5 @@
 import { api } from './api';
+import type { RuntimeTheme } from './runtimeTheme';
 
 export type WorkstationExperience = 'cabinet' | 'station' | 'control_center';
 
@@ -12,6 +13,7 @@ export type WorkstationBootstrapState = {
   stationEscapeExpiresAt?: number | null;
   enrollmentRequired?: boolean;
   authenticated?: boolean;
+  theme?: RuntimeTheme | null;
   pinConfigured?: boolean;
   canManage?: boolean;
   canConfigurePin?: boolean;
