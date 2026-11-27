@@ -234,7 +234,59 @@ try{
      assert.equal(layout.cards.length,3);assert(layout.cards.every(c=>c.w>=44&&c.h>=44&&c.left>=0&&c.right<=width+1),'card clipping '+width);
      await captureIsolatedSurface(name);console.log('LOT00_HUB_RESPONSIVE_PASS '+JSON.stringify({name,...layout}));
    };
+
+   // Browser-rendered Hub accessibility evidence; no persistent style changes.
+   const a11yResults=[];
+   const auditHub=async(name,width)=>{
+     await call('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
+     await sleep(400);
+     const result=await evalPage('('+function(){
+       const root=document.querySelector('[data-v15-hub]');
+       const canvas=document.createElement('canvas');canvas.width=canvas.height=1;
+       const ctx=canvas.getContext('2d',{willReadFrequently:true});
+       const rgba=s=>{ctx.clearRect(0,0,1,1);ctx.fillStyle='transparent';ctx.fillStyle=s;ctx.fillRect(0,0,1,1);const p=ctx.getImageData(0,0,1,1).data;return [p[0]/255,p[1]/255,p[2]/255,p[3]/255]};
+       const over=(f,b)=>[f[0]*f[3]+b[0]*(1-f[3]),f[1]*f[3]+b[1]*(1-f[3]),f[2]*f[3]+b[2]*(1-f[3]),1];
+       const lum=p=>p.slice(0,3).map(x=>x<=.04045?x/12.92:((x+.055)/1.055)**2.4).reduce((a,x,i)=>a+x*[.2126,.7152,.0722][i],0);
+       const ratio=(a,b)=>(Math.max(lum(a),lum(b))+.05)/(Math.min(lum(a),lum(b))+.05);
+       const textNodes=()=>{const nodes=[];const w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);let n;while(n=w.nextNode()){const e=n.parentElement;if(!n.textContent.trim()||!e||e.closest('script,style,[aria-hidden="true"],:disabled')||!e.getClientRects().length||getComputedStyle(e).visibility==='hidden')continue;nodes.push(n)}return nodes};
+       const nodes=textNodes();const contrast=[];let imageBackground=0;
+       for(const n of nodes){
+         const e=n.parentElement,s=getComputedStyle(e),chain=[];for(let p=e;p;p=p.parentElement)chain.unshift(p);
+         // CSS background-color compositing, not a pixel audit of gradients/images.
+         let bg=[1,1,1,1],uncertain=false;
+         for(const p of chain){const x=getComputedStyle(p);if(x.backgroundImage!=='none')uncertain=true;const c=rgba(x.backgroundColor);bg=over(c,bg);if(c[3]===1&&x.backgroundImage==='none')uncertain=false}
+         if(uncertain){imageBackground++;continue}
+         const foreground=over(rgba(s.color),bg),large=parseFloat(s.fontSize)>=24||(parseFloat(s.fontSize)>=18.667&&Number(s.fontWeight)>=700),minimum=large?3:4.5;
+         const actual=ratio(foreground,bg);contrast.push({text:n.textContent.trim().slice(0,85),ratio:Number(actual.toFixed(3)),minimum,pass:actual+0.001>=minimum});
+       }
+       const elements=[...new Set(nodes.map(n=>n.parentElement))];const original=elements.map(e=>({e,style:e.getAttribute('style'),size:parseFloat(getComputedStyle(e).fontSize),line:parseFloat(getComputedStyle(e).lineHeight)}));
+       // 200% text-only enlargement: preserve other dimensions and all original inline styles.
+       for(const p of original){p.e.style.setProperty('font-size',2*p.size+'px','important');if(Number.isFinite(p.line))p.e.style.setProperty('line-height',2*p.line+'px','important')}
+       const clipped=[];for(const n of textNodes()){
+         const range=document.createRange();range.selectNodeContents(n);
+         for(const rect of range.getClientRects()){
+           if(rect.width===0||rect.height===0)continue;
+           let bad=rect.left<-.5||rect.right>document.documentElement.clientWidth+1;
+           for(let p=n.parentElement;p&&p!==document.body;p=p.parentElement){
+             const s=getComputedStyle(p),r=p.getBoundingClientRect();
+             if(['hidden','clip'].includes(s.overflowX)&&(rect.left<r.left-1||rect.right>r.right+1))bad=true;
+             if(['hidden','clip'].includes(s.overflowY)&&(rect.top<r.top-1||rect.bottom>r.bottom+1))bad=true;
+           }
+           if(bad){clipped.push(n.textContent.trim().slice(0,85));break}
+         }
+       }
+       const zoom={documentWidth:document.documentElement.scrollWidth,viewport:document.documentElement.clientWidth,clipped:[...new Set(clipped)],allDoubled:original.every(p=>Math.abs(parseFloat(getComputedStyle(p.e).fontSize)-2*p.size)<.2)};
+       // Keep screenshot of actual zoom state until Node captures it; restore via dedicated cleanup.
+       window.__dcHubAuditRestore=()=>{for(const p of original){if(p.style===null)p.e.removeAttribute('style');else p.e.setAttribute('style',p.style)}delete window.__dcHubAuditRestore};
+       return {textCount:nodes.length,contrast,imageBackground,zoom};
+     }.toString()+')()');
+     try{await capture('r9-'+name+'-'+width+'-text200');}finally{await evalPage('window.__dcHubAuditRestore?.()')}
+     const pass=result.contrast.length>0&&result.contrast.every(x=>x.pass)&&result.zoom.allDoubled&&result.zoom.clipped.length===0&&result.zoom.documentWidth<=result.zoom.viewport+1;
+     a11yResults.push({name,width,pass,...result});
+     console.log('LOT00_HUB_A11Y '+JSON.stringify({name,width,pass,textCount:result.textCount,contrastCount:result.contrast.length,contrastFailures:result.contrast.filter(x=>!x.pass),imageBackground:result.imageBackground,zoom:result.zoom}));
+   };
    for(const width of [390,430,768,1280])await responsiveHub(width,900,'r8-neutral-'+width);
+   for(const width of [390,768,1280])await auditHub('neutral',width);
    await call('Emulation.clearDeviceMetricsOverride');
    await call('Emulation.setDeviceMetricsOverride',{width:768,height:900,deviceScaleFactor:1,mobile:false});
    assert(await evalPage('document.documentElement.scrollWidth<=innerWidth'));await captureIsolatedSurface('02-fresh-hub-768');
@@ -308,6 +360,10 @@ try{
    await observe('theme-b-cabinet',themeB);
    await go('/hub?select=1');await shown(hub);await observe('theme-b-hub-reload',themeB);
    for(const width of [390,430,768,1280])await responsiveHub(width,900,'r8-custom-'+width);
+   for(const width of [390,768,1280])await auditHub('custom',width);
+   fs.writeFileSync(evidence+'/hub-a11y.json',JSON.stringify(a11yResults,null,2));
+   console.log('LOT00_HUB_A11Y_MATCHED '+a11yResults.filter(x=>x.pass).length+'/'+a11yResults.length);
+   assert(a11yResults.every(x=>x.pass),'Hub contrast or text enlargement divergence');
    await call('Emulation.clearDeviceMetricsOverride');
    fs.writeFileSync(evidence+'/theme-baseline.json',JSON.stringify(observations,null,2));
    console.log('LOT00_THEME_BASELINE_MATCHED '+observations.filter(o=>o.pass).length+'/'+observations.length);
