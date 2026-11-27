@@ -175,8 +175,10 @@ try{
  }else{
    await go('/hub');await shown(hub);
    for(const id of ['cabinet','station','control'])await shown('[data-hub-experience="'+id+'"]');
+   await wait('official Hub logo loaded',()=>evalPage('(()=>{const e=document.querySelector("[data-hub-brand-logo]");return !!e&&e.complete&&e.naturalWidth>0&&e.alt==="Digital Crown"})()'));
    const fresh=await browserAPI('/api/workstation/bootstrap');
-   assert.equal(fresh.status,200);assert.equal(fresh.body.authenticated,false);assert.equal(fresh.body.workstationId,null);assert.equal(fresh.body.defaultExperience,null);
+   assert.equal(fresh.status,200);assert.equal(fresh.body.authenticated,false);assert.equal(fresh.body.workstationId,null);assert.equal(fresh.body.defaultExperience,null);assert.equal(fresh.body.theme??null,null);
+   assert.equal(await evalPage('getComputedStyle(document.body).getPropertyValue("--primary").trim().toLowerCase()'),'#003380');
    assert.equal((await api('/api/patients/')).status,401);
    await captureIsolatedSurface('01-fresh-hub-1440');
    await call('Emulation.setDeviceMetricsOverride',{width:768,height:900,deviceScaleFactor:1,mobile:false});
@@ -238,6 +240,10 @@ try{
    await mode('station');await go('/station');await shown(station);
    await observe('theme-a-station-locked',themeA);
    const clinicDenied=await browserAPI('/api/clinics/me');assert.equal(clinicDenied.status,423);
+   const bound=await browserAPI('/api/workstation/bootstrap');assert.equal(bound.status,200);assert.deepEqual(Object.keys(bound.body.theme).sort(),['accent_color','app_accent_color','primary_color','secondary_color','selected_theme']);
+   const anonymous=await api('/api/workstation/bootstrap');assert.equal(anonymous.status,200);assert.equal(anonymous.body.authenticated,false);assert.equal(anonymous.body.theme??null,null);
+   const other=await login('ci-other@example.com');const mismatched=await api('/api/workstation/bootstrap',{headers:withWorkstation(other.access_token,await workstationCookie())});assert.equal(mismatched.status,200);assert.equal(mismatched.body.theme??null,null);
+   console.log('LOT00_THEME_PROJECTION_BOUNDARY_PASS');
    const exit=await browserAPI('/api/workstation/station/escape','POST',{ownerPin:pin});assert.equal(exit.status,200);
    await go('/hub?select=1');await shown(hub);await mode('cabinet');
    await setTheme(themeB);
@@ -250,7 +256,7 @@ try{
    console.log('LOT00_THEME_BASELINE_MATCHED '+observations.filter(o=>o.pass).length+'/'+observations.length);
    // Station is deliberately reported separately: locked clinic API remains forbidden.
    // Baseline is diagnostic; workflow gate below will fail on authenticated divergence.
-   assert(observations.filter(o=>o.name!=='theme-a-station-locked').every(o=>o.pass),'Authenticated theme inheritance divergence');
+   assert(observations.every(o=>o.pass),'Authenticated theme inheritance divergence');
 
  }
 }finally{ws.close()}

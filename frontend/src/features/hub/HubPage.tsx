@@ -3,6 +3,7 @@ import { Building2, MonitorCog, TabletSmartphone, ArrowRight, WifiOff } from 'lu
 import { useNavigate } from 'react-router-dom';
 import { API_BASE, getRuntimeAuthToken } from '../../services/api';
 import { WorkstationModeAdminPanel } from './WorkstationModeAdminPanel';
+import Logo from '../../assets/logo.png';
 
 type HubIdentity = { name: string; type: string; badge: string };
 
@@ -54,8 +55,9 @@ export const HubPage = () => {
     <div aria-hidden="true" className="pointer-events-none absolute -right-44 top-32 h-96 w-96 rounded-full bg-primary/5 blur-3xl" />
     <section className="relative z-10 mx-auto w-full max-w-6xl">
       <div className="mb-6 sm:mb-8 text-center">
-        <div className="inline-flex items-center gap-2 rounded-elite-sm border border-border-main bg-card-bg px-4 py-2 text-xs font-black uppercase tracking-widest text-primary shadow-elite">
-          Digital Crown Hub
+        <div className="mx-auto flex w-fit flex-col items-center gap-2 rounded-elite-sm border border-border-main bg-card-bg px-5 py-3 shadow-elite">
+          <img data-hub-brand-logo src={Logo} alt="Digital Crown" className="h-20 w-44 object-contain" />
+          <span className="text-xs font-black uppercase tracking-widest text-primary">Hub</span>
         </div>
         <h1 className="mt-5 font-outfit text-3xl sm:text-4xl lg:text-5xl font-black tracking-tight">{identity.name}</h1>
         <p className="mt-3 text-sm font-bold text-text-muted">{identity.type} · Choisissez l’espace de ce poste</p>

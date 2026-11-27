@@ -23,6 +23,7 @@ import { authService } from './services/auth';
 import { CabinetAuthTransitionBoundary } from './components/Auth/CabinetAuthTransitionBoundary';
 import { PatientDraftRouteGuard } from './features/patients/PatientDraftRouteGuard';
 import { workstationModeService } from './services/workstationMode';
+import { applyRuntimeTheme } from './services/runtimeTheme';
 
 // Chargés à la demande
 const PatientList     = lazy(() => import('./features/patients/PatientList').then(m => ({ default: m.PatientList })));
@@ -408,11 +409,6 @@ function App() {
 
   // Application globale du thème (Persistance) et Paramètres IA
   useEffect(() => {
-    const savedTheme = localStorage.getItem('digitalcrown_theme');
-    if (savedTheme) {
-      document.body.dataset.theme = savedTheme;
-    }
-
     const applySettings = () => {
       // Mode Performance
       const isPerfMode = safeStorage.get('performanceMode') === 'true';
@@ -441,6 +437,12 @@ function App() {
 // Keep the existing route table intact inside a single data-router root.
 // The draft exit guard must mount ABOVE nested Routes and MainLayout animations.
 function CabinetRouteTree() {
+  const location = useLocation();
+  useEffect(() => {
+    if (['/login','/register','/landing','/download','/activate','/welcome','/terms','/privacy'].includes(location.pathname)) {
+      applyRuntimeTheme(null);
+    }
+  }, [location.pathname]);
   return (
     <PatientDraftRouteGuard>
       <OfflineQueueViewer />

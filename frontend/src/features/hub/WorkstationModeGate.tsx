@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
+import { applyRuntimeTheme } from '../../services/runtimeTheme';
 import {
   workstationModeService,
   type WorkstationBootstrapState,
@@ -30,6 +31,8 @@ export const WorkstationModeGate = ({ target, children }: Props) => {
   useEffect(() => {
     let active = true;
     let expiryTimer: number | undefined;
+    let readSequence = 0;
+    let appliedTheme: string | undefined;
     setResolved(false);
     setResolvedKey(null);
 
@@ -47,19 +50,28 @@ export const WorkstationModeGate = ({ target, children }: Props) => {
     };
 
     const readState = async () => {
+      const sequence = ++readSequence;
       try {
         const next = target === 'protected'
           ? await workstationModeService.getState()
           : await workstationModeService.getBootstrapState();
-        if (!active) return;
+        if (!active || sequence !== readSequence) return;
+        const theme = next.theme ?? null;
+        const key = JSON.stringify(theme);
+        if (key !== appliedTheme) {
+          applyRuntimeTheme(theme);
+          appliedTheme = key;
+        }
         setState(next);
         scheduleEscapeExpiry(next);
       } catch {
-        if (!active) return;
+        if (!active || sequence !== readSequence) return;
+        applyRuntimeTheme(null);
+        appliedTheme = JSON.stringify(null);
         setState(null);
         scheduleEscapeExpiry(null);
       } finally {
-        if (active) {
+        if (active && sequence === readSequence) {
           setResolvedKey(decisionKey);
           setResolved(true);
         }
