@@ -1,0 +1,67 @@
+name: J5-04 integrated certification chain (INERT LAB ONLY)
+on:
+  push:
+    branches: [ci/j5-04-certification-chain-20261127]
+permissions: {}
+jobs:
+  inert-attestation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install verifier dependencies
+        run: python -m pip install --disable-pip-version-check --only-binary=:all: 'webauthn==3.0.0' 'cryptography==49.0.0'
+      - name: Create exact inert subject
+        run: python -B -m scripts.ci_j5_04_certification_chain make
+      - name: Attest only inert LAB text
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: ${{ runner.temp }}/j5-04-inert-subject.txt
+      - name: Cleanup
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/j5-04-inert-subject.txt"
+  verify-chain:
+    needs: inert-attestation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify exact delta
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git diff --name-only 656458aea1c5ff4c44596de49c141a2d72dd31af HEAD | sort | paste -sd ' ' -)" = '.github/workflows/j5-04-certification-chain.yml docs/J5-04-CERTIFICATION-CHAIN.md scripts/ci_j5_04_certification_chain.py'
+          test ! -e .github/workflows/cabinet-release-certification.yml
+      - name: Install qualified LAB dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends swtpm tpm2-tools libtss2-tcti-swtpm0t64
+          dpkg-query -W swtpm tpm2-tools libtss2-tcti-swtpm0t64
+          python -m pip install --disable-pip-version-check --only-binary=:all: 'webauthn==3.0.0' 'cryptography==49.0.0'
+          python -m pip check
+      - name: Reconstruct inert subject independently
+        run: python -B -m scripts.ci_j5_04_certification_chain make
+      - name: Verify actual GitHub provenance and anchored synthetic OWNER receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -B -m scripts.ci_j5_04_certification_chain verify
+      - name: Cleanup
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/j5-04-inert-subject.txt"
