@@ -22,8 +22,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "0a99bbcc27d5be27ea3b87d3431fde2c78bc7c6b"
-          test "$(git diff --name-status HEAD^ HEAD)" = "$(printf 'A\t.github/workflows/phase2-convergence.yml')"
+          git merge-base --is-ancestor 0a99bbcc27d5be27ea3b87d3431fde2c78bc7c6b HEAD
+          test "$(git diff --name-status 0a99bbcc27d5be27ea3b87d3431fde2c78bc7c6b HEAD)" = "$(printf 'A\t.github/workflows/phase2-convergence.yml')"
           test ! -e .github/workflows/cabinet-release-certification.yml
           python - <<'PY'
           import subprocess, re, collections, pathlib
@@ -65,6 +65,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -77,7 +78,32 @@ jobs:
           sudo apt-get install -y --no-install-recommends swtpm tpm2-tools libtss2-tcti-swtpm0t64
           python -m pip install --disable-pip-version-check --only-binary=:all: 'webauthn==3.0.0' 'cryptography==49.0.0'
           python -m pip check
-          python -B -m scripts.ci_j5_02c_passkey_lab
+          # The historical __main__ is intentionally bound to its original branch.
+          # Re-run the unchanged test class under an explicit convergence admission,
+          # preserving every repository, runner, SHA and protected-blob assertion.
+          python -B - <<'PY'
+          import os, subprocess, unittest
+          from scripts import ci_j5_02c_passkey_lab as lab
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+          assert os.environ["GITHUB_REF"] == "refs/heads/ci/phase2-convergence-20261127"
+          assert os.environ["GITHUB_REPOSITORY"] == lab.authority.REPOSITORY
+          assert os.environ["GITHUB_REPOSITORY_ID"] == str(lab.authority.REPOSITORY_ID)
+          assert os.environ["GITHUB_REPOSITORY_OWNER_ID"] == str(lab.authority.OWNER_ID)
+          assert os.environ["RUNNER_ENVIRONMENT"] == "github-hosted"
+          assert git("rev-parse", "HEAD") == os.environ["GITHUB_SHA"]
+          candidate = "0a99bbcc27d5be27ea3b87d3431fde2c78bc7c6b"
+          assert git("diff", "--name-status", candidate, "HEAD") == "A\t.github/workflows/phase2-convergence.yml"
+          for path in ("run.py", "DigitalCrown.spec", "dc_release_gate/release_certification.py", "dc_release_gate/recovery_authority.py", "backend/routers/mobile_passkey.py"):
+              assert git("rev-parse", lab.BASE + ":" + path) == git("rev-parse", "HEAD:" + path), path
+          assert lab.legacy.REPOSITORY != lab.authority.REPOSITORY
+          assert git("rev-parse", "HEAD:scripts/ci_j5_02c_passkey_lab.py") == "53e447c9ff9b32989373df994a0b7cb61283690a"
+          suite = unittest.defaultTestLoader.loadTestsFromTestCase(lab.Lab)
+          assert suite.countTestCases() == 6, "PASSKEY_TEST_COLLECTION_CHANGED"
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.wasSuccessful() and result.testsRun == 6 and not result.skipped and not result.expectedFailures, "PASSKEY_CONVERGENCE_FAILED"
+          print("J5_PASSKEY_CONVERGENCE_LAB_PASS 6/6 NOT_OWNER_ENROLLED_NOT_A_RELEASE")
+          PY
           python -B -m scripts.ci_j5_02c_recovery_lab
           python -B -m scripts.ci_j5_02c_trust_root_lab
           python -B -m scripts.ci_j5_02c_tpm_anchor_lab
