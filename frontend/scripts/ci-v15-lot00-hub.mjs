@@ -211,5 +211,46 @@ try{
    await go('/hub?select=1');await shown(hub);await captureIsolatedSurface('07-recovered-hub');
    await assertPwa();
    console.log('LOT00_FRESH_DISPATCH_MODES_STATION_NEGATIVES_PASS');
+   // Diagnostic baseline: use the real persisted clinic API, never inject CSS/storage.
+   const themeA={selected_theme:'emerald',primary_color:'#176B58',secondary_color:'#294C60',accent_color:'#C79452'};
+   const themeB={selected_theme:'rose',primary_color:'#852B56',secondary_color:'#59384F',accent_color:'#B77845'};
+   const setTheme=async (p)=>{
+     const r=await browserAPI('/api/clinics/me','PUT',p);
+     assert.equal(r.status,200,'persist synthetic theme');
+     const q=await browserAPI('/api/clinics/me');
+     assert.equal(q.status,200);
+     for(const k of Object.keys(p))assert.equal(String(q.body[k]).toLowerCase(),p[k].toLowerCase(),k);
+   };
+   const observations=[];
+   const tokens=()=>evalPage('(()=>{const e=document.querySelector("main[data-v15-hub],main[data-workstation-experience]")||document.body;const read=x=>{const c=getComputedStyle(x);return Object.fromEntries(["--primary","--secondary","--accent","--bg-medical-pearl","--card-bg","--text-main","--border-color"].map(k=>[k,c.getPropertyValue(k).trim().toLowerCase()]))};const p=e.querySelector(".text-primary");return {root:read(document.documentElement),surface:read(e),rootTheme:document.documentElement.dataset.theme||"",bodyTheme:document.body.dataset.theme||"",primaryText:p?getComputedStyle(p).color:null,viewport:[innerWidth,innerHeight]}})()');
+   const matches=(o,p)=>o.rootTheme===p.selected_theme&&o.bodyTheme===p.selected_theme&&['root','surface'].every(k=>o[k]['--primary']===p.primary_color.toLowerCase()&&o[k]['--secondary']===p.secondary_color.toLowerCase()&&o[k]['--accent']===p.accent_color.toLowerCase());
+   const observe=async(name,p)=>{await sleep(2000);const o=await tokens();const pass=matches(o,p);observations.push({name,pass,...o});console.log('LOT00_THEME_OBSERVATION '+JSON.stringify({name,pass,...o}));await capture(name);return pass};
+   await setTheme(themeA);
+   await go('/hub?select=1');await shown(hub);await observe('theme-a-hub-direct',themeA);
+   await call('Emulation.setDeviceMetricsOverride',{width:768,height:900,deviceScaleFactor:1,mobile:false});
+   await observe('theme-a-hub-768',themeA);await call('Emulation.clearDeviceMetricsOverride');
+   await go('/control-center');await shown(control);await observe('theme-a-control-direct',themeA);
+   await go('/dashboard');await pathIs('/dashboard');
+   // Allow the existing MainLayout profile request to complete; record if absent.
+   try{await wait('cabinet theme A',async()=>matches(await tokens(),themeA),10000)}catch{}
+   await observe('theme-a-cabinet',themeA);
+   await go('/hub?select=1');await shown(hub);await observe('theme-a-hub-reload',themeA);
+   await mode('station');await go('/station');await shown(station);
+   await observe('theme-a-station-locked',themeA);
+   const clinicDenied=await browserAPI('/api/clinics/me');assert.equal(clinicDenied.status,423);
+   const exit=await browserAPI('/api/workstation/station/escape','POST',{ownerPin:pin});assert.equal(exit.status,200);
+   await go('/hub?select=1');await shown(hub);await mode('cabinet');
+   await setTheme(themeB);
+   await go('/hub?select=1');await shown(hub);await observe('theme-b-hub-direct',themeB);
+   await go('/control-center');await shown(control);await observe('theme-b-control-direct',themeB);
+   await go('/dashboard');await pathIs('/dashboard');try{await wait('cabinet theme B',async()=>matches(await tokens(),themeB),10000)}catch{}
+   await observe('theme-b-cabinet',themeB);
+   await go('/hub?select=1');await shown(hub);await observe('theme-b-hub-reload',themeB);
+   fs.writeFileSync(evidence+'/theme-baseline.json',JSON.stringify(observations,null,2));
+   console.log('LOT00_THEME_BASELINE_MATCHED '+observations.filter(o=>o.pass).length+'/'+observations.length);
+   // Station is deliberately reported separately: locked clinic API remains forbidden.
+   // Baseline is diagnostic; workflow gate below will fail on authenticated divergence.
+   assert(observations.filter(o=>o.name!=='theme-a-station-locked').every(o=>o.pass),'Authenticated theme inheritance divergence');
+
  }
 }finally{ws.close()}
