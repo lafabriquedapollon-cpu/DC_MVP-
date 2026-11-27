@@ -223,6 +223,19 @@ try{
    assert.equal(await evalPage('getComputedStyle(document.body).getPropertyValue("--primary").trim().toLowerCase()'),'#003380');
    assert.equal((await api('/api/patients/')).status,401);
    await captureIsolatedSurface('01-fresh-hub-1440');
+   // Original PNG: 677x369, visible alpha bounding box 354x194.
+   const responsiveHub=async(width,height,name)=>{
+     await call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
+     await sleep(300);
+     const layout=await evalPage('(()=>{const img=document.querySelector("[data-hub-brand-logo]");const r=img.getBoundingClientRect();const cards=Array.from(document.querySelectorAll("[data-hub-experience]"));return {width:innerWidth,scrollWidth:document.documentElement.scrollWidth,logoWidth:r.width*354/677,logoHeight:r.height*194/369,logoNaturalWidth:img.naturalWidth,logoNaturalHeight:img.naturalHeight,cards:cards.map(e=>{const r=e.getBoundingClientRect();return {w:r.width,h:r.height,left:r.left,right:r.right}})}})()');
+     assert.equal(layout.width,width);assert(layout.scrollWidth<=width+1,'document overflow '+width);
+     assert.equal(layout.logoNaturalWidth,677);assert.equal(layout.logoNaturalHeight,369);
+     assert(layout.logoWidth>=140&&layout.logoHeight>=75,'visible logo too small '+width);
+     assert.equal(layout.cards.length,3);assert(layout.cards.every(c=>c.w>=44&&c.h>=44&&c.left>=0&&c.right<=width+1),'card clipping '+width);
+     await captureIsolatedSurface(name);console.log('LOT00_HUB_RESPONSIVE_PASS '+JSON.stringify({name,...layout}));
+   };
+   for(const width of [390,430,768,1280])await responsiveHub(width,900,'r8-neutral-'+width);
+   await call('Emulation.clearDeviceMetricsOverride');
    await call('Emulation.setDeviceMetricsOverride',{width:768,height:900,deviceScaleFactor:1,mobile:false});
    assert(await evalPage('document.documentElement.scrollWidth<=innerWidth'));await captureIsolatedSurface('02-fresh-hub-768');
    await call('Emulation.clearDeviceMetricsOverride');
@@ -294,6 +307,8 @@ try{
    await go('/dashboard');await pathIs('/dashboard');try{await wait('cabinet theme B',async()=>matches(await tokens(),themeB),10000)}catch{}
    await observe('theme-b-cabinet',themeB);
    await go('/hub?select=1');await shown(hub);await observe('theme-b-hub-reload',themeB);
+   for(const width of [390,430,768,1280])await responsiveHub(width,900,'r8-custom-'+width);
+   await call('Emulation.clearDeviceMetricsOverride');
    fs.writeFileSync(evidence+'/theme-baseline.json',JSON.stringify(observations,null,2));
    console.log('LOT00_THEME_BASELINE_MATCHED '+observations.filter(o=>o.pass).length+'/'+observations.length);
    // Station is deliberately reported separately: locked clinic API remains forbidden.

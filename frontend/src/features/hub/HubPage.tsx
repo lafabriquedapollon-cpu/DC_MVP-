@@ -55,8 +55,10 @@ export const HubPage = () => {
     <div aria-hidden="true" className="pointer-events-none absolute -right-44 top-32 h-96 w-96 rounded-full bg-primary/5 blur-3xl" />
     <section className="relative z-10 mx-auto w-full max-w-6xl">
       <div className="mb-6 sm:mb-8 text-center">
-        <div className="mx-auto flex w-fit flex-col items-center gap-2 rounded-elite-sm border border-border-main bg-card-bg px-5 py-3 shadow-elite">
-          <img data-hub-brand-logo src={Logo} alt="Digital Crown" className="h-20 w-44 object-contain" />
+        <div className="mx-auto flex w-fit flex-col items-center gap-1 rounded-elite-sm border border-border-main bg-card-bg px-5 py-2 shadow-elite">
+          <div className="relative h-24 w-52 max-w-full overflow-hidden">
+            <img data-hub-brand-logo src={Logo} alt="Digital Crown" className="absolute left-1/2 top-1/2 h-auto w-[300px] max-w-none -translate-x-1/2 -translate-y-1/2" />
+          </div>
           <span className="text-xs font-black uppercase tracking-widest text-primary">Hub</span>
         </div>
         <h1 className="mt-5 font-outfit text-3xl sm:text-4xl lg:text-5xl font-black tracking-tight">{identity.name}</h1>
