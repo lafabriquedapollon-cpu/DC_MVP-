@@ -294,32 +294,51 @@ def wait_absent(dest, root, log):
 
 
 def wait_inno_uninstall_helper(root):
-    """Allow the native Inno self-removal helper to finish in the lab TEMP.
-
-    Do not delete a live helper, ignore cleanup errors or touch another TEMP.
-    A timeout is a real closeout failure.
-    """
+    """Verify DELETE sharing on ordinary lab helper files; folder may remain."""
+    import ctypes
+    from ctypes import wintypes
     runner=Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
     temp=root/"temp"
     require(root.parent==runner and root.name.startswith("dc-installer-rehearsal-")
             and ordinary(root) and temp.is_dir() and ordinary(temp),
             "UNINSTALL_HELPER_SCOPE_REFUSED")
+    kernel=ctypes.WinDLL("kernel32",use_last_error=True)
+    open_file=kernel.CreateFileW
+    open_file.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,ctypes.c_void_p,wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
+    open_file.restype=wintypes.HANDLE
+    close=kernel.CloseHandle
+    close.argtypes=[wintypes.HANDLE]
+    close.restype=wintypes.BOOL
+    invalid=ctypes.c_void_p(-1).value
     deadline=time.monotonic()+60
     while True:
         require(ordinary(temp),"UNINSTALL_HELPER_TEMP_REPARSE")
-        entries=list(temp.iterdir())
-        pending=[]
-        for p in entries:
-            if re.fullmatch(r"is-[A-Za-z0-9]+-uninstall\.tmp",p.name,re.IGNORECASE):
+        pending=False
+        for p in list(temp.iterdir()):
+            if not re.fullmatch(r"is-[A-Za-z0-9]+-uninstall\.tmp",p.name,re.IGNORECASE):
+                continue
+            try:
+                require(ordinary(p) and p.is_dir(),"UNINSTALL_HELPER_PATH_REFUSED")
+                children=list(p.iterdir())
+            except FileNotFoundError:
+                continue
+            for child in children:
                 try:
-                    require(ordinary(p) and p.is_dir(),"UNINSTALL_HELPER_PATH_REFUSED")
+                    require(ordinary(child) and child.is_file(),"UNINSTALL_HELPER_ENTRY_REFUSED")
                 except FileNotFoundError:
                     continue
-                pending.append(p)
+                # DELETE access, all sharing flags, OPEN_EXISTING, no delete-on-close.
+                handle=open_file(str(child),0x10000,7,None,3,0x00200000,None)
+                if handle==invalid:
+                    error=ctypes.get_last_error()
+                    if error in (2,3):continue
+                    if error in (32,33):pending=True;continue
+                    raise OSError(error,"UNINSTALL_HELPER_OPEN_FAILED")
+                require(close(handle),"UNINSTALL_HELPER_CLOSE_FAILED")
         if not pending:
-            print("R02_INSTALLER_NATIVE_HELPER_EXIT_PASS",flush=True)
+            print("R02_INSTALLER_NATIVE_HELPER_DELETE_SHARING_PASS",flush=True)
             return
-        require(time.monotonic()<deadline,"UNINSTALL_HELPER_EXIT_TIMEOUT")
+        require(time.monotonic()<deadline,"UNINSTALL_HELPER_SHARING_TIMEOUT")
         time.sleep(.25)
 
 
