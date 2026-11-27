@@ -32,7 +32,7 @@ def run(command, env, cwd, expected, timeout):
             values = json.loads(line.split("=", 1)[1])
             require(all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", v) for v in values), "INVALID_IMPORT_NAME")
             observed.update(values)
-        elif re.fullmatch(r"J5_03E_[A-Z_]+(?: [A-Za-z0-9_.=+-]+)?", line):
+        elif re.fullmatch(r"J5_03E_[A-Z_]+(?: [A-Za-z0-9_.=+-]+)*", line):
             print(line, flush=True)
         elif re.fullmatch(r"(?:R02_BACKEND_[A-Z_-]+|R02_DESKTOP_[A-Z_]+|R02_INSTALLER_[A-Z_]+|R02_RELOCATED_NATIVE_[A-Z_]+)(?: [A-Za-z0-9_.=+-]+)*", line) or re.fullmatch(r"(?:FASTAPI_IMPORT_PASS|OPERATOR_BASELINE_METADATA_PASS|PRINT_AUDIT_[A-Z_]+|SQLCIPHER_WRONG_KEY_DENIED_PASS|NONEMPTY_BASELINE_REFUSED_PASS|SYNTHETIC_FIXTURE_FK_INTEGRITY_PASS|FRESH_SQLCIPHER_BASELINE_PASS|SYNTHETIC_FIXTURE_PASS)(?: [A-Za-z0-9_.=+-]+)*", line):
             print(line, flush=True)

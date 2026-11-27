@@ -40,11 +40,13 @@ def exercise_restore(root, db_path):
         c.execute(models.ZKAPairingToken.__table__.insert().values(token="synthetic-j5-pair",employer_id=1,user_id=1,public_id="synthetic-j5",master_key="SYNTHETIC_NOT_SECRET",expires_at=now+timedelta(minutes=30)))
         c.execute(models.MobilePairedDevice.__table__.insert().values(device_id="synthetic-j5-device",user_id=1,employer_id=1,client_public_key_hex="ab"*65,refresh_jti="synthetic-j5-refresh"))
     database.engine.dispose()
+    print("J5_03E_FIXTURE_SEEDED_PASS",flush=True)
     marker=media/"uploads"/"restore-proof.bin"
     marker.write_bytes(b"SYNTHETIC_AFTER")
     phrase=secrets.token_hex(32)
     package=root/"synthetic.dcbundle"
     CabinetBundleService.create_bundle(package,phrase)
+    print("J5_03E_PORTABLE_EXPORT_PASS",flush=True)
     with database.engine.begin() as c:
         c.execute(models.CabinetConfig.__table__.update().where(models.CabinetConfig.__table__.c.owner_id==1).values(nom_cabinet="BEFORE"))
     database.engine.dispose()
@@ -52,6 +54,7 @@ def exercise_restore(root, db_path):
     vault=root/"license_vault.bin";vault.write_bytes(b"INERT_BEFORE_VAULT")
     converted=root/"restore.zip"
     CabinetBundleService.to_local_guided_restore_archive(package,phrase,converted)
+    print("J5_03E_CONVERSION_PASS",flush=True)
     pre=Service.preflight_file(converted,original_name="synthetic.zip",owner_employer_id=1)
     require(pre["compatible"] and pre["status"]=="preflight_ready" and pre["restore_media"],"J5_03E_PREFLIGHT_FAILED")
     rid=pre["restore_id"]
@@ -60,6 +63,7 @@ def exercise_restore(root, db_path):
     else: raise RuntimeError("J5_03E_WRONG_OWNER_ACCEPTED")
     require(Service.prepare(rid,owner_employer_id=1)["status"]=="prepared","J5_03E_PREPARE_FAILED")
     database.engine.dispose()
+    print("J5_03E_PREPARED_PASS",flush=True)
     job=Service.get_job(rid)
     require(Path(job["target_db_path"])==db_path and job["active_driver"]=="pysqlcipher","J5_03E_JOB_TARGET_MISMATCH")
     # LAB controller schedules only the already prepared synthetic job. Never
@@ -78,6 +82,21 @@ def exercise_restore(root, db_path):
     # Exercise real PID wait with an actual exited process.
     parent=launch("restore-fail-health")
     require(parent.wait(timeout=60)==0,"J5_03E_PARENT_EXIT_FAILED")
+    os.environ["DC_RESTORE_PARENT_PID"]=str(parent.pid)
+    # Windows platform adapter normally resolves bare tasklist through PATH.
+    # LAB equivalent binds the absolute System32 binary, exact observed PID
+    # and working directory to the audit allowlist; never a generic shell.
+    def pid_alive(pid):
+        require(pid==parent.pid,"J5_03E_PID_MISMATCH")
+        exe=str(Path(os.environ["SystemRoot"])/"System32"/"tasklist.exe")
+        result=subprocess.run([exe,"/FI",f"PID eq {pid}","/FO","CSV","/NH"],
+                              executable=exe,cwd=str(root),capture_output=True,text=True,
+                              check=False,creationflags=subprocess.CREATE_NO_WINDOW)
+        require(result.returncode==0,"J5_03E_TASKLIST_FAILED")
+        return f'"{pid}"' in result.stdout
+    Worker._pid_alive=staticmethod(pid_alive)
+    require(not pid_alive(parent.pid),"J5_03E_PARENT_STILL_ALIVE")
+    print("J5_03E_EXACT_PID_PROBE_PASS",flush=True)
     calls=0
     smoke=Worker._smoke_check
     def launch_adapter(executable):
@@ -93,7 +112,14 @@ def exercise_restore(root, db_path):
     try:
         rc=Worker.run(rid,parent.pid,sys.executable)
         final=Service.get_job(rid)
-        require((rc,final["status"],final.get("rollback"))==((0,"success","not_needed") if scenario=="success" else (2,"rolled_back","passed")),"J5_03E_WORKER_STATUS_"+str(rc)+"_"+str(final.get("status")))
+        status=final.get("status")
+        if status not in {"success","rolled_back","rollback_failed","applying","restarting","scheduled","rolling_back"}: status="other"
+        print("J5_03E_WORKER_RESULT code="+str(rc)+" status="+status+" launches="+str(calls),flush=True)
+        for step in final.get("steps", []):
+            state=step.get("state")
+            if state in {"preflight","prepared","scheduled","applying","restarting","rolling_back","success","rolled_back","rollback_failed"}:
+                print("J5_03E_WORKER_STEP state="+state,flush=True)
+        require((rc,final["status"],final.get("rollback"))==((0,"success","not_needed") if scenario=="success" else (2,"rolled_back","passed")),"J5_03E_WORKER_STATUS_"+str(rc)+"_"+status.upper())
         require(calls==(1 if scenario=="success" else 2),"J5_03E_LAUNCH_COUNT")
         # Confirm the actual child reaches its existing real HTTP verification
         # and exits gracefully, not merely an unrelated /health responder.
@@ -123,7 +149,16 @@ def exercise_restore(root, db_path):
         require(not vault.exists() if expected else vault.read_bytes()==b"INERT_BEFORE_VAULT","J5_03E_VAULT_ORACLE")
         print("J5_03E_INSTALLED_RESTORE_"+scenario.upper()+"_PASS",flush=True)
     finally:
+        os.environ.pop("DC_RESTORE_PARENT_PID",None)
         database.engine.dispose()
+        for log in logs:
+            if log.is_file():
+                for line in log.read_text(encoding="utf-8",errors="replace").splitlines():
+                    # Emit only fixed diagnostic markers from child stdout.
+                    if line in {"J5_03E_INJECTED_STARTUP_FAILURE","J5_03E_REAL_RESTART_HEALTH_PASS","R02_DESKTOP_LOOPBACK_READY","R02_BACKEND_LOOPBACK_HEALTH_AUTH_DENIAL_PASS"}:
+                        print(line,flush=True)
+                    elif line.startswith("R02_BACKEND_PROBE_FAIL ") and all(c.isascii() and (c.isalnum() or c in "_ .-=+") for c in line):
+                        print(line,flush=True)
         for p in children:
             if p.poll() is None:
                 p.terminate()

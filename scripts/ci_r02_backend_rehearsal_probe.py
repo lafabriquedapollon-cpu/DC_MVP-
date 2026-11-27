@@ -74,6 +74,19 @@ def network_guard(event, args):
                                 for stage in ("restore-health", "restore-fail-health")}
                 and args[2] == os.environ["DC_LAB_ROOT"]):
             return
+        # The real Windows platform PID check uses tasklist. Permit only the
+        # exact filter for the child already launched by this LAB controller.
+        if (event == "subprocess.Popen" and getattr(sys, "frozen", False)
+                and os.environ.get("DC_RESTORE_LAB") == "true"
+                and sys.argv[1:] == ["restore-lab"]):
+            pid = os.environ.get("DC_RESTORE_PARENT_PID", "")
+            system = Path(os.environ["SystemRoot"]) / "System32" / "tasklist.exe"
+            if (pid.isascii() and pid.isdigit() and int(pid) > 0
+                    and args[0] == str(system)
+                    and args[1] == subprocess.list2cmdline(
+                        [str(system), "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"])
+                    and args[2] == os.environ["DC_LAB_ROOT"] and args[3] is None):
+                return
         raise PermissionError("REHEARSAL_PROCESS_REFUSED")
 
 
@@ -355,5 +368,17 @@ if __name__ == "__main__":
         marker = str(exc)
         if not re.fullmatch(r"[A-Z][A-Z0-9_]+(?: [A-Za-z0-9_.+-]+)?", marker):
             marker = "unidentified"
+        if getattr(sys, "frozen", False) and os.environ.get("DC_RESTORE_LAB") == "true":
+            import traceback
+            # Log only allowlisted source basenames/line numbers, never paths,
+            # raw exception strings, SQL, environment or fixture values.
+            allowed = {"ci_r02_backend_rehearsal_probe.py", "ci_j5_03e_installed_restore.py",
+                       "guided_restore.py", "guided_restore_worker.py", "cabinet_bundle.py",
+                       "backup_service.py", "guided_restore_archive.py", "portability_license_rebind.py",
+                       "platform.py", "subprocess.py", "database.py", "schema_runtime.py"}
+            for frame in traceback.extract_tb(exc.__traceback__):
+                file = Path(frame.filename).name
+                if file in allowed:
+                    print(f"J5_03E_SAFE_FRAME file={file} line={frame.lineno}", flush=True)
         print(f"R02_BACKEND_PROBE_FAIL type={type(exc).__name__} module={name} marker={marker}", flush=True)
         raise SystemExit(1) from None
