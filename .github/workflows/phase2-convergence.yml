@@ -861,6 +861,15 @@ jobs:
               @{ project='http-ece'; version='1.2.1'; file='http_ece-1.2.1.tar.gz'; sha='8c6ab23116bbf6affda894acfd5f2ca0fb8facbcbb72121c11c75c33e7ce8cff'; wheelPattern='^http_ece-1\.2\.1-(py3|py2\.py3)-none-any\.whl$' }
             )
             $constraints = Join-Path $lab 'reviewed-source-constraints.txt'
+            # Use the complete qualified graph before resolution.
+            $qualified = Get-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'scripts\r02-desktop-proven-versions.json') -Raw | ConvertFrom-Json
+            $pins = @($qualified.packages.PSObject.Properties)
+            if ($qualified.schema -ne 1 -or $qualified.python -cne '3.12.10' -or $pins.Count -ne 187) { throw 'INVALID_QUALIFIED_GRAPH' }
+            foreach ($pin in $pins) {
+              if ($pin.Name -notmatch '^[a-z0-9][a-z0-9_.-]*$' -or $pin.Value -notmatch '^[A-Za-z0-9.+!_-]+$') { throw 'INVALID_QUALIFIED_PIN' }
+              Add-Content -LiteralPath $constraints -Value ($pin.Name + '==' + $pin.Value) -Encoding ascii
+            }
+            Write-Host ('J5_03C_QUALIFIED_CONSTRAINTS_PASS count=' + $pins.Count)
             foreach ($entry in $approved) {
               $sdist = Join-Path $lab $entry.file
               $release = Invoke-RestMethod -Uri ("https://pypi.org/pypi/{0}/{1}/json" -f $entry.project,$entry.version)
@@ -876,7 +885,8 @@ jobs:
               $wheels = @(Get-ChildItem -LiteralPath $wheelhouse -File | Where-Object { $_.Name -cmatch $entry.wheelPattern })
               if ($wheels.Count -ne 1) { throw ("WHEEL_IDENTITY_MISMATCH " + $entry.project) }
               Write-Host ("R02_REVIEWED_LOCAL_WHEEL_SHA256 " + $entry.project + "=" + (Get-FileHash -LiteralPath $wheels[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant())
-              Add-Content -LiteralPath $constraints -Value ($entry.project + '==' + $entry.version) -Encoding ascii
+              $pin = $qualified.packages.PSObject.Properties[$entry.project]
+              if ($null -eq $pin -or $pin.Value -cne $entry.version) { throw ('UNQUALIFIED_SOURCE_VERSION ' + $entry.project) }
             }
             if (@(Get-ChildItem -LiteralPath $wheelhouse -File).Count -ne $approved.Count) { throw 'UNEXPECTED_WHEELHOUSE_CONTENT' }
             # Resolve the entire dependency graph before mutating the full environment.
@@ -897,7 +907,9 @@ jobs:
               }
               # Constrain resolved versions so actual installation cannot silently re-resolve.
               if ($item.metadata.name -notmatch '^[A-Za-z0-9_.-]+$' -or $item.metadata.version -notmatch '^[A-Za-z0-9.+!_-]+$') { throw 'INVALID_RESOLVER_METADATA' }
-              Add-Content -LiteralPath $constraints -Value ($item.metadata.name + '==' + $item.metadata.version) -Encoding ascii
+              $canonical = $item.metadata.name.ToLowerInvariant() -replace '[-_.]+','-'
+              $pin = $qualified.packages.PSObject.Properties[$canonical]
+              if ($null -eq $pin -or $pin.Value -cne $item.metadata.version) { throw ('UNQUALIFIED_RESOLUTION ' + $canonical) }
             }
             Write-Host ("R02_FULL_WINDOWS_BINARY_GRAPH_RESOLUTION_PASS count=" + @($plan.install).Count)
             & $py -m pip --isolated install @resolver
