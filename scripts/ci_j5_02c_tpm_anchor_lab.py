@@ -59,8 +59,20 @@ class Emulator:
         pathlib.Path(str(self.sock)+".ctrl").unlink(missing_ok=True)
     def close(self):
         self.stop()
-    def define(self):
-        self.run("tpm2_nvdefine","-C","o","-g","sha256","-s","32","-a","nt=extend|authread|authwrite|no_da","-p","file:"+str(self.auth),INDEX)
+    def define(self,*,protected=False):
+        if not protected:
+            self.run("tpm2_nvdefine","-C","o","-g","sha256","-s","32","-a","nt=extend|authread|authwrite|no_da","-p","file:"+str(self.auth),INDEX)
+            return
+        # Disposable emulator only. This deliberately non-deletable policy
+        # has NO approved hardware provisioning or decommissioning ceremony.
+        session=self.root/"anchor-trial.ctx"
+        policy=self.root/"anchor-policy.digest"
+        self.run("tpm2_startauthsession","-S",str(session))
+        try:
+            self.run("tpm2_policycommandcode","-S",str(session),"-L",str(policy),"TPM2_CC_NV_Read")
+        finally:
+            self.run("tpm2_flushcontext",str(session))
+        self.run("tpm2_nvdefine","-C","p","-g","sha256","-s","32","-a","nt=extend|authread|authwrite|no_da|platformcreate|policydelete","-L",str(policy),"-p","file:"+str(self.auth),INDEX)
     def read(self):
         r=self.run("tpm2_nvread","-C",INDEX,"-P","file:"+str(self.auth),"-s","32",INDEX)
         if len(r.stdout)!=32: raise Denied("wrong anchor length")
@@ -225,7 +237,7 @@ class TPMBoundLab(BoundLab):
     def provision_fixture(cls,path,tpm,primary,backup,*,clock):
         path=pathlib.Path(path)
         if path.exists(): raise Denied("already provisioned")
-        tpm.define()
+        tpm.define(protected=True)
         core=Lab(path)
         core.bootstrap_fixture(primary,backup)
         with core.tx() as db:
@@ -355,6 +367,15 @@ class IntegratedTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,"injected"):
             self.lab.finish_approval(q[0],assertion(self.p,q[1]),dict(EXPECTED),ARTIFACT)
         with self.assertRaisesRegex(Denied,"anchor mismatch"):self.open()
+
+    def test_20_integrated_index_delete_denied(self):
+        q=self.approve(self.p)
+        before=self.tpm.read()
+        for hierarchy in ("o","p"):
+            r=self.tpm.run("tpm2_nvundefine","-C",hierarchy,INDEX,ok=False)
+            self.assertNotEqual(r.returncode,0)
+            self.assertEqual(self.tpm.read(),before)
+        self.assertTrue(self.open().receipt_valid(q[0],dict(EXPECTED),ARTIFACT))
 
 if __name__=="__main__":
     unittest.main(verbosity=2)
