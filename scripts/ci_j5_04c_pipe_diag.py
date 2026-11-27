@@ -10,8 +10,9 @@ def main():
     h=None
     try:
         client=user_sid(token)
-        with win32security.OpenProcessToken(win32api.GetCurrentProcess(),win32con.TOKEN_QUERY) as own:
-            server=user_sid(own)
+        own=win32security.OpenProcessToken(win32api.GetCurrentProcess(),win32con.TOKEN_QUERY)
+        try:server=user_sid(own)
+        finally:own.Close()
         pipe=r"\\.\pipe\dc-owner-diag-"+secrets.token_hex(16)
         h=win32pipe.CreateNamedPipe(pipe,3|0x80000,4|2|1|8,1,32768,32768,0,pipe_acl(client,server))
         sd=win32security.GetSecurityInfo(h,win32security.SE_KERNEL_OBJECT,win32security.DACL_SECURITY_INFORMATION)
