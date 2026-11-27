@@ -18,7 +18,9 @@ from scripts.j5_owner_store import Store,require,unique
 
 NAME="DigitalCrownOwnerCommissioning"
 MAX=32768
-DATA_RIGHTS=0x00100003
+# Native CreateFile requires FILE_READ_ATTRIBUTES in the DACL.
+# No FILE_CREATE_PIPE_INSTANCE, GENERIC_WRITE or WRITE_DAC.
+DATA_RIGHTS=0x00100083
 FULL=0x1f01ff
 FIRST=0x00080000
 REJECT_REMOTE=8
