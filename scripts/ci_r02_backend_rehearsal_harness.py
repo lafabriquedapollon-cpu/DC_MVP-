@@ -112,8 +112,18 @@ def main():
         require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-installer-rehearsal-20261126", "ci/r03-conv04-installer-20261127", "ci/j5-03c-scientific-admission-20261127", "ci/j5-03e-installed-restore-20261127", "ci/j5-04c-commissioning-setup-20261127", "ci/j5-04c-portable-commissioning-20261127", "ci/j5-04c-private-delivery-20261127"},
                 "INSTALLER_BRANCH_REQUIRED")
     if final_only:
-        require(os.environ.get("GITHUB_REF_NAME") in {"ci/r02-desktop-final-20261126", "ci/r03-convergence-20261126"},
-                "FINAL_ONLY_BRANCH_REQUIRED")
+        branch = os.environ.get("GITHUB_REF_NAME")
+        if branch == "ci/phase2-convergence-20261127":
+            require(os.environ.get("GITHUB_REF") == "refs/heads/ci/phase2-convergence-20261127"
+                    and os.environ.get("GITHUB_REPOSITORY") == "lafabriquedapollon-cpu/DC_MVP-"
+                    and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted",
+                    "CONVERGENCE_CI_CONTEXT_REQUIRED")
+            require(subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                                            text=True, timeout=20).strip() == os.environ.get("GITHUB_SHA"),
+                    "CONVERGENCE_HEAD_REQUIRED")
+        else:
+            require(branch in {"ci/r02-desktop-final-20261126", "ci/r03-convergence-20261126"},
+                    "FINAL_ONLY_BRANCH_REQUIRED")
     source = stage_source(repo, lab)
     assets, asset_manifest = stage_assets(repo, lab)
     with tempfile.TemporaryDirectory(prefix="dc-backend-rehearsal-", dir=runner) as temp:

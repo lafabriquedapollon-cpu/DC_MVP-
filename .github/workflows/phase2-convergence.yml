@@ -23,7 +23,9 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git merge-base --is-ancestor 0a99bbcc27d5be27ea3b87d3431fde2c78bc7c6b HEAD
-          test "$(git diff --name-status 0a99bbcc27d5be27ea3b87d3431fde2c78bc7c6b HEAD)" = "$(printf 'A\t.github/workflows/phase2-convergence.yml')"
+          test "$(git diff --name-status 0a99bbcc27d5be27ea3b87d3431fde2c78bc7c6b HEAD)" = "$(printf 'A\t.github/workflows/phase2-convergence.yml\nM\tscripts/ci_r02_backend_rehearsal_harness.py')"
+          test "$(git rev-parse HEAD:scripts/ci_r02_backend_rehearsal_harness.py)" = "ed6cb16c006767086892b0653e2dc3a78efc5f97"
+          python -c "import ast,pathlib; ast.parse(pathlib.Path('scripts/ci_r02_backend_rehearsal_harness.py').read_text(encoding='utf-8'))"
           test ! -e .github/workflows/cabinet-release-certification.yml
           python - <<'PY'
           import subprocess, re, collections, pathlib
@@ -93,7 +95,8 @@ jobs:
           assert os.environ["RUNNER_ENVIRONMENT"] == "github-hosted"
           assert git("rev-parse", "HEAD") == os.environ["GITHUB_SHA"]
           candidate = "0a99bbcc27d5be27ea3b87d3431fde2c78bc7c6b"
-          assert git("diff", "--name-status", candidate, "HEAD") == "A\t.github/workflows/phase2-convergence.yml"
+          assert git("diff", "--name-status", candidate, "HEAD") == "A\t.github/workflows/phase2-convergence.yml\nM\tscripts/ci_r02_backend_rehearsal_harness.py"
+          assert git("rev-parse", "HEAD:scripts/ci_r02_backend_rehearsal_harness.py") == "ed6cb16c006767086892b0653e2dc3a78efc5f97"
           for path in ("run.py", "DigitalCrown.spec", "dc_release_gate/release_certification.py", "dc_release_gate/recovery_authority.py", "backend/routers/mobile_passkey.py"):
               assert git("rev-parse", lab.BASE + ":" + path) == git("rev-parse", "HEAD:" + path), path
           assert lab.legacy.REPOSITORY != lab.authority.REPOSITORY
