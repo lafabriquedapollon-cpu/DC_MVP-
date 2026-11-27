@@ -1,0 +1,43 @@
+name: J5-02C protected synthetic runtime proof (NOT A RELEASE)
+on:
+  push:
+    branches: [ci/j5-02c-passkey-open-runtime-20261127]
+permissions:
+  contents: read
+jobs:
+  protected-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify worker hash and negative access paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'bf0c196b66ddbca038201895e245add14e8da30ac95c05691f030950190a3882  scripts/j5_passkey_pages/_worker.mjs' | sha256sum -c -
+          base=https://approval-lab-7c28d6.pages.dev
+          body="$(mktemp)"
+          headers="$(mktemp)"
+          trap 'rm -f "$body" "$headers"' EXIT
+          probe() {
+            local expected="$1" expected_body="$2" url="$3"
+            shift 3
+            local code
+            code="$(curl --silent --show-error --max-time 20 --output "$body" --dump-header "$headers" --write-out '%{http_code}' "$@" "$url")"
+            printf '%s HTTP %s expected %s\n' "$url" "$code" "$expected"
+            test "$code" = "$expected"
+            test "$(cat "$body")" = "$expected_body"
+            grep -Eiq '^cache-control: *no-store' "$headers"
+            grep -Eiq '^x-robots-tag: *noindex' "$headers"
+            if [ "$expected" = 401 ]; then grep -Eiq '^www-authenticate: *Basic ' "$headers"; fi
+          }
+          probe 401 'Authorization required' "$base/"
+          probe 401 'Authorization required' "$base/" --user 'lab:invalid-synthetic-credential'
+          probe 404 'Not found' "$base/not-a-route"
+          probe 404 'Not found' "$base/?invalid=1"
+          probe 404 'Not found' "$base/" -X POST
+          probe 503 'LAB CLOSED' 'https://adbe9d1c.approval-lab-7c28d6.pages.dev/'
+          probe 503 'LAB CLOSED' 'https://a1fab177.approval-lab-7c28d6.pages.dev/'
+          echo PROTECTED_SYNTHETIC_RUNTIME_NEGATIVES_PASS
