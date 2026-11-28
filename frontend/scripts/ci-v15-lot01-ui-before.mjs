@@ -12,6 +12,8 @@ assert.equal(requireTool('playwright-core/package.json').version,'1.61.0');
 const {chromium}=requireTool('playwright-core');
 const web='http://127.0.0.1:5173',api='http://127.0.0.1:8008';
 const rows=[];
+const target=process.env.DC_UI_TARGET;
+assert(['desktop','pocket'].includes(target));
 let browser, desktopPage, pocketPage, stage='startup';
 const mark=(label)=>{rows.push({label,pass:true});console.log('LOT01_UI_BEFORE_CASE '+JSON.stringify(rows.at(-1)))};
 const shot=async(page,name)=>{await page.screenshot({path:path.join(evidence,name+'.png'),animations:'disabled'});mark(name)};
@@ -23,6 +25,7 @@ try {
     args:['--disable-background-networking','--disable-sync','--disable-quic','--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'],
     proxy:{server:'http://127.0.0.1:1',bypass:'127.0.0.1,localhost'}});
   const newContext=async()=>{const ctx=await browser.newContext({viewport:{width:1280,height:900},serviceWorkers:'block'});await ctx.route('**/*',r=>{const u=new URL(r.request().url());return [web,api].includes(u.origin)?r.continue():r.abort()});return ctx};
+  if(target==='desktop'){
   const desktop=await newContext(), d=await desktop.newPage();
   desktopPage=d;stage='desktop-login';
   const observed=[];
@@ -40,16 +43,38 @@ try {
   assert.deepEqual(profile,{status:200,superadmin:true},'actual Desktop platform identity');
   stage='desktop-superadmin';
   await d.goto(web+'/super-admin');
+  // Assert the actual screen, independent of accessible-name whitespace or casing.
   try {
-    await d.getByRole('heading',{name:/Digital Crown\\s*SuperAdmin/i}).waitFor({timeout:60000});
+    await d.waitForFunction(()=>{
+      const visible=e=>!!e&&e.getClientRects().length>0&&getComputedStyle(e).visibility!=='hidden';
+      const headings=[...document.querySelectorAll('h1')];
+      const title=headings.find(e=>visible(e)&&e.textContent.includes('Digital Crown')&&e.textContent.toLowerCase().includes('superadmin'));
+      const field=document.querySelector('input[placeholder="Email professionnel"]');
+      const search=document.querySelector('input[placeholder="Rechercher un client (Nom, email)..."]');
+      return !!title&&visible(field)&&visible(search);
+    },null,{timeout:30000});
   } catch (error) {
     console.log('LOT01_UI_AUTH_DIAGNOSTIC '+JSON.stringify({responses:observed.slice(-20)}));
+    // Fixed structural flags, not raw DOM text, data or credentials.
+    const dom=await d.evaluate(()=>({h1:document.querySelectorAll('h1').length,
+      title:[...document.querySelectorAll('h1')].some(e=>e.textContent.toLowerCase().includes('superadmin')),
+      activationField:!!document.querySelector('input[placeholder="Email professionnel"]'),
+      searchField:!!document.querySelector('input[placeholder="Rechercher un client (Nom, email)..."]')}));
+    console.log('LOT01_UI_DOM_DIAGNOSTIC '+JSON.stringify(dom));
+    // Synthetic account; no login, ticket, activation link or patient data in screenshot.
+    if(new URL(d.url()).pathname==='/super-admin'&&profile.superadmin===true
+       &&await d.locator('input[type=password]').count()===0){
+      await d.screenshot({path:path.join(evidence,'diagnostic-desktop-1280.png'),animations:'disabled',mask:[d.locator('input,textarea')]});
+    }
     throw error;
   }
   for(const width of [390,430,768,1280]){
     await d.setViewportSize({width,height:900});
     await shot(d,'before-desktop-'+width);
   }
+  await desktop.close();
+  }else{
+  stage='pocket-authority';
   // Legitimate API pairing using real credentials and canonical workstation cookie.
   const result=await fetch(api+'/api/auth/login',{method:'POST',body:new URLSearchParams({username:'ci-platform-admin@example.com',password:process.env.DC_SYNTH_PASSWORD})});
   assert.equal(result.status,200);const auth=await result.json();
@@ -96,7 +121,8 @@ try {
     await shot(p,'before-pocket-security-'+width);
   }
   await p.evaluate(async()=>{const {MobileStorage}=await import('/src/services/zka/MobileStorage.ts');await MobileStorage.clearAll()});
-  await pocket.close();await desktop.close();
+  await pocket.close();
+  }
 }catch(error){
   // Only fixed route names and boolean state: never emit raw URL, DOM, tokens or credentials.
   const known=['/login','/dashboard','/super-admin','/hub','/setup','/station','/mobile/onboarding','/mobile/dashboard','/mobile/superadmin'];
@@ -113,4 +139,4 @@ try {
   if(browser)await browser.close();
   fs.writeFileSync(path.join(evidence,'ui-before-status.json'),JSON.stringify(rows));
 }
-assert.equal(rows.length,14);
+assert.equal(rows.length,target==='desktop'?4:10);
