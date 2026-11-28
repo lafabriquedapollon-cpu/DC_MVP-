@@ -9,11 +9,12 @@ concurrency:
   cancel-in-progress: true
 jobs:
   desktop-integration:
-    name: IAM LAB (${{ matrix.scope }})
+    name: IAM LAB (${{ matrix.scope }}, ${{ matrix.variant }})
     strategy:
       fail-fast: false
       matrix:
         scope: [platform-uv]
+        variant: [full, terminal-race]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -67,7 +68,7 @@ jobs:
           export DC_CHECKOUT="$GITHUB_WORKSPACE"
           export DC_EVIDENCE="$RUNNER_TEMP/dc-integration-evidence"
           mkdir -p "$DC_EVIDENCE"
-          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" DC_BUILT_REHEARSAL=true DC_TEST_SCOPE="${{ matrix.scope }}" bash -s <<'LAB'
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" DC_BUILT_REHEARSAL=true DC_TEST_SCOPE="${{ matrix.scope }}" DC_RACE_VARIANT="${{ matrix.variant }}" bash -s <<'LAB'
           set -euo pipefail
           umask 077
           cd "$DC_CHECKOUT"
@@ -301,7 +302,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v15-lot01-${{ matrix.scope }}-synthetic
+          name: v15-lot01-${{ matrix.scope }}-${{ matrix.variant }}-synthetic
           path: ${{ runner.temp }}/dc-integration-evidence/
           if-no-files-found: error
           retention-days: 3
