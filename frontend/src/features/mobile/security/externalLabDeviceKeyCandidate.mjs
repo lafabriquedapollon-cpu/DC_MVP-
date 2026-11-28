@@ -79,3 +79,23 @@ export async function deleteDeviceKey(id) {
   guard(id);
   await operation('readwrite',s=>s.delete(id));
 }
+
+// Runtime adapter: the caller supplies the locally approved exact intent.
+// No generic signature oracle is exposed to the UI.
+export async function signBoundDeviceProof(id, messageHex, expectedPublicKey, expectedIntent) {
+  if (typeof messageHex!=='string'||messageHex.length<2||messageHex.length>4096||
+      !/^(?:[0-9a-f]{2})+$/.test(messageHex)||!Array.isArray(expectedIntent)) refuse();
+  const bytes=Uint8Array.from(messageHex.match(/../g), x=>parseInt(x,16));
+  let actual;
+  try {actual=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));} catch {refuse();}
+  if (!Array.isArray(actual)||JSON.stringify(actual)!==JSON.stringify(expectedIntent)||
+      new TextDecoder().decode(bytes)!==JSON.stringify(actual)) refuse();
+  const [domain]=actual;
+  const lengths={'dc/external-lab-enrollment/v1':9,'dc/external-lab-session/v1':7,'dc/external-device-read/v1':7};
+  if (!Object.hasOwn(lengths,domain)||actual.length!==lengths[domain]) refuse();
+  if (domain==='dc/external-lab-enrollment/v1'||domain==='dc/external-lab-session/v1') {
+    const expiry=Date.parse(actual.at(-1)+'Z');
+    if (!Number.isFinite(expiry)||expiry<=Date.now()) refuse();
+  }
+  return signDeviceProof(id,bytes,expectedPublicKey);
+}
