@@ -146,11 +146,19 @@ try{
  await request('owner marketplace read denied',overview,{headers:A,status:403});
  await request('ordinary paired staff marketplace denied',overview,{headers:O,status:403});
  await request('anonymous platform directory denied',S,{status:401});
+ // R5 characterization: verify actual route availability on the recovered runtime.
+ // These are baseline observations, not qualification of WebAuthn or Pocket SuperAdmin.
+ await request('R5 baseline paired Pocket cannot read desktop directory',S,{headers:O,status:401});
+ await request('R5 baseline paired Pocket cannot read desktop trials','/api/superadmin/trial-codes',{headers:O,status:401});
+ await request('R5 baseline passkey status route availability','/api/mobile/passkey/status',{headers:O,status:404});
+ await request('R5 baseline passkey authentication route availability','/api/mobile/passkey/authentication/options',{method:'POST',headers:O,status:404});
+ await request('R5 baseline anonymous passkey status route availability','/api/mobile/passkey/status',{status:404});
  // No license activation, supplier mutation, real OTP, Firebase or email calls.
  await request('platform logout','/api/auth/logout',{method:'POST',headers:P,body:{refresh_token:platform.refresh_token},status:204});
  await request('revoked platform directory access denied',S,{headers:P,status:401});
  await request('revoked platform refresh denied','/api/auth/refresh',{method:'POST',body:{refresh_token:platform.refresh_token},status:401});
  console.log('LOT01_PLATFORM_DESKTOP_CONTRACT_PASS '+evidence.length);
- assert.equal(evidence.length,20);
+ assert.equal(evidence.length,25);
+ console.log('LOT01_R5_BASELINE_CHARACTERIZATION_PASS cases=5');
  }
 }finally{fs.writeFileSync(process.env.DC_EVIDENCE+'/stock-r0-status.json',JSON.stringify(evidence,null,2))}
