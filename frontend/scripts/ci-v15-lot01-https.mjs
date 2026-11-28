@@ -94,7 +94,23 @@ try{
   await p.getByText('Activé',{exact:true}).first().waitFor({timeout:15000});
   mark('real browser virtual authenticator PRF enrollment and server enable');
   stage='pocket-before-approval';
-  await p.goto(origin+'/mobile/superadmin');await waitState('locked');await noData();
+  // The namespace has only loopback, so Chromium's OS link-state hint may say
+  // offline despite a functioning local TLS service. Record the native hint,
+  // then use CDP's network-state override (not JS, response, or authority mocks).
+  await p.goto(origin+'/mobile/superadmin');
+  const initial=await p.locator('[data-r5-pocket-platform]').getAttribute('data-r5-platform-state');
+  const native=await p.evaluate(()=>({online:navigator.onLine,hidden:document.hidden,secure:window.isSecureContext}));
+  console.log('LOT01_HTTPS_POCKET_INITIAL '+JSON.stringify({initial,...native}));
+  const onlineNetwork=async()=>{
+    await cdp.send('Network.enable');
+    await cdp.send('Network.overrideNetworkState',{offline:false,latency:0,downloadThroughput:-1,uploadThroughput:-1,connectionType:'ethernet'});
+    assert(await p.evaluate(()=>navigator.onLine===true),'Chromium network state');
+    const health=await p.evaluate(async()=>{const r=await fetch('/api/health',{cache:'no-store'});return r.status});
+    assert.equal(health,200,'actual local TLS health');
+  };
+  if(!native.online){stage='loopback-network-hint';await onlineNetwork();await p.reload();}
+  stage='pocket-locked-before-approval';await waitState('locked');await noData();
+  stage='pocket-uv-before-approval';
   await p.getByRole('button',{name:'Vérifier ma biométrie'}).click();await waitState('ticket');await noData();
   mark('active UV alone cannot display platform data');
   // Only the manual ticket is transferred between isolated contexts; never log it.
@@ -110,7 +126,7 @@ try{
   mark('Desktop issues independent one-use ticket via real UI and clears it');
   stage='pocket-claim';await p.bringToFront();
   // Foreground switch intentionally locks Pocket. Fresh UV is required again.
-  await p.reload();await waitState('locked');await p.getByRole('button',{name:'Vérifier ma biométrie'}).click();await waitState('ticket');
+  await p.reload();if(!await p.evaluate(()=>navigator.onLine))await onlineNetwork();await waitState('locked');stage='pocket-uv-for-claim';await p.getByRole('button',{name:'Vérifier ma biométrie'}).click();await waitState('ticket');
   await p.getByLabel('Ticket temporaire').fill(transfer);
   await response(p,'/api/mobile/passkey/platform-approval/claim','POST',200,()=>p.getByRole('button',{name:'Valider le ticket'}).click());
   await waitState('ready');
@@ -129,8 +145,9 @@ try{
     await shot(p,'https-pocket-'+endpoint.replace('/','-')+'-1280');
   }
   stage='offline-lock';
+  await cdp.send('Network.overrideNetworkState',{offline:true,latency:0,downloadThroughput:0,uploadThroughput:0,connectionType:'none'});
   await pocket.setOffline(true);await waitState('offline');await noData();mark('offline immediately clears platform data');
-  await pocket.setOffline(false);await p.getByRole('button',{name:'Réessayer'}).click();await waitState('ready');
+  await pocket.setOffline(false);await onlineNetwork();await p.getByRole('button',{name:'Réessayer'}).click();await waitState('ready');
   await p.getByRole('button',{name:'Verrouiller'}).click();await waitState('locked');await noData();mark('explicit lock clears platform data');
   await p.getByRole('button',{name:'Vérifier ma biométrie'}).click();await waitState('ready');mark('fresh real UV reopens encrypted approval');
   stage='transport-check';
@@ -146,7 +163,11 @@ try{
   await p.evaluate(async()=>{const {MobileStorage}=await import('/src/services/zka/MobileStorage.ts');await MobileStorage.clearAll()});
   await cdp.send('WebAuthn.removeVirtualAuthenticator',{authenticatorId});await pocket.close();await desktop.close();
   mark('synthetic browser vault and virtual authenticator removed');
-}catch(err){console.log('LOT01_HTTPS_DIAGNOSTIC '+JSON.stringify({stage,type:err?.name==='TimeoutError'?'TimeoutError':'Other',observed:observed.slice(-40)}));throw Error('HTTPS_E2E_FAILED_'+stage)}
+}catch(err){
+  const pocketState=p&&!p.isClosed()?await p.evaluate(()=>({state:document.querySelector('[data-r5-pocket-platform]')?.getAttribute('data-r5-platform-state')||'absent',online:navigator.onLine,hidden:document.hidden,secure:window.isSecureContext})).catch(()=>null):null;
+  console.log('LOT01_HTTPS_DIAGNOSTIC '+JSON.stringify({stage,type:err?.name==='TimeoutError'?'TimeoutError':'Other',pocketState,observed:observed.slice(-40)}));
+  throw Error('HTTPS_E2E_FAILED_'+stage);
+}
 finally{
   if(browser)await browser.close();
   proxy.closeAllConnections();await new Promise(resolve=>proxy.close(resolve));
