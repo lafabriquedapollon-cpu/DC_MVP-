@@ -1,16 +1,17 @@
 """Real SQLCipher candidate enrollment, synthetic CI only."""
-import os,json
+import os,json,secrets
 from pathlib import Path
 from datetime import timedelta
-from sqlalchemy import select,update,func
+from sqlalchemy import select,update,func,insert
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding,PublicFormat
 from backend.config import settings
 from backend.core.runtime_safety import REHEARSAL_MIGRATION_ONLY,assert_runtime_startup_allowed
 from backend import database,models
-from backend.services.pocket_external_store_candidate import metadata,principals,assignments,sessions
-from backend.services.pocket_external_device_candidate import devices,now_utc
-from backend.services.pocket_external_lab_projection_candidate import lab_bindings
+from backend.services.pocket_external_store_candidate import metadata,principals,assignments,sessions,digest_token
+from backend.services.pocket_external_device_candidate import devices,now_utc,stage_challenge,message
+from backend.services.pocket_external_lab_projection_candidate import lab_bindings,stage_lab_projection,ProjectionRefused
+from backend.services.pocket_external_lab_authority_candidate import stage_grant
 from backend.services.pocket_external_lab_enrollment_candidate import enrollments,stage_prepare,stage_complete,stage_revoke_enrollment,fingerprint,AuthorityRefused
 lab=Path(os.environ["DC_LAB_ROOT"]).resolve(strict=True)
 dbpath=lab/"fresh-rehearsal.db"
@@ -81,13 +82,41 @@ try:
         p=db.execute(select(principals)).mappings().one()
         check("exact cabinet lab and principal binding",b["cabinet_id"]==ca and b["lab_id"]==la and b["organization_id"]==p["organization_id"] and d["principal_id"]==p["id"]==row["principal_id"])
         check("public key only",d["public_key_hex"]==public(key))
+    # Explicit grant and synthetic session only; no production session issuer.
+    raw=secrets.token_hex(32); now=now_utc()
+    with database.SessionLocal() as db:
+        with db.begin():
+            patient=models.Patient(nom="SYNTH_ENROLL_PATIENT",prenom="SYNTH",date_naissance=now,sexe="M",employer_id=ca)
+            db.add(patient);db.flush()
+            act=models.Acte(patient_id=patient.id,praticien_id=ca,type_acte=models.ActeType.PROTHESE,libelle="SYNTH_ACT",montant=999)
+            db.add(act);db.flush()
+            job=models.LabJob(patient_id=patient.id,act_id=act.id,lab_id=la,material="SYNTH",type="SYNTH",notes="SYNTH_PRIVATE",deadline=now+timedelta(days=1),status=models.LabJobStatus.SENT)
+            db.add(job);db.flush();order=job.id
+            db.execute(insert(sessions).values(token_digest=digest_token(raw),principal_id=row["principal_id"],device_id=row["device_id"],issued_at=now,expires_at=now+timedelta(minutes=10)))
+            stage_grant(db,actor_id=ca,cabinet_id=ca,principal_id=row["principal_id"],order_id=order,password=password,confirm=True)
+    def issue():
+        with database.SessionLocal() as db:
+            with db.begin():
+                return stage_challenge(db,raw_token=raw,device_id=row["device_id"],action="assigned-order.read",cabinet_id=ca,resource_id=order)
+    def read(nonce):
+        sig=key.sign(message(session_digest=digest_token(raw),device_id=row["device_id"],action="assigned-order.read",cabinet_id=ca,resource_id=order,nonce=nonce)).hex()
+        try:
+            with database.SessionLocal() as db:
+                with db.begin():
+                    return stage_lab_projection(db,raw_token=raw,device_id=row["device_id"],cabinet_id=ca,resource_id=order,nonce=nonce,signature_hex=sig)
+        except ProjectionRefused:return None
+    proof=issue()
+    check("enrolled key can read explicitly granted minimal order",bool(proof) and read(proof)=={"order_id":order,"status":"SENT","deadline":(now+timedelta(days=1)).isoformat()})
+    pending=issue();check("pre-revocation challenge exists",bool(pending))
     check("foreign owner cannot revoke",not revoke(actor_id=cb)[0])
     check("owner revokes",revoke()[0])
+    check("issued proof refused after enrollment revoke",read(pending) is None)
+    check("new challenge refused after enrollment revoke",issue() is None)
     check("repeat revocation denied",not revoke()[0])
     check("revoked cannot reenroll",not prepare()[0] and not complete(row)[0])
     database.engine.dispose()
     with database.SessionLocal() as db:
-        check("revocation persists across connection",all(db.execute(select(t.c.revoked_at)).scalar_one() is not None for t in (principals,devices,lab_bindings)))
+        check("revocation persists across connection",all(db.execute(select(t.c.revoked_at)).scalar_one() is not None for t in (principals,devices,lab_bindings,sessions,assignments)))
         check("exact audit lifecycle",all(db.query(models.AuditLog).filter_by(action=a,user_id=ca,employer_id=ca,resource_type="Lab",resource_id=str(la),severity="CRITICAL").count()==1 for a in ("EXTERNAL_LAB_ENROLLMENT_PREPARED","EXTERNAL_LAB_ENROLLMENT_COMPLETED","EXTERNAL_LAB_ENROLLMENT_REVOKED")))
     ok,expired=prepare(lab_id=lc,public_key_hex=public(other),verified_fingerprint=fingerprint(public(other)));assert ok
     with database.SessionLocal() as db:
@@ -101,4 +130,4 @@ try:
 finally:
     metadata.drop_all(database.engine);database.engine.dispose()
     Path(os.environ["DC_EVIDENCE"],"external-lab-enrollment.json").write_text(json.dumps(rows,indent=2))
-assert len(rows)==32
+assert len(rows)==36
