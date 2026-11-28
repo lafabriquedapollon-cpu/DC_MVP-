@@ -6,6 +6,7 @@ import {createECDH} from 'node:crypto';
 const base='http://127.0.0.1:8008';
 assert(process.env.GITHUB_ACTIONS==='true'&&process.env.DC_SYNTH_PASSWORD&&process.env.DC_EVIDENCE);
 const evidence=[];
+const scope=process.env.DC_TEST_SCOPE;assert(['stock-session','platform-desktop'].includes(scope),'explicit isolated test scope required');
 const request=async(label,path,{method='GET',headers={},body,status}={})=>{
  const r=await fetch(base+path,{method,headers:{...headers,...(body===undefined?{}:{'Content-Type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});
  const row={label,method,status:r.status,expected:status,pass:r.status===status};evidence.push(row);console.log('LOT01_STOCK_CASE '+JSON.stringify(row));
@@ -44,6 +45,7 @@ const pair=async(owner,target,replayStatus=404)=>{
 const D='/api/stock/items',M='/api/mobile/stock/items';
 const item={nom:'CI-SYNTHETIC-STOCK',categorie:'CONSOMMABLE',quantite:10,seuil_alerte:2,unite:'unité'};
 try{
+ if(scope==='stock-session'){
  const owner=await login('ci-owner@example.com'),other=await login('ci-other@example.com');
  const A=await register(owner.access_token),B=await register(other.access_token);
  const reader=await staff('ci-stock-reader@example.com',A.Cookie),writer=await staff('ci-stock-writer@example.com',A.Cookie),restricted=await staff('ci-restricted@example.com',A.Cookie);
@@ -121,6 +123,15 @@ try{
  const finalTeam=await request('owner team remains accessible',T+'/',{headers:A,status:200});assert(finalTeam.body.some(x=>x.id===reader.id));assert(!finalTeam.body.some(x=>x.id===writer.id&&!x.is_archived));
  await request('other cabinet unaffected',D,{headers:B,status:200});
  console.log('LOT01_SESSION_TEAM_CONTRACT_PASS '+evidence.length);
+ assert.equal(evidence.length,76);
+ }else{
+ // Fresh independent runner, database, rate-limit store and credentials.
+ const owner=await login('ci-owner@example.com'), other=await login('ci-other@example.com');
+ const A=await register(owner.access_token), B=await register(other.access_token);
+ const reader=await staff('ci-stock-reader@example.com',A.Cookie), writer=await staff('ci-stock-writer@example.com',A.Cookie);
+ const own=await request('owner identity','/api/auth/me',{headers:A,status:200});const oth=await request('other owner identity','/api/auth/me',{headers:B,status:200});
+ const ordinaryPocket=await pair(B,oth.body.id), O=bearer(ordinaryPocket.access_token);
+ const S='/api/superadmin/clients';
  // Platform identity is a synthetic LAB-only configuration, never the real operator.
  const platform=await login('ci-platform-admin@example.com'), P=await register(platform.access_token);
  const identity=await request('configured platform identity','/api/auth/me',{headers:P,status:200});
@@ -140,5 +151,6 @@ try{
  await request('revoked platform directory access denied',S,{headers:P,status:401});
  await request('revoked platform refresh denied','/api/auth/refresh',{method:'POST',body:{refresh_token:platform.refresh_token},status:401});
  console.log('LOT01_PLATFORM_DESKTOP_CONTRACT_PASS '+evidence.length);
-
+ assert.equal(evidence.length,20);
+ }
 }finally{fs.writeFileSync(process.env.DC_EVIDENCE+'/stock-r0-status.json',JSON.stringify(evidence,null,2))}
