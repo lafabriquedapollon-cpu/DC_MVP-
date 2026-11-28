@@ -1,11 +1,11 @@
-name: V1.5 LOT01 parallel A authority baseline
+name: V1.5 LOT01 convergence A - concurrent mutation hardening
 on:
   push:
-    branches: [ci/v15-lot01-parallel-a-authority-20261128]
+    branches: [ci/v15-lot01-convergence-a-race-20261128]
 permissions:
   contents: read
 concurrency:
-  group: v15-lot01-parallel-a-authority
+  group: v15-lot01-convergence-a-race
   cancel-in-progress: true
 jobs:
   desktop-integration:

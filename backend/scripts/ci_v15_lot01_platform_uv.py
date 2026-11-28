@@ -327,13 +327,43 @@ def run():
     request("pilot confirmation required",execute,409,method="POST",token=uv,approval=approval,origin=ORIGIN,data={**execution,"confirm":False})
     with database.SessionLocal() as db:
         assert db.get(models.TrialActivationCode,trial2["id"]).revoked_at is None
-    request("pilot executes exact approved revocation",execute,200,method="POST",token=uv,approval=approval,origin=ORIGIN,data=execution)
+    # Simultaneous requests for the same valid one-shot proof: exactly one commit.
+    simultaneous = Barrier(2)
+    def attempt_execution(i):
+        simultaneous.wait(timeout=10)
+        request("pilot concurrent execution " + str(i),execute,(200,409),method="POST",
+                token=uv,approval=approval,origin=ORIGIN,data=execution)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(attempt_execution,(1,2)))
+    tx_check("pilot simultaneous requests exactly one success",lambda: (
+        None if sorted(row["status"] for row in rows if row["label"].startswith("pilot concurrent execution "))==[200,409]
+        else (_ for _ in ()).throw(AssertionError("expected exactly one success and one conflict"))))
     request("pilot execution replay denied",execute,409,method="POST",token=uv,approval=approval,origin=ORIGIN,data=execution)
     with database.SessionLocal() as db:
         assert db.get(models.TrialActivationCode,trial2["id"]).revoked_at is not None
         assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial2["id"])).count()==1
         assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOCATION_APPROVED",resource_id=str(trial2["id"])).count()==1
         assert db.get(MobileWebAuthnChallenge,granted["challenge_id"]).used_at is not None
+    # Fresh independent approval for another inert fixture, then expire the proof in LAB.
+    trial3, _ = request("pilot expiry synthetic trial", "/api/superadmin/trial-codes",200,method="POST",
+        token=desktop,cookie=cookie,data={"email":"ci-trial3@example.com","trial_days":14})
+    path3=F+"/trial-codes/"+str(trial3["id"])
+    binding3,_=request("pilot expiry prepare",path3+"/revocation-intent",200,method="POST",token=uv,approval=approval,origin=ORIGIN)
+    grant3,_=request("pilot expiry Desktop confirmation",path3+"/desktop-approval",200,method="POST",
+        token=desktop,cookie=cookie,data={**binding3,"password":os.environ["DC_SYNTH_PASSWORD"],"confirm":True})
+    from datetime import datetime,timedelta
+    with database.SessionLocal() as db:
+        challenge3=db.get(MobileWebAuthnChallenge,grant3["challenge_id"])
+        challenge3.expires_at=datetime.utcnow()-timedelta(seconds=1)
+        db.commit()
+    execution3={"challenge_id":grant3["challenge_id"],"nonce":binding3["nonce"],"confirm":True}
+    request("pilot expired intent denied",path3+"/revoke",409,method="POST",token=uv,approval=approval,origin=ORIGIN,data=execution3)
+    def expired_unchanged():
+        with database.SessionLocal() as db:
+            assert db.get(models.TrialActivationCode,trial3["id"]).revoked_at is None
+            assert db.get(MobileWebAuthnChallenge,grant3["challenge_id"]).used_at is None
+            assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial3["id"])).count()==0
+    tx_check("pilot expiry leaves target and audit unchanged",expired_unchanged)
     overview, _ = request("facade Marketplace summary", F + "/marketplace/overview", 200, token=uv, approval=approval)
     desktop_overview, _ = request("Desktop Marketplace summary for comparison", S, 200, token=desktop, cookie=cookie)
     assert overview == desktop_overview
