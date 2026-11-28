@@ -66,6 +66,11 @@ try:
     check("malformed proof denied",not complete(row,signature_hex="bad")[0])
     check("altered nonce denied",not complete(row,nonce="0"*64)[0])
     check("denied proofs create nothing",count(principals)==0)
+    with database.SessionLocal() as db:
+        tx=db.begin()
+        stage_complete(db,nonce=row["nonce"],signature_hex=sign(key,row))
+        tx.rollback()
+    check("completion rollback leaves no authority",count(principals)==count(devices)==count(lab_bindings)==0)
     check("correct proof completes",complete(row)[0])
     check("replay denied",not complete(row)[0])
     check("exact one principal device binding",count(principals)==count(devices)==count(lab_bindings)==1)
