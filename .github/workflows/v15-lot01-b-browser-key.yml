@@ -1,0 +1,48 @@
+name: V1.5 LOT01 B - browser key candidate LAB
+on:
+  push:
+    branches: [ci/v15-lot01-b-enrollment-20261128]
+permissions:
+  contents: read
+concurrency:
+  group: v15-lot01-b-browser-key
+  cancel-in-progress: true
+jobs:
+  browser-key:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Syntax and browser availability
+        run: |
+          node --check frontend/scripts/ci-v15-lot01-external-lab-browser-key.mjs
+          node --check frontend/src/features/mobile/security/externalLabDeviceKeyCandidate.mjs
+          google-chrome --version
+      - name: Actual isolated browser key lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-browser-key.XXXXXXXX")
+          ns="dc-key-$GITHUB_RUN_ID"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          export DC_LAB_ROOT="$lab"
+          export DC_EVIDENCE="$RUNNER_TEMP/dc-browser-key-evidence"
+          mkdir -p "$DC_EVIDENCE" "$lab/home"
+          git rev-parse HEAD > "$DC_EVIDENCE/head.txt"
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" HOME="$lab/home" GITHUB_ACTIONS=true DC_LAB_ROOT="$lab" DC_EVIDENCE="$DC_EVIDENCE" bash -c 'set -e; test "$(ip -o link show | wc -l)" -eq 1; node frontend/scripts/ci-v15-lot01-external-lab-browser-key.mjs'
+      - name: Upload non-secret evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v15-lot01-lab-browser-key-synthetic
+          path: ${{ runner.temp }}/dc-browser-key-evidence/
+          if-no-files-found: error
+          retention-days: 3
