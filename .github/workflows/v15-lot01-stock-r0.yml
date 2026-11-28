@@ -291,7 +291,7 @@ jobs:
           PY
           echo LOT01_STOCK_R0_BEGIN
           if [ "$DC_TEST_SCOPE" = platform-uv ]; then
-            timeout --kill-after=10s 180s "$DC_PYTHON" -m backend.scripts.ci_v15_lot01_platform_uv
+            timeout --kill-after=10s 480s "$DC_PYTHON" -m backend.scripts.ci_v15_lot01_platform_uv
           else
             timeout --kill-after=10s 180s node frontend/scripts/ci-v15-lot01-stock.mjs
           fi

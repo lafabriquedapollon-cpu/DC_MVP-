@@ -7,6 +7,9 @@ import hashlib
 import json
 import os
 import secrets
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -190,6 +193,50 @@ def run():
     request("ordinary credential enabled", P + "/enable", 200, method="POST", token=ordinary_uv,
             data={"credential_id": b64(ordinary_cid)})
     request("ordinary active UV never gains platform authority", S, 403, token=ordinary_uv)
+
+    # Real HTTP races; no test-generated JWT, clock override or mocked verifier.
+    superseded = options(token)
+    current = options(token)
+    request("superseded live challenge refused", P + "/authentication/verify", 410, method="POST",
+            token=token, origin=ORIGIN, data=verify_body(superseded, assertion(superseded, key, cid, 4)))
+    request("cross-device challenge rejected", P + "/authentication/verify", 410, method="POST",
+            token=other, origin=ORIGIN, data=verify_body(current, assertion(current, key, cid, 4)))
+    concurrent_body = verify_body(current, assertion(current, key, cid, 4))
+    gate = Barrier(2)
+    def concurrent_verify():
+        gate.wait(timeout=10)
+        return request("simultaneous one-shot UV verification", P + "/authentication/verify", (200, 410),
+                       method="POST", token=token, origin=ORIGIN, data=concurrent_body)[0]
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        a, b = workers.submit(concurrent_verify), workers.submit(concurrent_verify)
+        outcomes = [a.result(), b.result()]
+    winners = [result for result in outcomes if isinstance(result, dict) and "access_token" in result]
+    race_rows = [row for row in rows if row["label"] == "simultaneous one-shot UV verification"]
+    assert sorted(row["status"] for row in race_rows) == [200, 410] and len(winners) == 1
+    winner = winners[0]
+    uv3 = winner["access_token"]
+    request("winning UV session active", S, 200, token=uv3)
+    expiring_challenge = options(token)
+    # Use the actual production TTL and wall-clock passage, never shorten it.
+    assert winner["expires_in"] == 300
+    print("LOT01_R5_UV_REAL_EXPIRY_BEGIN", flush=True)
+    start = time.monotonic()
+    time.sleep(winner["expires_in"] + 2)
+    assert time.monotonic() - start >= winner["expires_in"]
+    request("expired UV token refused on platform API", S, 401, token=uv3)
+    request("expired UV token refused on passkey API", P + "/status", 401, token=uv3)
+    request("expired challenge refused", P + "/authentication/verify", 410, method="POST",
+            token=token, origin=ORIGIN, data=verify_body(expiring_challenge, assertion(expiring_challenge, key, cid, 5)))
+    refreshed = options(token)
+    replacement, _ = request("new UV after actual expiration", P + "/authentication/verify", 200, method="POST",
+                              token=token, origin=ORIGIN, data=verify_body(refreshed, assertion(refreshed, key, cid, 5)))
+    uv3 = replacement["access_token"]
+    request("fresh UV active after expiration", S, 200, token=uv3)
+    # Ordinary session also expired during the real-time window; authenticate again.
+    ordinary_fresh = options(other)
+    ordinary_new, _ = request("ordinary UV renewed after expiration", P + "/authentication/verify", 200, method="POST",
+                               token=other, origin=ORIGIN, data=verify_body(ordinary_fresh, assertion(ordinary_fresh, ordinary_key, ordinary_cid, 2)))
+    ordinary_uv = ordinary_new["access_token"]
     request("desktop revokes paired platform device", "/api/admin/mobile-devices/" + mobile["device_id"] + "/revoke",
             200, method="POST", token=desktop, cookie=cookie)
     request("revoked device current UV refused", S, 401, token=uv3)
