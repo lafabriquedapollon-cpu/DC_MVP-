@@ -398,6 +398,35 @@ def run():
         assert db.get(models.TrialActivationCode,trial4["id"]).revoked_at is not None
         assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial4["id"])).count()==1
         assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOCATION_APPROVED",resource_id=str(trial4["id"])).count()==1
+    # Exact cancellation must retire pending and approved requests, not the trial itself.
+    trial5,_=request("cancel synthetic trial","/api/superadmin/trial-codes",200,method="POST",
+        token=desktop,cookie=cookie,data={"email":"ci-trial5@example.com","trial_days":14})
+    path5=F+"/trial-codes/"+str(trial5["id"])
+    def cancel_fixture():
+        p5,_=request("cancel fixture request",path5+"/revocation-request",200,method="POST",token=uv,approval=approval,origin=ORIGIN)
+        return {"challenge_id":p5["challenge_id"],"nonce":p5["nonce"]}
+    def cancel_call(body,expected,**kwargs):
+        return request("cancel exact proof "+str(expected),path5+"/revocation-cancel",expected,method="POST",
+            token=uv,approval=approval,origin=ORIGIN,data=body,**kwargs)
+    pending5=cancel_fixture()
+    cancel_call({**pending5,"nonce":secrets.token_hex(32)},409)
+    cancel_call(pending5,200)
+    request("cancelled pending absent from inbox",inbox,200,token=desktop,cookie=cookie)
+    request("cancelled pending cannot be approved",inbox+"/"+pending5["challenge_id"]+"/approve",409,
+        method="POST",token=desktop,cookie=cookie,data={"target_id":trial5["id"],"password":os.environ["DC_SYNTH_PASSWORD"],"confirm":True})
+    request("cancelled pending cannot execute",path5+"/revoke",409,method="POST",token=uv,approval=approval,origin=ORIGIN,data={**pending5,"confirm":True})
+    pending6=cancel_fixture()
+    request("Desktop approves separate cancellation fixture",inbox+"/"+pending6["challenge_id"]+"/approve",200,
+        method="POST",token=desktop,cookie=cookie,data={"target_id":trial5["id"],"password":os.environ["DC_SYNTH_PASSWORD"],"confirm":True})
+    cancel_call(pending6,200)
+    cancel_call(pending6,409)
+    request("cancelled approved intent cannot execute",path5+"/revoke",409,method="POST",token=uv,approval=approval,origin=ORIGIN,data={**pending6,"confirm":True})
+    def cancellation_persistence():
+        with database.SessionLocal() as db:
+            assert db.get(models.TrialActivationCode,trial5["id"]).revoked_at is None
+            assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial5["id"])).count()==0
+            assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOCATION_CANCELLED",resource_id=str(trial5["id"]),severity="CRITICAL").count()==2
+    tx_check("cancel both phases persists without revoking trial",cancellation_persistence)
     overview, _ = request("facade Marketplace summary", F + "/marketplace/overview", 200, token=uv, approval=approval)
     desktop_overview, _ = request("Desktop Marketplace summary for comparison", S, 200, token=desktop, cookie=cookie)
     assert overview == desktop_overview

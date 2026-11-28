@@ -339,6 +339,9 @@ jobs:
                   matches=db.query(models.AuditLog).filter_by(user_id=admin.id,employer_id=admin.get_employer_id(),action=action,resource_type="TrialActivationCode",resource_id=str(trial.id),severity="CRITICAL").all()
                   assert len(matches)==1
                   rows.append({"label":action+" persisted once for UI target","pass":True})
+              cancelled=db.query(models.AuditLog).filter_by(user_id=admin.id,employer_id=admin.get_employer_id(),action="PLATFORM_TRIAL_REVOCATION_CANCELLED",resource_type="TrialActivationCode",resource_id=str(trial.id),severity="CRITICAL").all()
+              assert len(cancelled)==1
+              rows.append({"label":"explicit UI cancellation persisted once","pass":True})
               Path(os.environ["DC_EVIDENCE"], "https-db-status.json").write_text(json.dumps(rows))
               for row in rows:
                   print("LOT01_HTTPS_DB_CASE " + json.dumps(row))

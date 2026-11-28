@@ -22,7 +22,7 @@ const proxy=https.createServer({key:fs.readFileSync(path.join(lab,'tls.key')),ce
   const pathname=new URL(incoming.url,origin).pathname;
   const backend=pathname.startsWith('/api/')||pathname==='/health'||pathname.startsWith('/media/');
   const upstream=http.request({hostname:'127.0.0.1',port:backend?8008:5173,path:incoming.url,method:incoming.method,headers:{...incoming.headers,'x-forwarded-proto':'https','x-forwarded-host':'digitalcrown.local:8005'}},res=>{
-    if(allowedPaths.has(pathname)||/^\/api\/mobile\/superadmin\/(?:trial-codes\/\d+\/(?:revocation-request|revocation-status|revoke)|revocation-requests(?:\/[0-9a-f-]+\/approve)?)$/.test(pathname))observed.push({method:incoming.method,path:pathname,status:res.statusCode,cacheNoStore:String(res.headers['cache-control']||'').includes('no-store'),originPresent:typeof incoming.headers.origin==='string',originMatches:incoming.headers.origin===origin});
+    if(allowedPaths.has(pathname)||/^\/api\/mobile\/superadmin\/(?:trial-codes\/\d+\/(?:revocation-request|revocation-status|revocation-cancel|revoke)|revocation-requests(?:\/[0-9a-f-]+\/approve)?)$/.test(pathname))observed.push({method:incoming.method,path:pathname,status:res.statusCode,cacheNoStore:String(res.headers['cache-control']||'').includes('no-store'),originPresent:typeof incoming.headers.origin==='string',originMatches:incoming.headers.origin===origin});
     out.writeHead(res.statusCode,res.headers);res.pipe(out);
   });
   upstream.on('error',()=>{if(!out.headersSent)out.writeHead(502);out.end();});
@@ -263,6 +263,18 @@ try{
   const pendingResult=await pendingResponse;assert.equal(pendingResult.status(),200);assert(pendingResult.headers()['cache-control'].includes('no-store'));
   await trialCard.getByText('En attente de confirmation Desktop',{exact:false}).waitFor();
   assert.equal(await trialCard.getByRole('button',{name:'Confirmer la révocation définitive'}).count(),0);
+  stage='mutation-pocket-cancel';
+  const cancelResponse=p.waitForResponse(r=>/\/api\/mobile\/superadmin\/trial-codes\/\d+\/revocation-cancel$/.test(new URL(r.url()).pathname)&&r.request().method()==='POST');
+  await trialCard.getByRole('button',{name:'Abandonner'}).click();
+  assert.equal((await cancelResponse).status(),200);
+  await trialCard.getByText('Demande annulée sur le serveur.',{exact:true}).waitFor();
+  await response(md,'/api/mobile/superadmin/revocation-requests','GET',200,()=>inbox.getByRole('button',{name:'Actualiser les demandes'}).click());
+  await inbox.getByText('Aucune demande en attente.',{exact:true}).waitFor();
+  mark('explicit Pocket cancellation removed request from real Desktop inbox');
+  const replacement=p.waitForResponse(r=>/\/api\/mobile\/superadmin\/trial-codes\/\d+\/revocation-request$/.test(new URL(r.url()).pathname)&&r.request().method()==='POST');
+  await trialCard.getByRole('button',{name:'Demander la révocation'}).click();
+  assert.equal((await replacement).status(),200);
+  await trialCard.getByText('En attente de confirmation Desktop',{exact:false}).waitFor();
   await shot(p,'https-pocket-revocation-pending-390');
   stage='mutation-desktop-inbox';
   await response(md,'/api/mobile/superadmin/revocation-requests','GET',200,()=>inbox.getByRole('button',{name:'Actualiser les demandes'}).click());
@@ -327,5 +339,5 @@ finally{
   proxy.closeAllConnections();await new Promise(resolve=>proxy.close(resolve));
   fs.writeFileSync(path.join(evidence,'https-status.json'),JSON.stringify(rows));
 }
-assert.equal(rows.length,32);
+assert.equal(rows.length,33);
 assert(rows.every(r=>r.pass===true),'accessibility gate failed; see explicit focus and reflow diagnostics');

@@ -164,7 +164,7 @@ export interface TrialRevocationRequest { challenge_id:string; nonce:string; exp
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const noncePattern=/^[0-9a-f]{64}$/;
 function ttl(v:unknown):v is number {return typeof v==='number'&&Number.isSafeInteger(v)&&v>=0&&v<=300;}
-async function mutationRequest(id:number, action:'revocation-request'|'revocation-status'|'revoke',ctx:PlatformVaultContext,signal:AbortSignal,body?:object):Promise<unknown>{
+async function mutationRequest(id:number, action:'revocation-request'|'revocation-status'|'revocation-cancel'|'revoke',ctx:PlatformVaultContext,signal:AbortSignal,body?:object):Promise<unknown>{
   if(!Number.isSafeInteger(id)||id<=0||document.hidden||!navigator.onLine||signal.aborted)throw new PocketPlatformError(0,'PLATFORM_REQUEST_ABORTED');
   const origin=platformOrigin(ctx);
   await MobileStorage.assertPlatformVaultContext(ctx);
@@ -195,4 +195,9 @@ export async function checkTrialRevocation(id:number,r:TrialRevocationRequest,ct
 export async function executeTrialRevocation(id:number,r:TrialRevocationRequest,ctx:PlatformVaultContext,signal:AbortSignal):Promise<void>{
   const v=await mutationRequest(id,'revoke',ctx,signal,{...binding(r),confirm:true});
   if(!isRecord(v)||!exactKeys(v,['revoked'])||v.revoked!==true)throw new PocketPlatformError(502,'PLATFORM_RESPONSE_INVALID');
+}
+
+export async function cancelTrialRevocation(id:number,r:TrialRevocationRequest,ctx:PlatformVaultContext,signal:AbortSignal):Promise<void>{
+  const v=await mutationRequest(id,'revocation-cancel',ctx,signal,binding(r));
+  if(!isRecord(v)||!exactKeys(v,['cancelled'])||v.cancelled!==true)throw new PocketPlatformError(502,'PLATFORM_RESPONSE_INVALID');
 }

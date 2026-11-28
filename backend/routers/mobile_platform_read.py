@@ -315,3 +315,30 @@ def revocation_request_status(target_id:int,body:RendezvousStatus,request:Reques
     else: raise HTTPException(status_code=409,detail="Demande indisponible.")
     response.headers["Cache-Control"]="no-store"
     return {"state":state,"expires_in":max(0,int((row.expires_at-datetime.utcnow()).total_seconds()))}
+
+
+@router.post("/trial-codes/{target_id}/revocation-cancel")
+def cancel_revocation_request(target_id:int,body:RendezvousStatus,request:Request,response:Response,
+                              db:Session=Depends(database.get_db)):
+    """Cancel only this exact live intent, before or after Desktop approval."""
+    intent=_pocket_intent(request,db,target_id,body.nonce)
+    from sqlalchemy import and_,or_
+    ch=MobileWebAuthnChallenge
+    now=datetime.utcnow()
+    try:
+        changed=db.query(ch).filter(ch.id==body.challenge_id,ch.user_id==intent.actor_id,
+            ch.employer_id==intent.tenant_id,ch.device_id==intent.device_id,
+            ch.used_at.is_(None),ch.expires_at>now,
+            or_(and_(ch.purpose==REQUEST_PURPOSE,ch.challenge_b64url==_encode_pending(intent)),
+                and_(ch.purpose==PURPOSE,ch.challenge_b64url==b64url_encode(intent.digest())))).update(
+                    {ch.used_at:now},synchronize_session=False)
+        if changed!=1: raise HTTPException(status_code=409,detail="Demande indisponible.")
+        db.add(models.AuditLog(user_id=intent.actor_id,employer_id=intent.tenant_id,
+            action="PLATFORM_TRIAL_REVOCATION_CANCELLED",resource_type="TrialActivationCode",
+            resource_id=str(intent.target_id),severity="CRITICAL",details="Exact Pocket revocation request cancelled."))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    response.headers["Cache-Control"]="no-store"
+    return {"cancelled":True}
