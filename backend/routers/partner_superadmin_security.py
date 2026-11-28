@@ -106,6 +106,10 @@ async def require_marketplace_superadmin(
                 "MARKETPLACE_SUPERADMIN_BIOMETRIC_REQUIRED",
                 "Le control-plane Marketplace requiert une vérification biométrique récente sur mobile.",
             )
+        # R5-A is read-only. Do not allow the existing mobile UV exception
+        # to authorize any Marketplace mutation before R5-B is qualified.
+        if request.method.upper() not in {"GET", "HEAD"}:
+            raise _deny("MARKETPLACE_SUPERADMIN_MOBILE_READ_ONLY", "Mutations SuperAdmin mobile non autorisées.")
         return user
 
     token_header = None

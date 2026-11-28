@@ -22,12 +22,15 @@ from backend.services.mobile_biometric import (
     b64url_encode,
     consume_challenge,
     credential_for_device,
+    credential_uv_binding,
+    require_bound_biometric_uv,
     issue_biometric_access_token,
     issue_challenge,
     opaque_user_handle,
     payload_has_biometric_uv,
 )
 from backend.services.mobile_mdns import start_mdns_if_secure, stop_mdns
+from backend.security import token_blacklist
 
 router = APIRouter(
     tags=["Mobile Passkey"],
@@ -57,11 +60,10 @@ def _identity(authorization: str, db: Session, *, require_uv: bool = False):
     device_id = str(payload.get("device_id") or "")
     if not device_id:
         raise HTTPException(status_code=401, detail="Session mobile non appairée.")
-    if require_uv and not payload_has_biometric_uv(payload):
-        raise HTTPException(
-            status_code=423,
-            detail={"code": "MOBILE_BIOMETRIC_LOCKED", "message": "Vérification biométrique requise."},
-        )
+    if require_uv or payload_has_biometric_uv(payload):
+        credential = credential_for_device(db, user_id=user.id, employer_id=tenant_id, device_id=device_id)
+        # Pending UV grants may only reach the passkey ceremony boundary.
+        require_bound_biometric_uv(payload, credential, active=False)
     return user, int(tenant_id), device_id, payload
 
 
@@ -224,6 +226,7 @@ def registration_verify(
         transports=transports,
         credential_device_type=_enum_value(verification.credential_device_type),
         credential_backed_up=bool(verification.credential_backed_up),
+        created_at=datetime.utcnow(),
         enabled_at=None,
     )
     db.add(row)
@@ -335,10 +338,14 @@ def authentication_verify(
     credential.last_used_at = datetime.utcnow()
     credential.credential_device_type = _enum_value(verification.credential_device_type)
     credential.credential_backed_up = bool(verification.credential_backed_up)
+    # Snapshot the verified record and revocation generation before commit.
+    # A concurrent re-enrollment or new ceremony invalidates this binding.
+    binding = credential_uv_binding(credential)
+    epoch = _payload.get("mobile_epoch") or token_blacklist.current_mobile_epoch(tenant_id, db)
     db.commit()
 
     access_token, expires_in = issue_biometric_access_token(
-        user=user, employer_id=tenant_id, device_id=device_id
+        user=user, employer_id=tenant_id, device_id=device_id, binding=binding, mobile_epoch=epoch
     )
     return {
         "access_token": access_token,

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from backend.core.key_material import MOBILE_KEY_VERSION
 from backend import models
 from backend.models_mobile_passkey import MobilePasskeyCredential, MobileWebAuthnChallenge
-from backend.security import ALGORITHM, SECRET_KEY
+from backend.security import ALGORITHM, SECRET_KEY, token_blacklist
 
 WEBAUTHN_RP_ID = os.getenv("DIGITALCROWN_WEBAUTHN_RP_ID", "digitalcrown.local").strip().lower()
 WEBAUTHN_ORIGIN = os.getenv(
@@ -122,7 +122,39 @@ def consume_challenge(
     return b64url_decode(row.challenge_b64url)
 
 
-def issue_biometric_access_token(*, user: models.User, employer_id: int, device_id: str) -> tuple[str, int]:
+def credential_uv_binding(credential: MobilePasskeyCredential) -> str:
+    """Bind a signed UV grant to the verified credential and latest ceremony."""
+    material = (
+        credential.credential_id,
+        credential.credential_public_key,
+        credential.created_at.isoformat(),
+        credential.last_used_at.isoformat() if credential.last_used_at else "",
+        str(credential.sign_count),
+    )
+    return hashlib.sha256("\\0".join(material).encode("utf-8")).hexdigest()
+
+
+def require_bound_biometric_uv(
+    payload: dict[str, Any], credential: MobilePasskeyCredential | None, *, active: bool
+) -> None:
+    binding = payload.get("biometric_binding")
+    if (
+        not payload_has_biometric_uv(payload)
+        or credential is None
+        or credential.last_used_at is None
+        or (active and credential.enabled_at is None)
+        or not isinstance(binding, str)
+        or not hmac.compare_digest(binding, credential_uv_binding(credential))
+    ):
+        raise HTTPException(
+            status_code=423,
+            detail={"code": "MOBILE_BIOMETRIC_LOCKED", "message": "Vérification biométrique récente requise."},
+        )
+
+
+def issue_biometric_access_token(
+    *, user: models.User, employer_id: int, device_id: str, binding: str, mobile_epoch: str
+) -> tuple[str, int]:
     now = datetime.now(timezone.utc)
     role = user.role.value if hasattr(user.role, "value") else str(user.role)
     exp = now + BIOMETRIC_SESSION_TTL
@@ -133,7 +165,9 @@ def issue_biometric_access_token(*, user: models.User, employer_id: int, device_
         "type": "mobile",
         "mobile_key_version": MOBILE_KEY_VERSION,
         "role": role,
-        "jti": f"mobile-uv:{int(employer_id)}:{uuid.uuid4().hex}",
+        "jti": f"mobile:{int(employer_id)}:{int(now.timestamp() * 1_000_000)}:{uuid.uuid4().hex}",
+        "mobile_epoch": mobile_epoch,
+        "biometric_binding": binding,
         "iat": now,
         "exp": exp,
         "biometric_uv": True,
@@ -161,11 +195,8 @@ def install_mobile_biometric_identity_gate(legacy_module) -> None:
             employer_id=int(tenant_id),
             device_id=device_id,
         )
-        if credential is not None and credential.enabled_at is not None and not payload_has_biometric_uv(payload):
-            raise HTTPException(
-                status_code=423,
-                detail={"code": "MOBILE_BIOMETRIC_LOCKED", "message": "Déverrouillage biométrique requis."},
-            )
+        if payload_has_biometric_uv(payload) or (credential is not None and credential.enabled_at is not None):
+            require_bound_biometric_uv(payload, credential, active=True)
         return user, tenant_id, payload
 
     legacy_module._decode_mobile_identity = gated_decoder

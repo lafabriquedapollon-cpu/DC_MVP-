@@ -153,15 +153,54 @@ def run():
     assert enabled["state"] == "enabled"
     request("durable token denied after enabling gate", S, (403,423), token=token)
     request("active verified platform read", S, 200, token=uv)
+    request("active mobile UV cannot mutate Marketplace", "/api/superadmin/marketplace/suppliers/999999/governance",
+            403, method="PATCH", token=uv, data={"confirm": True, "isActive": False})
+    request("desktop mutation boundary unchanged", "/api/superadmin/marketplace/suppliers/999999/governance",
+            404, method="PATCH", token=desktop, cookie=cookie, data={"confirm": True, "isActive": False})
     request("UV mobile token refused on desktop clients", "/api/superadmin/clients", 401, token=uv)
     request("disable credential after UV", P, 200, method="DELETE", token=uv)
     request("disabled credential must invalidate old privileged token", S, (401,403,423), token=uv, soft=True)
+    request("stale UV cannot enable another credential", P + "/enable", 423, method="POST",
+            token=uv, data={"credential_id": b64(cid)})
+    reg2, _ = request("re-enrollment challenge", P + "/registration/options", 200, method="POST", token=token, origin=ORIGIN)
+    request("re-enroll same authenticator", P + "/registration/verify", 200, method="POST", token=token,
+            origin=ORIGIN, data=verify_body(reg2, register(reg2, key, cid)))
+    fresh = options(token)
+    renewed, _ = request("fresh UV after re-enrollment", P + "/authentication/verify", 200, method="POST", token=token,
+                         origin=ORIGIN, data=verify_body(fresh, assertion(fresh, key, cid, 2)))
+    uv2 = renewed["access_token"]
+    request("enable re-enrolled credential", P + "/enable", 200, method="POST", token=uv2, data={"credential_id": b64(cid)})
+    request("old UV remains denied after same credential re-enrollment", S, 423, token=uv)
+    request("fresh UV accepted after re-enrollment", S, 200, token=uv2)
+    next_challenge = options(token)
+    next_verified, _ = request("new signed UV ceremony", P + "/authentication/verify", 200, method="POST", token=token,
+                               origin=ORIGIN, data=verify_body(next_challenge, assertion(next_challenge, key, cid, 3)))
+    uv3 = next_verified["access_token"]
+    request("previous UV invalidated by new ceremony", S, 423, token=uv2)
+    request("latest UV active", S, 200, token=uv3)
+    ordinary_reg, _ = request("ordinary registration challenge", P + "/registration/options", 200, method="POST",
+                              token=other, origin=ORIGIN)
+    ordinary_key, ordinary_cid = ec.generate_private_key(ec.SECP256R1()), secrets.token_bytes(32)
+    request("ordinary registration verified", P + "/registration/verify", 200, method="POST", token=other,
+            origin=ORIGIN, data=verify_body(ordinary_reg, register(ordinary_reg, ordinary_key, ordinary_cid)))
+    ordinary_auth = options(other)
+    ordinary_verified, _ = request("ordinary signed UV", P + "/authentication/verify", 200, method="POST", token=other,
+                                    origin=ORIGIN, data=verify_body(ordinary_auth, assertion(ordinary_auth, ordinary_key, ordinary_cid, 1)))
+    ordinary_uv = ordinary_verified["access_token"]
+    request("ordinary credential enabled", P + "/enable", 200, method="POST", token=ordinary_uv,
+            data={"credential_id": b64(ordinary_cid)})
+    request("ordinary active UV never gains platform authority", S, 403, token=ordinary_uv)
     request("desktop revokes paired platform device", "/api/admin/mobile-devices/" + mobile["device_id"] + "/revoke",
             200, method="POST", token=desktop, cookie=cookie)
-    request("revoked device old UV refused", S, 401, token=uv)
+    request("revoked device current UV refused", S, 401, token=uv3)
     request("revoked device durable refresh refused", M + "/refresh-token", 401, method="POST",
             data={"refresh_token": mobile["refresh_token"]})
     request("other device remains alive", P + "/status", 200, token=other)
+    request("other device active UV still valid", P + "/status", 200, token=ordinary_uv)
+    request("tenant-wide revoke ordinary sessions", "/api/admin/revoke-mobile", 200, method="POST",
+            token=ordinary_desktop, cookie=ordinary_cookie)
+    request("tenant-wide revoke invalidates active UV", P + "/status", 401, token=ordinary_uv)
+    request("tenant-wide revoke invalidates durable token", P + "/status", 401, token=other)
     request("desktop platform unchanged", S, 200, token=desktop, cookie=cookie)
     assert all(row["pass"] for row in rows), "R5 negative security expectation failed"
 
