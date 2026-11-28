@@ -1,7 +1,14 @@
 """Synthetic topology contract; real TLS loopback handshake, no external routes."""
 import json, os, socket, ssl, subprocess, tempfile, threading
 from pathlib import Path
-from backend.core.cabinet_topology import resolve_cabinet_network, TOPOLOGY_ROLES
+# Load the exact standalone contract without initializing backend package/DB.
+import importlib.util, sys
+source=Path(__file__).resolve().parents[1]/"core"/"cabinet_topology.py"
+spec=importlib.util.spec_from_file_location("dc_network_contract",source)
+module=importlib.util.module_from_spec(spec)
+sys.modules[spec.name]=module
+spec.loader.exec_module(module)
+resolve_cabinet_network,TOPOLOGY_ROLES=module.resolve_cabinet_network,module.TOPOLOGY_ROLES
 assert os.environ.get("GITHUB_ACTIONS") == "true"
 rows=[]
 def check(label, func):

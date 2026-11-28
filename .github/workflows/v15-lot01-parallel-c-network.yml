@@ -27,7 +27,7 @@ jobs:
           trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf "$lab"' EXIT
           sudo ip netns add "$ns"
           sudo ip netns exec "$ns" ip link set lo up
-          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" HOME="$lab" GITHUB_ACTIONS=true DC_EVIDENCE="$evidence" python -m backend.scripts.ci_v15_lot01_network
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" HOME="$lab" GITHUB_ACTIONS=true DC_EVIDENCE="$evidence" python backend/scripts/ci_v15_lot01_network.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
