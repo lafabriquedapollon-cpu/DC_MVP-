@@ -53,7 +53,22 @@ function decrypt(b){
  const d=createDecipheriv('aes-256-gcm',key,raw.subarray(0,12));d.setAuthTag(raw.subarray(-16));
  return JSON.parse(Buffer.concat([d.update(raw.subarray(12,-16)),d.final()]));
 }
+const phase=process.env.DC_RESTART_PHASE||'initial';
+assert(['initial','verify'].includes(phase)&&process.env.DC_LAB_ROOT);
+const statePath=process.env.DC_LAB_ROOT+'/restart-state.json';
 try{
+ if(phase==='verify'){
+ const {A,B,R,S,colorsA,colorsB,initialA,initialB}=JSON.parse(fs.readFileSync(statePath,'utf8'));
+ const match=(actual,expected)=>{for(const [k,v] of Object.entries(expected))assert.equal(actual[k],v,k)};
+ match((await request('A theme persisted after actual restart',P,{headers:A,status:200})).body,colorsA);
+ match((await request('B theme persisted after actual restart',P,{headers:B,status:200})).body,colorsB);
+ await request('A revoked Pocket still denied after restart',M,{headers:R,status:401});
+ match(decrypt((await request('B Pocket receives persisted encrypted theme after restart',M,{headers:S,status:200})).body),colorsB);
+ for(const [headers,init] of [[A,initialA],[B,initialB]]){
+   const original=Object.fromEntries(Object.keys(colorsA).map(k=>[k,init[k]]));
+   await request('restore synthetic original theme after restart',P,{method:'PUT',headers,body:original,status:200});
+ }
+ }else{
  const owner=await login('ci-owner@example.com'),other=await login('ci-other@example.com');
  const A=await register(owner.access_token),B=await register(other.access_token);
  const restricted=await staff('ci-restricted@example.com',A.Cookie);
@@ -81,9 +96,10 @@ try{
  await request('A revoked device theme denied',M,{headers:R,status:401});
  match(decrypt((await request('B device still receives B theme',M,{headers:S,status:200})).body),colorsB);
  match((await request('A theme still persisted',P,{headers:A,status:200})).body,colorsA);
- // LAB is ephemeral; restore initial organization values before disposal.
- for(const [headers,init] of [[A,initialA.body],[B,initialB.body]]){
-  const original=Object.fromEntries(Object.keys(colorsA).map(k=>[k,init[k]]));
-  await request('restore synthetic original theme',P,{method:'PUT',headers,body:original,status:200});
+ // Only synthetic credentials are retained in the private ephemeral LAB, never evidence.
+ fs.writeFileSync(statePath,JSON.stringify({A,B,R,S,colorsA,colorsB,initialA:initialA.body,initialB:initialB.body}),{mode:0o600,flag:'wx'});
  }
-}finally{fs.writeFileSync(process.env.DC_EVIDENCE+'/theme-api.json',JSON.stringify(evidence,null,2))}
+}finally{
+ if(phase==='verify')fs.rmSync(statePath,{force:true});
+ fs.writeFileSync(process.env.DC_EVIDENCE+'/theme-api'+(phase==='verify'?'-restart':'')+'.json',JSON.stringify(evidence,null,2));
+}
