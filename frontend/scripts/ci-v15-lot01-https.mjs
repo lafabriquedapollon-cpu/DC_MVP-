@@ -116,6 +116,7 @@ try{
   await d.bringToFront();await panel.getByRole('button',{name:'Autoriser un appareil'}).click();
   await panel.locator('select').waitFor({timeout:15000});
   const select=panel.locator('select');assert(await select.inputValue());
+  await shot(d,'https-desktop-authorization-1280');
   await panel.locator('input[type=password]').fill(process.env.DC_SYNTH_PASSWORD);
   await panel.locator('input[type=checkbox]').check();
   await response(d,'/api/mobile/passkey/platform-approval','POST',200,()=>panel.getByRole('button',{name:'Générer le ticket temporaire'}).click());
@@ -140,7 +141,7 @@ try{
   for(const [name,endpoint] of [['Essais','trial-codes'],['Marketplace','marketplace/overview'],['Clients','clients']]){
     await response(p,'/api/mobile/superadmin/'+endpoint,'GET',200,()=>p.getByRole('button',{name,exact:true}).click());await waitState('ready');
     assert.equal(await readRegion.locator('input,textarea,form').count(),0);
-    await shot(p,'https-pocket-'+endpoint.replace('/','-')+'-1280');
+    await shot(p,'https-pocket-tab-'+endpoint.replace('/','-')+'-1280');
   }
   stage='offline-lock';
   await pocket.setOffline(true);await p.waitForFunction(()=>navigator.onLine===false,null,{timeout:10000});await waitState('offline');await noData();mark('offline immediately clears platform data');
@@ -154,8 +155,43 @@ try{
   assert(platform.length>=4&&platform.every(x=>x.method==='GET'&&x.status===200&&x.cacheNoStore));
   assert(observed.some(x=>x.path==='/api/mobile/passkey/platform-approval/claim'&&x.status===200&&x.cacheNoStore));
   mark('all observed platform reads GET and no-store');
-  // Revoke only this synthetic device through existing canonical Desktop endpoint in follow-up;
-  // no server-side authority is mocked here. Browser context cleanup is mandatory.
+  stage='keyboard-reflow';
+  await p.setViewportSize({width:390,height:900});
+  await p.getByRole('button',{name:'Clients',exact:true}).focus();
+  await p.keyboard.press('Tab');
+  assert(await p.getByRole('button',{name:'Essais',exact:true}).evaluate(el=>el===document.activeElement&&getComputedStyle(el).outlineStyle!=='none'));
+  await p.evaluate(()=>{document.documentElement.style.fontSize='200%'});
+  try{
+    assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'200 percent root text horizontal reflow');
+    await shot(p,'https-pocket-text-200-390');
+  }finally{await p.evaluate(()=>{document.documentElement.style.fontSize=''})}
+  mark('keyboard focus visible and 200 percent root text reflow at 390');
+  stage='multi-tab';
+  const second=await pocket.newPage();
+  await second.bringToFront();await second.goto(origin+'/mobile/superadmin');
+  await second.locator('[data-r5-platform-state="locked"]').waitFor({timeout:30000});
+  assert.equal(await second.getByRole('region',{name:'Consultation plateforme'}).count(),0);
+  await waitState('locked');await noData();
+  await second.close();await p.bringToFront();
+  await p.getByRole('button',{name:'Vérifier ma biométrie'}).click();await waitState('ready');
+  mark('second tab requires UV and background tab clears platform data');
+  stage='revoke-device';
+  const device=await p.evaluate(async()=>{const {MobileStorage}=await import('/src/services/zka/MobileStorage.ts');return (await MobileStorage.capturePlatformVaultContext()).deviceId});
+  assert(typeof device==='string'&&device.length===36);
+  const status=await d.evaluate(async id=>(await fetch('/api/admin/mobile-devices/'+encodeURIComponent(id)+'/revoke',{method:'POST',credentials:'include'})).status,device);
+  assert.equal(status,200,'actual Desktop device revoke');
+  const rejected=await p.evaluate(async()=>{
+    const {MobileStorage}=await import('/src/services/zka/MobileStorage.ts');
+    const ctx=await MobileStorage.capturePlatformVaultContext();
+    const proof=await MobileStorage.getPlatformApproval(ctx);
+    if(!proof)throw Error('expected encrypted approval before rejection');
+    return (await fetch('/api/mobile/superadmin/clients',{headers:{Authorization:'Bearer '+ctx.token,'X-Platform-Approval':proof},credentials:'omit',cache:'no-store',redirect:'error'})).status;
+  });
+  assert.equal(rejected,401,'revoked UV and approval refused by actual server');
+  await p.getByRole('button',{name:'Actualiser'}).click();await waitState('locked');await noData();
+  mark('Desktop revocation rejects existing UV and approval and clears Pocket UI');
+  // Browser context cleanup is mandatory. Audit and device persistence are
+  // separately verified in a new database session by the LAB workflow.
   stage='cleanup';
   await p.evaluate(async()=>{const {MobileStorage}=await import('/src/services/zka/MobileStorage.ts');await MobileStorage.clearAll()});
   await cdp.send('WebAuthn.removeVirtualAuthenticator',{authenticatorId});await pocket.close();await desktop.close();
@@ -170,4 +206,4 @@ finally{
   proxy.closeAllConnections();await new Promise(resolve=>proxy.close(resolve));
   fs.writeFileSync(path.join(evidence,'https-status.json'),JSON.stringify(rows));
 }
-assert.equal(rows.length,18);
+assert.equal(rows.length,23);

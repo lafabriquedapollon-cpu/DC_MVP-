@@ -314,6 +314,30 @@ jobs:
           (cd frontend && exec node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5173) > "$DC_LAB_ROOT/vite.log" 2>&1 &
           vite_pid=$!
           timeout --kill-after=10s 360s node frontend/scripts/ci-v15-lot01-https.mjs
+          "$DC_PYTHON" - <<'PY'
+          import json, os
+          from pathlib import Path
+          from backend import database, models
+          db = database.SessionLocal()
+          try:
+              admin = db.query(models.User).filter(models.User.email == os.environ["SUPERADMIN_EMAIL"]).one()
+              devices = db.query(models.MobilePairedDevice).filter(models.MobilePairedDevice.user_id == admin.id).all()
+              assert len(devices) == 1 and devices[0].revoked_at is not None
+              rows = [{"label": "Desktop revocation persisted in independent DB session", "pass": True}]
+              for action in ("PLATFORM_PASSKEY_APPROVED", "PLATFORM_PASSKEY_CLAIMED"):
+                  matches = db.query(models.AuditLog).filter(models.AuditLog.user_id == admin.id,
+                      models.AuditLog.employer_id == admin.get_employer_id(),
+                      models.AuditLog.action == action, models.AuditLog.resource_type == "MobilePairedDevice",
+                      models.AuditLog.resource_id == devices[0].device_id,
+                      models.AuditLog.severity == "CRITICAL").all()
+                  assert len(matches) == 1
+                  rows.append({"label": action + " persisted with exact actor and device", "pass": True})
+              Path(os.environ["DC_EVIDENCE"], "https-db-status.json").write_text(json.dumps(rows))
+              for row in rows:
+                  print("LOT01_HTTPS_DB_CASE " + json.dumps(row))
+          finally:
+              db.close()
+          PY
           LAB
       - name: Upload synthetic browser evidence
         if: always()
