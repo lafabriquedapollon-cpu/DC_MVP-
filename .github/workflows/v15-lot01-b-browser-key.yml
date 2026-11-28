@@ -1,11 +1,11 @@
 name: V1.5 LOT01 B - browser key candidate LAB
 on:
   push:
-    branches: [ci/v15-lot01-b-enrollment-20261128]
+    branches: [ci/v15-lot01-b-enrollment-20261128, ci/v15-lot01-b-runtime-20261128]
 permissions:
   contents: read
 concurrency:
-  group: v15-lot01-b-browser-key
+  group: v15-lot01-b-browser-key-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   browser-key:
