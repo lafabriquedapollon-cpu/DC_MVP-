@@ -304,6 +304,36 @@ def run():
             assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial["id"])).count()==1
     tx_check("transaction rejects replay without duplicate audit",replay)
     request("facade sees persisted synthetic revocation", F + "/trial-codes", 200, token=uv, approval=approval)
+    # Dedicated HTTP pilot. Use independent real Desktop password approval for a second fixture.
+    trial2, _ = request("pilot second synthetic trial", "/api/superadmin/trial-codes", 200, method="POST",
+        token=desktop,cookie=cookie,data={"email":"ci-trial2@example.com","trial_days":14})
+    target = F + "/trial-codes/" + str(trial2["id"])
+    prepare = target + "/revocation-intent"
+    approve = target + "/desktop-approval"
+    execute = target + "/revoke"
+    request("pilot prepare requires platform approval",prepare,403,method="POST",token=uv,origin=ORIGIN)
+    binding, _ = request("pilot Pocket prepares exact intent",prepare,200,method="POST",token=uv,approval=approval,origin=ORIGIN)
+    assert set(binding)=={"device_id","approval_jti","uv_jti_hash","nonce"}
+    body={**binding,"password":os.environ["DC_SYNTH_PASSWORD"],"confirm":True}
+    request("pilot Pocket cannot approve itself",approve,401,method="POST",token=uv,approval=approval,origin=ORIGIN,data=body)
+    request("pilot ordinary Desktop cannot approve",approve,403,method="POST",token=ordinary_desktop,cookie=ordinary_cookie,data=body)
+    request("pilot Desktop confirmation required",approve,409,method="POST",token=desktop,cookie=cookie,data={**body,"confirm":False})
+    granted, _ = request("pilot independent Desktop action approval",approve,200,method="POST",token=desktop,cookie=cookie,data=body)
+    execution={"challenge_id":granted["challenge_id"],"nonce":binding["nonce"],"confirm":True}
+    request("pilot wrong target denied",F+"/trial-codes/"+str(trial["id"])+"/revoke",409,method="POST",token=uv,approval=approval,origin=ORIGIN,data=execution)
+    request("pilot wrong nonce denied",execute,409,method="POST",token=uv,approval=approval,origin=ORIGIN,data={**execution,"nonce":secrets.token_hex(32)})
+    request("pilot wrong origin denied",execute,409,method="POST",token=uv,approval=approval,origin="https://invalid.example",data=execution)
+    request("pilot missing approval denied",execute,403,method="POST",token=uv,origin=ORIGIN,data=execution)
+    request("pilot confirmation required",execute,409,method="POST",token=uv,approval=approval,origin=ORIGIN,data={**execution,"confirm":False})
+    with database.SessionLocal() as db:
+        assert db.get(models.TrialActivationCode,trial2["id"]).revoked_at is None
+    request("pilot executes exact approved revocation",execute,200,method="POST",token=uv,approval=approval,origin=ORIGIN,data=execution)
+    request("pilot execution replay denied",execute,409,method="POST",token=uv,approval=approval,origin=ORIGIN,data=execution)
+    with database.SessionLocal() as db:
+        assert db.get(models.TrialActivationCode,trial2["id"]).revoked_at is not None
+        assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial2["id"])).count()==1
+        assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOCATION_APPROVED",resource_id=str(trial2["id"])).count()==1
+        assert db.get(MobileWebAuthnChallenge,granted["challenge_id"]).used_at is not None
     overview, _ = request("facade Marketplace summary", F + "/marketplace/overview", 200, token=uv, approval=approval)
     desktop_overview, _ = request("Desktop Marketplace summary for comparison", S, 200, token=desktop, cookie=cookie)
     assert overview == desktop_overview
