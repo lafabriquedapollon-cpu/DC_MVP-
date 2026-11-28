@@ -38,7 +38,7 @@ class PlatformMutationIntent:
     device_id: str
     credential_binding: str
     approval_jti: str
-    uv_jti: str
+    uv_jti: str  # SHA-256 of the entire verified mobile UV JWT jti
     nonce: str
 
     def digest(self) -> bytes:
@@ -53,7 +53,7 @@ class PlatformMutationIntent:
             _device(self.device_id),
             _hex(self.credential_binding, 64),
             _hex(self.approval_jti, 32),
-            _hex(self.uv_jti, 32),
+            _hex(self.uv_jti, 64),
             _hex(self.nonce, 64),
         ]
         return hashlib.sha256(json.dumps(fields, separators=(",", ":"), ensure_ascii=True).encode("ascii")).digest()

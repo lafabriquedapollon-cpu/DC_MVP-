@@ -238,6 +238,72 @@ def run():
     assert len(trials) == 1 and trials[0]["id"] == trial["id"] and trials[0]["trial_days"] == 14
     assert set(trials[0]) == {"id","email","cabinet_name","trial_days","expires_at","consumed_at","revoked_at","created_at"}
     assert trial["code"] not in json.dumps(trials) and "CI PRIVATE MARKER" not in json.dumps(trials)
+    # Transaction qualification in the already isolated SQLCipher LAB, no API exposure.
+    from dataclasses import replace
+    from jose import jwt
+    from backend import database, models
+    from backend.models_mobile_passkey import MobileWebAuthnChallenge
+    from backend.services.mobile_biometric import issue_challenge, credential_for_device, platform_credential_binding
+    from backend.services.platform_mutation_intent import PlatformMutationIntent
+    from backend.services.platform_mutation_transaction import stage_trial_revocation, MutationIntentRefused, PURPOSE
+    uclaims = jwt.get_unverified_claims(uv)
+    aclaims = jwt.get_unverified_claims(approval)
+    actor_id, tenant_id = int(uclaims["sub"]), int(uclaims["tenant_id"])
+    with database.SessionLocal() as db:
+        credential = credential_for_device(db,user_id=actor_id,employer_id=tenant_id,device_id=mobile["device_id"])
+        intent = PlatformMutationIntent("trial-code.revoke",trial["id"],actor_id,tenant_id,mobile["device_id"],
+            platform_credential_binding(credential),aclaims["jti"],hashlib.sha256(uclaims["jti"].encode()).hexdigest(),secrets.token_hex(32))
+        challenge = issue_challenge(db,purpose=PURPOSE,user_id=actor_id,employer_id=tenant_id,
+            device_id=mobile["device_id"],challenge=intent.digest())
+    def tx_check(label, fn):
+        fn()
+        row={"label":label,"pass":True}
+        rows.append(row)
+        print("LOT01_R5_UV_CASE "+json.dumps(row),flush=True)
+    def untouched():
+        with database.SessionLocal() as db:
+            assert db.get(MobileWebAuthnChallenge,challenge).used_at is None
+            assert db.get(models.TrialActivationCode,trial["id"]).revoked_at is None
+            assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial["id"])).count()==0
+    def wrong_intent():
+        with database.SessionLocal() as db:
+            try:
+                with db.begin():
+                    stage_trial_revocation(db,intent=replace(intent,target_id=trial["id"]+1),challenge_id=challenge)
+            except MutationIntentRefused: pass
+            else: raise AssertionError("wrong target admitted")
+        untouched()
+    tx_check("transaction rejects changed target without consumption",wrong_intent)
+    def rollback():
+        with database.SessionLocal() as db:
+            try:
+                with db.begin():
+                    stage_trial_revocation(db,intent=intent,challenge_id=challenge)
+                    raise RuntimeError("synthetic rollback")
+            except RuntimeError as e:
+                assert str(e)=="synthetic rollback"
+        untouched()
+    tx_check("transaction rollback restores intent target audit",rollback)
+    def commit():
+        with database.SessionLocal() as db:
+            with db.begin():
+                stage_trial_revocation(db,intent=intent,challenge_id=challenge)
+        with database.SessionLocal() as db:
+            assert db.get(MobileWebAuthnChallenge,challenge).used_at is not None
+            assert db.get(models.TrialActivationCode,trial["id"]).revoked_at is not None
+            assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial["id"]),severity="CRITICAL").count()==1
+    tx_check("transaction commits nonce target and audit together",commit)
+    def replay():
+        with database.SessionLocal() as db:
+            try:
+                with db.begin():
+                    stage_trial_revocation(db,intent=intent,challenge_id=challenge)
+            except MutationIntentRefused: pass
+            else: raise AssertionError("replay admitted")
+        with database.SessionLocal() as db:
+            assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial["id"])).count()==1
+    tx_check("transaction rejects replay without duplicate audit",replay)
+    request("facade sees persisted synthetic revocation", F + "/trial-codes", 200, token=uv, approval=approval)
     overview, _ = request("facade Marketplace summary", F + "/marketplace/overview", 200, token=uv, approval=approval)
     desktop_overview, _ = request("Desktop Marketplace summary for comparison", S, 200, token=desktop, cookie=cookie)
     assert overview == desktop_overview
