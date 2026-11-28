@@ -1,5 +1,8 @@
 """Real SQLCipher candidate enrollment, synthetic CI only."""
 import os,json,secrets
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from sqlalchemy.exc import OperationalError
 from pathlib import Path
 from datetime import timedelta
 from sqlalchemy import select,update,func,insert
@@ -146,6 +149,59 @@ try:
     check("prior signed read proof refused after rotation",read(old_proof) is None)
     raw=renewed["token"]
     next_proof=issue();check("new session signed read works",bool(next_proof) and read(next_proof) is not None)
+    # Independent connections, real SQLCipher WAL; no mock or blind retry.
+    def race(*ops):
+        gate=Barrier(len(ops),timeout=15)
+        def worker(op):
+            with database.SessionLocal() as db:
+                with db.begin():
+                    db.connection()
+                    gate.wait()
+                    try:
+                        value=op(db)
+                    except (AuthorityRefused,SessionRefused,ProjectionRefused):
+                        db.rollback()
+                        return ("refused",None)
+                    except OperationalError as exc:
+                        db.rollback()
+                        if not any(s in str(exc.orig).lower() for s in ("database is locked","database table is locked","database is busy")):
+                            raise
+                        return ("busy",None)
+                return ("committed",value)
+        with ThreadPoolExecutor(max_workers=len(ops)) as pool:
+            futures=[pool.submit(worker,op) for op in ops]
+            return [f.result(timeout=30) for f in futures]
+    def mint_op(proof):
+        sig=sign(key,proof)
+        return lambda db:stage_issue_session(db,nonce=proof["nonce"],signature_hex=sig)
+    def active_count():
+        with database.SessionLocal() as db:
+            return db.execute(select(func.count()).select_from(sessions).where(sessions.c.revoked_at.is_(None),sessions.c.device_id==row["device_id"])).scalar_one()
+    ok,same=challenge();assert ok
+    pair=race(mint_op(same),mint_op(same))
+    winners=[v for status,v in pair if status=="committed"]
+    check("concurrent same issuance proof commits exactly once",len(winners)==1)
+    check("concurrent same proof leaves one active session",active_count()==1)
+    check("concurrent same proof cannot be reused",not mint(same)[0])
+    raw=winners[0]["token"]
+    ok,first=challenge();assert ok
+    ok,second=challenge();assert ok
+    pair=race(mint_op(first),mint_op(second))
+    winners=[v for status,v in pair if status=="committed"]
+    check("concurrent distinct issuance makes progress",len(winners)>=1)
+    check("concurrent distinct issuance leaves exactly one active session",active_count()==1)
+    with database.SessionLocal() as db:
+        current=db.execute(select(sessions.c.token_digest).where(sessions.c.revoked_at.is_(None),sessions.c.device_id==row["device_id"])).scalar_one()
+    live=[v for v in winners if digest_token(v["token"])==current]
+    check("exactly one committed concurrent token remains active",len(live)==1)
+    raw=live[0]["token"]
+    proof=issue();assert proof
+    sig=key.sign(message(session_digest=digest_token(raw),device_id=row["device_id"],action="assigned-order.read",cabinet_id=ca,resource_id=order,nonce=proof)).hex()
+    def project(db):
+        return stage_lab_projection(db,raw_token=raw,device_id=row["device_id"],cabinet_id=ca,resource_id=order,nonce=proof,signature_hex=sig)
+    pair=race(project,project)
+    check("concurrent signed read proof discloses once",sum(s=="committed" for s,v in pair)==1)
+    check("concurrent read replay refused",read(proof) is None)
     pending=issue();check("pre-revocation challenge exists",bool(pending))
     ok,pending_session=challenge();assert ok
     check("foreign owner cannot revoke",not revoke(actor_id=cb)[0])
@@ -161,7 +217,29 @@ try:
         check("revocation persists across connection",all(all(v is not None for v in db.execute(select(t.c.revoked_at)).scalars().all()) for t in (principals,devices,lab_bindings,sessions,assignments)))
         check("exact audit lifecycle",all(db.query(models.AuditLog).filter_by(action=a,user_id=ca,employer_id=ca,resource_type="Lab",resource_id=str(la),severity="CRITICAL").count()==1 for a in ("EXTERNAL_LAB_ENROLLMENT_PREPARED","EXTERNAL_LAB_ENROLLMENT_COMPLETED","EXTERNAL_LAB_ENROLLMENT_REVOKED")))
     with database.SessionLocal() as db:
-        check("two committed issuances audited without token",db.query(models.AuditLog).filter_by(action="EXTERNAL_LAB_SESSION_ISSUED",resource_type="Lab",resource_id=str(la),severity="CRITICAL").count()==2)
+        check("committed issuances audited exactly once per session",db.query(models.AuditLog).filter_by(action="EXTERNAL_LAB_SESSION_ISSUED",resource_type="Lab",resource_id=str(la),severity="CRITICAL").count()==db.execute(select(func.count()).select_from(sessions).where(sessions.c.device_id==row["device_id"])).scalar_one())
+    # Separate fresh binding for issuance versus revocation, without affecting prior evidence.
+    race_key=Ed25519PrivateKey.generate()
+    with database.SessionLocal() as db:
+        with db.begin():race_lab=make_lab(ca,"RACE")
+    ok,race_row=prepare(lab_id=race_lab,public_key_hex=public(race_key),verified_fingerprint=fingerprint(public(race_key)));assert ok
+    ok,_=complete(race_row,race_key);assert ok
+    ok,race_proof=challenge(device_id=race_row["device_id"]);assert ok
+    def revoke_op(db):
+        stage_revoke_enrollment(db,actor_id=ca,cabinet_id=ca,lab_id=race_lab,password=password,confirm=True)
+    def race_mint(db):
+        return stage_issue_session(db,nonce=race_proof["nonce"],signature_hex=sign(race_key,race_proof))
+    pair=race(race_mint,revoke_op)
+    check("issuance revocation race makes progress",any(s=="committed" for s,v in pair))
+    # A busy revoke is not success. Explicitly finish it in a new transaction.
+    if pair[1][0]!="committed":
+        assert revoke(lab_id=race_lab)[0]
+    check("session issuance denied after committed race revocation",not mint(race_proof,race_key)[0])
+    check("new challenge denied after committed race revocation",not challenge(device_id=race_row["device_id"])[0])
+    database.engine.dispose()
+    with database.SessionLocal() as db:
+        check("no active session survives committed race revocation",db.execute(select(func.count()).select_from(sessions).where(sessions.c.device_id==race_row["device_id"],sessions.c.revoked_at.is_(None))).scalar_one()==0)
+        check("race revocation audit exactly once",db.query(models.AuditLog).filter_by(action="EXTERNAL_LAB_ENROLLMENT_REVOKED",resource_type="Lab",resource_id=str(race_lab),severity="CRITICAL").count()==1)
     ok,expired=prepare(lab_id=lc,public_key_hex=public(other),verified_fingerprint=fingerprint(public(other)));assert ok
     with database.SessionLocal() as db:
         with db.begin():db.execute(update(enrollments).where(enrollments.c.nonce==expired["nonce"]).values(expires_at=now_utc()-timedelta(seconds=1)))
@@ -170,7 +248,7 @@ try:
     ok,cancelled=prepare(lab_id=ld,public_key_hex=public(third),verified_fingerprint=fingerprint(public(third)));assert ok
     check("pending revocation accepted",revoke(lab_id=ld)[0])
     check("cancelled challenge denied",not complete(cancelled,third)[0])
-    check("no new authority after expired or cancelled",count(principals)==count(devices)==count(lab_bindings)==1)
+    check("no new authority after expired or cancelled",count(principals)==count(devices)==count(lab_bindings)==2)
 finally:
     metadata.drop_all(database.engine);database.engine.dispose()
     Path(os.environ["DC_EVIDENCE"],"external-lab-enrollment.json").write_text(json.dumps(rows,indent=2))
@@ -218,6 +296,14 @@ EXPECTED_LABELS = [
     "rotated token cannot request proof",
     "prior signed read proof refused after rotation",
     "new session signed read works",
+    "concurrent same issuance proof commits exactly once",
+    "concurrent same proof leaves one active session",
+    "concurrent same proof cannot be reused",
+    "concurrent distinct issuance makes progress",
+    "concurrent distinct issuance leaves exactly one active session",
+    "exactly one committed concurrent token remains active",
+    "concurrent signed read proof discloses once",
+    "concurrent read replay refused",
     "pre-revocation challenge exists",
     "foreign owner cannot revoke",
     "owner revokes",
@@ -229,7 +315,12 @@ EXPECTED_LABELS = [
     "revoked cannot reenroll",
     "revocation persists across connection",
     "exact audit lifecycle",
-    "two committed issuances audited without token",
+    "committed issuances audited exactly once per session",
+    "issuance revocation race makes progress",
+    "session issuance denied after committed race revocation",
+    "new challenge denied after committed race revocation",
+    "no active session survives committed race revocation",
+    "race revocation audit exactly once",
     "expired challenge denied",
     "pending revocation accepted",
     "cancelled challenge denied",
