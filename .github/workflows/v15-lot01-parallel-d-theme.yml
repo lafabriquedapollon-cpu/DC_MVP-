@@ -1,0 +1,44 @@
+name: V1.5 LOT01 parallel D - theme browser contract
+on:
+  push:
+    branches: [ci/v15-lot01-parallel-d-theme-20261128]
+permissions:
+  contents: read
+jobs:
+  theme-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked frontend and browser tool
+        run: |
+          npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+          mkdir -p "$RUNNER_TEMP/dc-theme-tools"
+          npm install --prefix "$RUNNER_TEMP/dc-theme-tools" --ignore-scripts --no-audit --no-fund --save-exact --registry https://registry.npmjs.org playwright-core@1.61.0
+      - name: Real browser in isolated LAB
+        run: |
+          set -euo pipefail
+          umask 077
+          ns="dc-theme-${GITHUB_RUN_ID}"
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-theme.XXXXXXXX")
+          evidence="$RUNNER_TEMP/dc-theme-evidence"
+          mkdir -p "$evidence" "$lab/home"
+          git rev-parse HEAD > "$evidence/head.txt"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf "$lab" "$RUNNER_TEMP/dc-theme-tools"' EXIT
+          frontend/node_modules/.bin/esbuild frontend/scripts/ci-v15-lot01-theme-entry.ts --bundle --platform=browser --format=iife --global-name=DCTheme --outfile="$lab/bundle.js"
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          chrome=$(command -v google-chrome || command -v chromium)
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" HOME="$lab/home" GITHUB_ACTIONS=true DC_LAB="$lab" DC_BROWSER_TOOLS="$RUNNER_TEMP/dc-theme-tools" DC_CHROME="$chrome" DC_EVIDENCE="$evidence" timeout 120s node frontend/scripts/ci-v15-lot01-theme-browser.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-lot01-theme-synthetic
+          path: ${{ runner.temp }}/dc-theme-evidence/
+          if-no-files-found: error
+          retention-days: 3
