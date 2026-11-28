@@ -12,7 +12,7 @@ assert.equal(requireTool('playwright-core/package.json').version,'1.61.0');
 const {chromium}=requireTool('playwright-core');
 const web='http://127.0.0.1:5173',api='http://127.0.0.1:8008';
 const rows=[];
-let browser;
+let browser, desktopPage, pocketPage, stage='startup';
 const mark=(label)=>{rows.push({label,pass:true});console.log('LOT01_UI_BEFORE_CASE '+JSON.stringify(rows.at(-1)))};
 const shot=async(page,name)=>{await page.screenshot({path:path.join(evidence,name+'.png'),animations:'disabled'});mark(name)};
 try {
@@ -24,6 +24,9 @@ try {
     proxy:{server:'http://127.0.0.1:1',bypass:'127.0.0.1,localhost'}});
   const newContext=async()=>{const ctx=await browser.newContext({viewport:{width:1280,height:900},serviceWorkers:'block'});await ctx.route('**/*',r=>{const u=new URL(r.request().url());return [web,api].includes(u.origin)?r.continue():r.abort()});return ctx};
   const desktop=await newContext(), d=await desktop.newPage();
+  desktopPage=d;stage='desktop-login';
+  const observed=[];
+  d.on('response',r=>{const u=new URL(r.url());if(u.origin===api&&/^\/api\/(auth\/me|auth\/login|workstation\/(state|bootstrap)|config\/[^/]+|superadmin\/(clients|trial-codes))$/.test(u.pathname))observed.push({path:u.pathname,status:r.status()})});
   await d.goto(web+'/login');
   await d.locator('input[type=email]').fill('ci-platform-admin@example.com');
   await d.locator('input[type=password]').fill(process.env.DC_SYNTH_PASSWORD);
@@ -31,8 +34,18 @@ try {
   await d.locator('button[type=submit]').first().click();
   await login;
   await d.waitForURL(u=>u.pathname==='/dashboard',{timeout:60000});
+  stage='desktop-authority';
+  await d.waitForFunction(()=>{try{const p=JSON.parse(localStorage.getItem('auth-storage')||'null');return p?.state?.user?.is_superadmin===true}catch{return false}},null,{timeout:45000});
+  const profile=await d.evaluate(async api=>{const r=await fetch(api+'/api/auth/me',{credentials:'include'});const body=await r.json().catch(()=>null);return {status:r.status,superadmin:body?.is_superadmin===true}},api);
+  assert.deepEqual(profile,{status:200,superadmin:true},'actual Desktop platform identity');
+  stage='desktop-superadmin';
   await d.goto(web+'/super-admin');
-  await d.getByRole('heading',{name:/Digital Crown.*SuperAdmin/i}).waitFor({timeout:60000});
+  try {
+    await d.getByRole('heading',{name:/Digital Crown\\s*SuperAdmin/i}).waitFor({timeout:60000});
+  } catch (error) {
+    console.log('LOT01_UI_AUTH_DIAGNOSTIC '+JSON.stringify({responses:observed.slice(-20)}));
+    throw error;
+  }
   for(const width of [390,430,768,1280]){
     await d.setViewportSize({width,height:900});
     await shot(d,'before-desktop-'+width);
@@ -49,6 +62,7 @@ try {
   const issue=await fetch(api+'/api/mobile/bridge-pairing',{method:'POST',headers:{...desktopHeaders,'Content-Type':'application/json'},body:JSON.stringify({target_user_id:identity.id,destination:'agenda'})});
   assert.equal(issue.status,200);const {token_code}=await issue.json();assert(token_code);
   const pocket=await newContext(),p=await pocket.newPage();
+  pocketPage=p;stage='pocket-pairing';
   // Pair via the actual application's ECDH and vault storage modules.
   // The ticket is never written to a URL, evidence file, or log.
   await p.goto(web+'/mobile/onboarding');
@@ -64,6 +78,7 @@ try {
     return MobileStorage.isPaired();
   },{token:token_code,api});
   assert.equal(paired,true);mark('real Pocket ECDH pairing');
+  stage='pocket-route';
   await p.goto(web+'/mobile/superadmin');
   await p.waitForURL(u=>u.pathname==='/mobile/dashboard',{timeout:60000});
   await p.locator('[data-dc-mobile-shell]').waitFor({timeout:60000});
@@ -73,6 +88,7 @@ try {
     await p.setViewportSize({width,height:900});
     await shot(p,'before-pocket-route-'+width);
   }
+  stage='pocket-security';
   await p.goto(web+'/mobile/dashboard?tab=securite');
   await p.locator('[data-m6i-biometric]').waitFor({timeout:60000});
   for(const width of [390,430,768,1280]){
@@ -81,6 +97,18 @@ try {
   }
   await p.evaluate(async()=>{const {MobileStorage}=await import('/src/services/zka/MobileStorage.ts');await MobileStorage.clearAll()});
   await pocket.close();await desktop.close();
+}catch(error){
+  // Only fixed route names and boolean state: never emit raw URL, DOM, tokens or credentials.
+  const known=['/login','/dashboard','/super-admin','/hub','/setup','/station','/mobile/onboarding','/mobile/dashboard','/mobile/superadmin'];
+  const diagnostic={stage,errorType:error?.name==='TimeoutError'?'TimeoutError':'Other'};
+  for(const [label,page] of [['desktop',desktopPage],['pocket',pocketPage]]){
+    if(!page||page.isClosed())continue;
+    const pathname=new URL(page.url()).pathname;
+    diagnostic[label]={path:known.includes(pathname)?pathname:'other'};
+    if(label==='desktop')diagnostic[label].profile=await page.evaluate(()=>{try{const u=JSON.parse(localStorage.getItem('auth-storage')||'null')?.state?.user;return {present:!!u,superadmin:u?.is_superadmin===true}}catch{return {present:false,superadmin:false}}}).catch(()=>null);
+  }
+  console.log('LOT01_UI_BEFORE_DIAGNOSTIC '+JSON.stringify(diagnostic));
+  throw Error('UI_BEFORE_FAILED_'+stage);
 }finally{
   if(browser)await browser.close();
   fs.writeFileSync(path.join(evidence,'ui-before-status.json'),JSON.stringify(rows));
