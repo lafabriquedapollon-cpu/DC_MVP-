@@ -1,0 +1,307 @@
+name: V1.5 LOT01 parallel Theme API
+on:
+  push:
+    branches: [ci/v15-lot01-parallel-d-theme-20261128]
+permissions:
+  contents: read
+concurrency:
+  group: v15-lot01-parallel-theme-api
+  cancel-in-progress: true
+jobs:
+  desktop-integration:
+    name: IAM LAB (${{ matrix.scope }})
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [stock-session]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Validate integration driver syntax
+        run: node --check frontend/scripts/ci-v15-lot01-theme-api.mjs
+      - name: Validate all Python source syntax
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          files = sorted(Path('backend').rglob('*.py'))
+          for p in files:
+              ast.parse(p.read_text(encoding='utf-8-sig'), filename=str(p))
+          print(f'BACKEND_AST_PASS files={len(files)}')
+          PY
+      - name: Install native runtime prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libsqlcipher-dev libmagic1 libpango-1.0-0 libpangocairo-1.0-0 libpangoft2-1.0-0 libgl1 libglib2.0-0t64
+      - name: Install pinned Python dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+          python -m pip install --no-cache-dir --index-url https://pypi.org/simple -r backend/requirements.txt
+          python -m pip check
+          echo PYTHON_DEPENDENCIES_PASS
+      - name: Create fresh encrypted LAB and run actual FastAPI without external network
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-rehearsal.XXXXXXXX")
+          ns="dc-rehearsal-$GITHUB_RUN_ID"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          export DC_LAB_ROOT="$lab"
+          export DC_PYTHON="$(command -v python)"
+          export DC_CHECKOUT="$GITHUB_WORKSPACE"
+          export DC_EVIDENCE="$RUNNER_TEMP/dc-integration-evidence"
+          mkdir -p "$DC_EVIDENCE"
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_LAB_ROOT="$lab" DC_PYTHON="$DC_PYTHON" DC_CHECKOUT="$DC_CHECKOUT" DC_EVIDENCE="$DC_EVIDENCE" DC_BUILT_REHEARSAL=true DC_TEST_SCOPE="${{ matrix.scope }}" bash -s <<'LAB'
+          set -euo pipefail
+          umask 077
+          cd "$DC_CHECKOUT"
+          export HOME="$DC_LAB_ROOT/home"
+          export XDG_CONFIG_HOME="$HOME/config" XDG_RUNTIME_DIR="$HOME/runtime" XDG_DATA_HOME="$HOME/data"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME" "$DC_LAB_ROOT/rehearsal-media"
+          export ENVIRONMENT=e2e_install_rehearsal
+          export SUPERADMIN_EMAIL=ci-platform-admin@example.com
+          export ALLOWED_ORIGINS=http://127.0.0.1:5173
+          export DC_SYNTH_PASSWORD="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          export VITE_API_URL=http://127.0.0.1:8008 VITE_ENABLE_HTTPS=false
+          export DATABASE_URL="sqlite:///$DC_LAB_ROOT/fresh-rehearsal.db"
+          export MEDIA_ROOT="$DC_LAB_ROOT/rehearsal-media"
+          export SECRET_KEY="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export CABINET_MASTER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export SQLCIPHER_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export MOBILE_PAIRING_KEY_HEX="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')"
+          export DIGITALCROWN_ISOLATED_RUNTIME=true TELEMETRY_ENABLED=false
+          export GOOGLE_CLIENT_ID='' GOOGLE_CLIENT_SECRET='' SMTP_HOST='' PATIENT_COMPANION_RELAY_URL='' PATIENT_COMPANION_RELAY_BOOTSTRAP_SECRET=''
+          export DIGITALCROWN_ISOLATION_DB_FINGERPRINT="$("$DC_PYTHON" -c 'import os; from backend.core.runtime_safety import database_target_fingerprint; print(database_target_fingerprint(os.environ["DATABASE_URL"]))')"
+          test ! -e "$DC_LAB_ROOT/fresh-rehearsal.db"
+          test "$(ip -o link show | wc -l)" -eq 1
+          printf '%s\n' "$(git rev-parse HEAD)" > "$DC_EVIDENCE/head.txt"
+          echo LAB_LOOPBACK_ONLY
+          "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
+          "$DC_PYTHON" -m backend.scripts.ci_v15_lot01_stock_seed seed
+          # Deterministic regression of the receive/deadline contract in the LAB.
+          "$DC_PYTHON" - <<'PY'
+          import asyncio
+          from backend.routers.ai_feedback import _ghost_wait_for_disconnect
+
+          class Socket:
+              def __init__(self, messages=(), flood=False):
+                  self.messages = asyncio.Queue()
+                  for message in messages:
+                      self.messages.put_nowait(message)
+                  self.flood = flood
+              async def receive(self):
+                  if self.flood:
+                      await asyncio.sleep(0)
+                      return {"type": "websocket.receive", "text": "synthetic"}
+                  return await self.messages.get()
+
+          async def check():
+              disconnected = Socket([{"type": "websocket.disconnect", "code": 1001}])
+              assert await asyncio.wait_for(_ghost_wait_for_disconnect(disconnected), 1)
+              mixed = Socket([{"type": "websocket.receive", "text": "synthetic"},
+                              {"type": "websocket.disconnect", "code": 1000}])
+              assert await asyncio.wait_for(_ghost_wait_for_disconnect(mixed), 1)
+              assert not await asyncio.wait_for(_ghost_wait_for_disconnect(Socket(), .03), 1)
+              assert not await asyncio.wait_for(_ghost_wait_for_disconnect(Socket(flood=True), .03), 1)
+              pending = asyncio.create_task(_ghost_wait_for_disconnect(Socket()))
+              await asyncio.sleep(0)
+              pending.cancel()
+              try:
+                  await pending
+              except asyncio.CancelledError:
+                  pass
+              else:
+                  raise AssertionError("Cancellation swallowed")
+              print("GHOST_DISCONNECT_DEADLINE_CANCELLATION_PASS")
+          asyncio.run(check())
+          PY
+          # Diagnostic launcher exists only in this isolated LAB.
+          cat > "$DC_LAB_ROOT/uvicorn-diagnostic.py" <<'PY'
+          import asyncio
+          import faulthandler
+          import os
+          import signal
+          import re
+          import uvicorn
+
+          active_requests = {}
+
+          def safe_name(value):
+              return re.sub(r"[^a-zA-Z0-9_.<>-]", "_", str(value))[:120]
+
+          def await_chain(task):
+              coro = task.get_coro()
+              seen = set()
+              frames = []
+              while coro is not None and id(coro) not in seen and len(frames) < 30:
+                  seen.add(id(coro))
+                  code = getattr(coro, "cr_code", None) or getattr(coro, "gi_code", None)
+                  frame = getattr(coro, "cr_frame", None) or getattr(coro, "gi_frame", None)
+                  if code is not None:
+                      frames.append("%s:%s:%s" % (safe_name(os.path.basename(code.co_filename)),
+                                    frame.f_lineno if frame else 0, safe_name(code.co_name)))
+                  coro = getattr(coro, "cr_await", None) or getattr(coro, "gi_yieldfrom", None) or getattr(coro, "ag_await", None)
+              return ">".join(frames) or "unknown"
+
+          def observe_app(app):
+              async def observed(scope, receive, send):
+                  task = asyncio.current_task()
+                  state = {"scope": scope, "disconnect": False, "response_complete": False}
+                  active_requests[task] = state
+                  async def observed_receive():
+                      message = await receive()
+                      if message["type"] in {"http.disconnect", "websocket.disconnect"}:
+                          state["disconnect"] = True
+                      return message
+                  async def observed_send(message):
+                      await send(message)
+                      if message["type"] == "http.response.body" and not message.get("more_body", False):
+                          state["response_complete"] = True
+                  try:
+                      await app(scope, observed_receive, observed_send)
+                  finally:
+                      active_requests.pop(task, None)
+                      if getattr(scope.get("endpoint"), "__name__", "") == "websocket_ghost_insights":
+                          print("R02_GHOST_HANDLER_EXIT disconnect=%d" % int(state["disconnect"]), flush=True)
+              return observed
+
+          class DiagnosticServer(uvicorn.Server):
+              async def shutdown(self, sockets=None):
+                  print("R02_UVICORN_SHUTDOWN_ENTER", flush=True)
+                  async def monitor():
+                      while True:
+                          print("R02_UVICORN_STATE connections=%d tasks=%d" %
+                                (len(self.server_state.connections), len(self.server_state.tasks)), flush=True)
+                          for pending in list(self.server_state.tasks):
+                              state = active_requests.get(pending, {})
+                              scope = state.get("scope", {})
+                              endpoint = scope.get("endpoint")
+                              print("R02_PENDING endpoint=%s method=%s disconnect=%s response_complete=%s chain=%s" %
+                                    (safe_name(getattr(endpoint, "__name__", "unresolved")),
+                                     scope.get("method") if scope.get("method") in {"GET","POST","PUT","PATCH","DELETE","OPTIONS","HEAD"} else "other",
+                                     int(state.get("disconnect", False)), int(state.get("response_complete", False)),
+                                     await_chain(pending)), flush=True)
+                          # Include child coroutines: Starlette task groups can hide the actual handler.
+                          if self.server_state.tasks:
+                              for child in sorted(asyncio.all_tasks(), key=lambda t: t.get_name()):
+                                  if child is not asyncio.current_task() and not child.done():
+                                      print("R02_ASYNC_CHAIN " + await_chain(child), flush=True)
+                          await asyncio.sleep(2)
+                  task = asyncio.create_task(monitor())
+                  try:
+                      await super().shutdown(sockets=sockets)
+                      print("R02_UVICORN_SHUTDOWN_RETURN", flush=True)
+                  finally:
+                      task.cancel()
+                      await asyncio.gather(task, return_exceptions=True)
+
+          if __name__ == "__main__":
+              with open(os.path.join(os.environ["DC_LAB_ROOT"], "shutdown-stacks.log"), "a") as stacks:
+                  faulthandler.register(signal.SIGUSR1, file=stacks, all_threads=True)
+                  config = uvicorn.Config("backend.main:app", host="127.0.0.1", port=8008)
+                  config.load()
+                  config.loaded_app = observe_app(config.loaded_app)
+                  DiagnosticServer(config).run()
+          PY
+          export PYTHONPATH="$DC_CHECKOUT"
+          backend_log="$DC_LAB_ROOT/uvicorn.log"
+          "$DC_PYTHON" "$DC_LAB_ROOT/uvicorn-diagnostic.py" > "$backend_log" 2>&1 &
+          pid=$!
+          stop_lab_process() {
+            local label="$1" child="$2" attempt
+            echo "R02_STOP_BEGIN_$label"
+            kill -TERM "$child" 2>/dev/null || true
+            for attempt in $(seq 1 20); do
+              if ! kill -0 "$child" 2>/dev/null; then
+                local child_rc=0
+                wait "$child" 2>/dev/null || child_rc=$?
+                echo "R02_STOP_DONE_$label rc=$child_rc"
+                if [ "$label" = BACKEND ]; then
+                  [ "$child_rc" -eq 0 ] || return 1
+                  grep -Fx 'R02_UVICORN_SHUTDOWN_RETURN' "$backend_log" || return 1
+                fi
+                return 0
+              fi
+              sleep 1
+            done
+            echo "R02_STOP_TIMEOUT_$label"
+            if [ "$label" = BACKEND ]; then
+              grep -E '^(R02_UVICORN_(SHUTDOWN_(ENTER|RETURN)|STATE connections=[0-9]+ tasks=[0-9]+)|INFO: +(Shutting down|Waiting for application shutdown[.]|Application shutdown complete[.]|Waiting for connections to close[.] \(CTRL\+C to force quit\)|Waiting for background tasks to complete[.] \(CTRL\+C to force quit\)))$' "$backend_log" | tail -n 25 || true
+              grep -E '^R02_(PENDING endpoint=[a-zA-Z0-9_.<>-]+ method=(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|other) disconnect=[01] response_complete=[01] chain=[a-zA-Z0-9_.:<>-]+|ASYNC_CHAIN [a-zA-Z0-9_.:<>-]+)$' "$backend_log" | sort -u | head -n 60 || true
+              kill -USR1 "$child" 2>/dev/null || true
+              sleep 1
+              if [ -f "$DC_LAB_ROOT/shutdown-stacks.log" ]; then
+                sed -nE 's@^  File "([^"]*/)?([^/" ]+)", line ([0-9]+) in ([[:alnum:]_<>.-]+)$@R02_STACK \2:\3 \4@p' "$DC_LAB_ROOT/shutdown-stacks.log" | head -n 60 || true
+              fi
+            fi
+            kill -KILL "$child" 2>/dev/null || true
+            return 1
+          }
+          vite_pid=
+          chrome_pid=
+          cleanup_lab() {
+            local rc=$?
+            trap - EXIT
+            set +e
+            if [ -n "$pid" ]; then stop_lab_process BACKEND "$pid" || rc=1; fi
+            if [ -n "$vite_pid" ]; then stop_lab_process VITE "$vite_pid" || rc=1; fi
+            if [ -n "$chrome_pid" ]; then stop_lab_process CHROME "$chrome_pid" || rc=1; fi
+            echo "R02_CLEANUP_EXIT=$rc"
+            exit "$rc"
+          }
+          trap cleanup_lab EXIT
+          "$DC_PYTHON" - <<'PY'
+          import json, time, urllib.request
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          def get(path):
+              with opener.open('http://127.0.0.1:8008' + path, timeout=2) as r:
+                  assert r.status == 200
+                  return json.load(r)
+          for attempt in range(60):
+              try:
+                  root = get('/health')
+                  assert root['status'] == 'ok' and root['db'] == 'ok'
+                  break
+              except (OSError, AssertionError, ValueError, KeyError):
+                  time.sleep(1)
+          else:
+              raise SystemExit('BACKEND_HEALTH_BLOCKED')
+          result = get('/api/health')
+          assert result['status'] == 'ok' and result['database'] == 'ok'
+          assert result['environment'] == 'e2e_install_rehearsal'
+          assert get('/api/health/db')['status'] == 'ok'
+          assert get('/api/health/storage')['status'] == 'ok'
+          print('BACKEND_HTTP_PASS: /health, /api/health, /api/health/db, /api/health/storage')
+          PY
+          echo LOT01_STOCK_R0_BEGIN
+          if [ "$DC_TEST_SCOPE" = platform-uv ]; then
+            timeout --kill-after=10s 480s "$DC_PYTHON" -m backend.scripts.ci_v15_lot01_platform_uv
+          else
+            timeout --kill-after=10s 180s node frontend/scripts/ci-v15-lot01-theme-api.mjs
+          fi
+          echo LOT01_STOCK_R0_PASS
+          LAB
+      - name: Upload synthetic browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v15-lot01-${{ matrix.scope }}-synthetic
+          path: ${{ runner.temp }}/dc-integration-evidence/
+          if-no-files-found: error
+          retention-days: 3
