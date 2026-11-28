@@ -15,7 +15,7 @@ const {chromium}=req('playwright-core');
 const source=fs.readFileSync(new URL('../src/services/zka/MobileStorage.ts',import.meta.url),'utf8');
 const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext},reportDiagnostics:true});
 assert.equal(compiled.diagnostics?.length||0,0);
-const js=compiled.outputText.replace("from 'localforage'", "from '/localforage.mjs'").replace('import.meta.env','({})');
+const js=compiled.outputText.replace("from 'localforage'", "from '/localforage.mjs'").replaceAll('import.meta.env','({})');
 const library=fs.readFileSync(new URL('../node_modules/localforage/dist/localforage.js',import.meta.url));
 const html='<!doctype html><title>Isolated Pocket vault</title><script src="/localforage.js"></script>';
 const server=http.createServer((r,w)=>{
@@ -43,7 +43,8 @@ try {
     const b64=x=>btoa(JSON.stringify(x)).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_');
     const jwt=(type,extra={})=>'fixture.'+b64({type,sub:'1',tenant_id:1,device_id:device,exp:Math.floor(Date.now()/1000)+600,...extra})+'.local-fixture';
     const uv=jwt('mobile',{biometric_uv:true});
-    const proof=jwt('mobile_platform_approval');
+    // Stable offline-only proof fixture across page reload; never sent to any API.
+    const proof=jwt('mobile_platform_approval',{exp:4102444800});
     const creds={publicId:'a'.repeat(16),masterKey:'b'.repeat(64),access_token:'LOCAL-NOT-AUTH',refresh_token:'LOCAL-NOT-AUTH',device_id:device,api_base_url:'https://digitalcrown.local:8005'};
     window.lab={s,device,jwt,uv,proof,creds,prf:new Uint8Array(32).fill(42),check:(v)=>{if(!v)throw Error('assertion failed')},
       denied:async(fn)=>{try{await fn();return false}catch{return true}}};
