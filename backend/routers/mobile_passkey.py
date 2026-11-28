@@ -25,14 +25,15 @@ from backend.services.mobile_biometric import (
     credential_uv_binding,
     require_bound_biometric_uv,
     issue_biometric_access_token,
-    issue_platform_approval,
+    issue_platform_transfer,
+    claim_platform_transfer,
     issue_challenge,
     opaque_user_handle,
     payload_has_biometric_uv,
 )
 from backend.services.mobile_mdns import start_mdns_if_secure, stop_mdns
 from backend.security import token_blacklist, verify_password
-from backend.routers.auth import require_superadmin
+from backend.routers.auth import require_superadmin, is_superadmin_user
 from backend.services.audit_service import audit_service
 from backend.utils.rate_limit import check_rate_limit
 
@@ -55,6 +56,11 @@ class PlatformApprovalRequest(BaseModel):
     credential_id: str = Field(min_length=8, max_length=1024)
     password: SecretStr = Field(min_length=1, max_length=72)
     confirm: bool
+
+
+class PlatformTransferClaim(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ticket: SecretStr = Field(min_length=80, max_length=80)
 
 
 class EnablePasskeyRequest(BaseModel):
@@ -137,12 +143,32 @@ def approve_platform_passkey(
     credential = credential_for_device(db, user_id=admin.id, employer_id=tenant_id, device_id=body.device_id)
     if device is None or credential is None or credential.credential_id != body.credential_id:
         raise HTTPException(status_code=404, detail="Appareil ou passkey introuvable.")
-    proof, expires_in = issue_platform_approval(db, credential)
+    ticket, expires_in = issue_platform_transfer(db, credential)
     if audit_service.log(db=db, user_id=admin.id, employer_id=tenant_id,
                          action="PLATFORM_PASSKEY_APPROVED", resource_type="MobilePairedDevice",
                          resource_id=device.device_id, severity="CRITICAL",
                          details="Autorisation Desktop indépendante de la passkey active.") is not True:
         raise HTTPException(status_code=503, detail="Audit de l'autorisation indisponible.")
+    response.headers["Cache-Control"] = "no-store"
+    return {"ticket": ticket, "expires_in": expires_in}
+
+
+@router.post("/passkey/platform-approval/claim", summary="Échanger le ticket Desktop sur le Pocket vérifié")
+def claim_platform_passkey(body: PlatformTransferClaim, request: Request, response: Response,
+                           authorization: str = Header(...), db: Session = Depends(database.get_db)):
+    assert_stable_webauthn_origin(_origin(request))
+    user, tenant_id, payload = _legacy._decode_mobile_identity(authorization, db)
+    if not is_superadmin_user(user):
+        raise HTTPException(status_code=403, detail="Accès SuperAdmin requis.")
+    device_id = str(payload.get("device_id") or "")
+    credential = credential_for_device(db, user_id=user.id, employer_id=tenant_id, device_id=device_id)
+    require_bound_biometric_uv(payload, credential, active=True)
+    proof, expires_in = claim_platform_transfer(db, credential=credential, ticket=body.ticket.get_secret_value())
+    if audit_service.log(db=db, user_id=user.id, employer_id=tenant_id,
+                         action="PLATFORM_PASSKEY_CLAIMED", resource_type="MobilePairedDevice",
+                         resource_id=device_id, severity="CRITICAL",
+                         details="Ticket Desktop consommé par le Pocket biométrique.") is not True:
+        raise HTTPException(status_code=503, detail="Audit du transfert indisponible.")
     response.headers["Cache-Control"] = "no-store"
     return {"approval": proof, "expires_in": expires_in}
 

@@ -175,8 +175,27 @@ def run():
             data=approve_body, origin="https://invalid.example")
     granted, _ = request("independent Desktop approval", approve_path, 200, method="POST",
                          token=desktop, cookie=cookie, data=approve_body)
-    approval = granted["approval"]
-    assert granted["expires_in"] == 30 * 86400
+    assert set(granted) == {"ticket", "expires_in"} and granted["expires_in"] == 180
+    ticket = granted["ticket"]
+    claim_path = approve_path + "/claim"
+    request("ticket alone cannot read platform", S, 401, token=ticket)
+    request("Desktop cannot claim Pocket transfer", claim_path, 401, method="POST",
+            token=desktop, origin=ORIGIN, data={"ticket": ticket})
+    request("ordinary Pocket cannot claim transfer", claim_path, 403, method="POST",
+            token=other, origin=ORIGIN, data={"ticket": ticket})
+    request("durable Pocket cannot claim transfer", claim_path, 423, method="POST",
+            token=token, origin=ORIGIN, data={"ticket": ticket})
+    request("wrong origin cannot claim transfer", claim_path, 409, method="POST",
+            token=uv, origin="https://invalid.example", data={"ticket": ticket})
+    forged = ticket.split(".")[0] + "." + b64(secrets.token_bytes(32))
+    request("wrong transfer secret refused without consumption", claim_path, 403, method="POST",
+            token=uv, origin=ORIGIN, data={"ticket": forged})
+    claimed, _ = request("Pocket exchanges Desktop ticket", claim_path, 200, method="POST",
+                         token=uv, origin=ORIGIN, data={"ticket": ticket})
+    approval = claimed["approval"]
+    assert claimed["expires_in"] == 30 * 86400
+    request("transfer replay refused", claim_path, 410, method="POST",
+            token=uv, origin=ORIGIN, data={"ticket": ticket})
     request("active verified platform read", S, 200, token=uv, approval=approval)
     request("facade anonymous denied", F + "/clients", 401)
     request("facade desktop bearer denied", F + "/clients", 401, token=desktop)
@@ -232,7 +251,9 @@ def run():
     request("fresh UV without new Desktop approval denied", S, 403, token=uv2)
     granted2, _ = request("Desktop approves replacement credential", approve_path, 200, method="POST",
                           token=desktop, cookie=cookie, data=approve_body)
-    approval = granted2["approval"]
+    claimed2, _ = request("replacement Pocket exchanges Desktop ticket", claim_path, 200, method="POST",
+                          token=uv2, origin=ORIGIN, data={"ticket": granted2["ticket"]})
+    approval = claimed2["approval"]
     request("fresh UV accepted after re-enrollment", S, 200, token=uv2, approval=approval)
     next_challenge = options(token)
     next_verified, _ = request("new signed UV ceremony", P + "/authentication/verify", 200, method="POST", token=token,
@@ -276,6 +297,8 @@ def run():
     winner = winners[0]
     uv3 = winner["access_token"]
     request("winning UV session active", S, 200, token=uv3, approval=approval)
+    expiring_grant, _ = request("Desktop issues expiring transfer", approve_path, 200, method="POST",
+                                token=desktop, cookie=cookie, data=approve_body)
     expiring_challenge = options(token)
     # Use the actual production TTL and wall-clock passage, never shorten it.
     assert winner["expires_in"] == 300
@@ -293,6 +316,8 @@ def run():
                               token=token, origin=ORIGIN, data=verify_body(refreshed, assertion(refreshed, key, cid, 5)))
     uv3 = replacement["access_token"]
     request("fresh UV active after expiration", S, 200, token=uv3, approval=approval)
+    request("expired Desktop transfer refused with fresh UV", claim_path, 410, method="POST",
+            token=uv3, origin=ORIGIN, data={"ticket": expiring_grant["ticket"]})
     # Ordinary session also expired during the real-time window; authenticate again.
     ordinary_fresh = options(other)
     ordinary_new, _ = request("ordinary UV renewed after expiration", P + "/authentication/verify", 200, method="POST",

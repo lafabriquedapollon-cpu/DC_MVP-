@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -129,6 +130,69 @@ def platform_credential_binding(credential: MobilePasskeyCredential) -> str:
     material = [credential.credential_id, credential.credential_public_key,
                 credential.created_at.isoformat(), credential.enabled_at.isoformat() if credential.enabled_at else ""]
     return hashlib.sha256(json.dumps(material, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+PLATFORM_TRANSFER_PURPOSE = "platform_transfer"
+
+
+def _transfer_digest(secret: str, credential: MobilePasskeyCredential, epoch: str) -> bytes:
+    material = json.dumps(["platform-transfer-v1", secret, credential.user_id,
+                           credential.employer_id, credential.device_id,
+                           platform_credential_binding(credential), epoch, MOBILE_KEY_VERSION],
+                          separators=(",", ":"))
+    return hmac.new(SECRET_KEY.encode("utf-8"), material.encode("utf-8"), hashlib.sha256).digest()
+
+
+def issue_platform_transfer(db: Session, credential: MobilePasskeyCredential) -> tuple[str, int]:
+    if credential.enabled_at is None or credential.last_used_at is None:
+        raise HTTPException(status_code=409, detail="Passkey active requise.")
+    secret = secrets.token_urlsafe(32)
+    epoch = token_blacklist.current_mobile_epoch(credential.employer_id, db)
+    challenge_id = issue_challenge(db, purpose=PLATFORM_TRANSFER_PURPOSE,
+                                   user_id=credential.user_id, employer_id=credential.employer_id,
+                                   device_id=credential.device_id,
+                                   challenge=_transfer_digest(secret, credential, epoch))
+    return f"{challenge_id}.{secret}", int(CHALLENGE_TTL.total_seconds())
+
+
+def claim_platform_transfer(db: Session, *, credential: MobilePasskeyCredential, ticket: str) -> tuple[str, int]:
+    denied = HTTPException(status_code=403, detail="Ticket de transfert refusé.")
+    try:
+        challenge_id, secret = ticket.split(".", 1)
+        if str(uuid.UUID(challenge_id)) != challenge_id or len(secret) != 43:
+            raise denied
+        if len(b64url_decode(secret)) != 32 or b64url_encode(b64url_decode(secret)) != secret:
+            raise denied
+    except (ValueError, TypeError):
+        raise denied
+    scope = dict(purpose=PLATFORM_TRANSFER_PURPOSE, user_id=credential.user_id,
+                 employer_id=credential.employer_id, device_id=credential.device_id)
+    epoch = token_blacklist.current_mobile_epoch(credential.employer_id, db)
+    digest = _transfer_digest(secret, credential, epoch)
+    now = datetime.utcnow()
+    row = db.query(MobileWebAuthnChallenge).filter(
+        MobileWebAuthnChallenge.id == challenge_id,
+        MobileWebAuthnChallenge.purpose == PLATFORM_TRANSFER_PURPOSE,
+        MobileWebAuthnChallenge.user_id == credential.user_id,
+        MobileWebAuthnChallenge.employer_id == credential.employer_id,
+        MobileWebAuthnChallenge.device_id == credential.device_id,
+        MobileWebAuthnChallenge.used_at.is_(None),
+        MobileWebAuthnChallenge.expires_at > now,
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=410, detail="Ticket expiré ou déjà utilisé.")
+    if not hmac.compare_digest(b64url_decode(row.challenge_b64url), digest):
+        raise denied
+    # The existing SQL CAS makes transfer strictly one-shot, even across workers.
+    consumed = consume_challenge(db, challenge_id=challenge_id, **scope)
+    # Recheck the active generation after the transactional consume.
+    current = credential_for_device(db, user_id=scope["user_id"], employer_id=scope["employer_id"],
+                                    device_id=scope["device_id"])
+    if current is None or current.enabled_at is None or not hmac.compare_digest(
+        consumed, _transfer_digest(secret, current, token_blacklist.current_mobile_epoch(scope["employer_id"], db))
+    ):
+        raise denied
+    return issue_platform_approval(db, current)
 
 
 def issue_platform_approval(db: Session, credential: MobilePasskeyCredential) -> tuple[str, int]:
