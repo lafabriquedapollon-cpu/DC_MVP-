@@ -73,7 +73,7 @@ def main():
                     employer_id=owner.id, permissions=grants,
                     nom_complet="CI Synthetic Stock Staff",
                 ))
-            for user in (owner, other):
+            for user in ((owner, other, platform) if os.environ.get('DC_TEST_SCOPE') == 'platform-uv' else (owner, other)):
                 db.add(models.CabinetConfig(
                     owner_id=user.id, is_initialized=True,
                     nom_cabinet="CI SYNTHETIC CABINET",

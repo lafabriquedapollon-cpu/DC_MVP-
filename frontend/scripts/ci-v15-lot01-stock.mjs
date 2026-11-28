@@ -150,9 +150,9 @@ try{
  // These are baseline observations, not qualification of WebAuthn or Pocket SuperAdmin.
  await request('R5 baseline paired Pocket cannot read desktop directory',S,{headers:O,status:401});
  await request('R5 baseline paired Pocket cannot read desktop trials','/api/superadmin/trial-codes',{headers:O,status:401});
- await request('R5 baseline passkey status route availability','/api/mobile/passkey/status',{headers:O,status:404});
- await request('R5 baseline passkey authentication route availability','/api/mobile/passkey/authentication/options',{method:'POST',headers:O,status:404});
- await request('R5 baseline anonymous passkey status route availability','/api/mobile/passkey/status',{status:404});
+ await request('R5 baseline passkey status route mounted','/api/mobile/passkey/status',{headers:O,status:200});
+ await request('R5 baseline passkey authentication rejects missing origin','/api/mobile/passkey/authentication/options',{method:'POST',headers:O,status:409});
+ await request('R5 baseline anonymous passkey status missing credentials','/api/mobile/passkey/status',{status:422});
  // No license activation, supplier mutation, real OTP, Firebase or email calls.
  await request('platform logout','/api/auth/logout',{method:'POST',headers:P,body:{refresh_token:platform.refresh_token},status:204});
  await request('revoked platform directory access denied',S,{headers:P,status:401});

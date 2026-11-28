@@ -5,7 +5,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: v15-lot01-stock-r0
+  group: v15-lot01-r5-uv
   cancel-in-progress: true
 jobs:
   desktop-integration:
@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scope: [stock-session, platform-desktop]
+        scope: [stock-session, platform-desktop, platform-uv]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -290,7 +290,11 @@ jobs:
           print('BACKEND_HTTP_PASS: /health, /api/health, /api/health/db, /api/health/storage')
           PY
           echo LOT01_STOCK_R0_BEGIN
-          timeout --kill-after=10s 180s node frontend/scripts/ci-v15-lot01-stock.mjs
+          if [ "$DC_TEST_SCOPE" = platform-uv ]; then
+            timeout --kill-after=10s 180s "$DC_PYTHON" -m backend.scripts.ci_v15_lot01_platform_uv
+          else
+            timeout --kill-after=10s 180s node frontend/scripts/ci-v15-lot01-stock.mjs
+          fi
           echo LOT01_STOCK_R0_PASS
           LAB
       - name: Upload synthetic browser evidence
