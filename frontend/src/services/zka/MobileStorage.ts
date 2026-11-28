@@ -668,6 +668,10 @@ export const MobileStorage = {
     return ctx;
   },
 
+  async assertPlatformVaultContext(ctx: PlatformVaultContext): Promise<void> {
+    await verifyPlatformContext(ctx);
+  },
+
   async savePlatformApproval(proof: string, ctx: PlatformVaultContext): Promise<void> {
     if (!validLocalApproval(proof, ctx)) throw new Error('Autorisation SuperAdmin incompatible.');
     return queuePlatform(async () => {

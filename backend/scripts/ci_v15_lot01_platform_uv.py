@@ -129,6 +129,15 @@ def run():
     assert ordinary_identity["is_superadmin"] is False
     token = mobile["access_token"]
     other = ordinary["access_token"]
+    discover = P + "/platform-devices"
+    eligible = P + "/platform-eligibility"
+    request("platform device discovery anonymous refused", discover, 401)
+    request("platform device discovery ordinary Desktop refused", discover, 403, token=ordinary_desktop, cookie=ordinary_cookie)
+    request("platform device discovery Pocket refused", discover, 401, token=token)
+    empty_devices, _ = request("platform device discovery excludes unenrolled phones", discover, 200, token=desktop, cookie=cookie)
+    assert empty_devices == []
+    request("unenrolled platform Pocket not eligible", eligible, 423, token=token)
+    request("ordinary Pocket not eligible", eligible, 403, token=other)
     request("durable platform token denied Marketplace", S, 403, token=token)
     request("ordinary token denied Marketplace", S, 403, token=other)
     request("desktop token refused on mobile passkey status", P + "/status", 401, token=desktop)
@@ -154,9 +163,19 @@ def run():
     uv = verified["access_token"]
     request("challenge replay denied", P + "/authentication/verify", 410, method="POST", token=token, origin=ORIGIN, data=body)
     request("pending credential must not grant platform read", S, (401,403,423), token=uv, soft=True)
+    pending_devices, _ = request("platform device discovery excludes pending passkey", discover, 200, token=desktop, cookie=cookie)
+    assert pending_devices == []
+    request("pending UV not eligible", eligible, 423, token=uv)
     enabled, _ = request("enable credential after UV", P + "/enable", 200, method="POST", token=uv,
                          data={"credential_id": b64(cid)})
     assert enabled["state"] == "enabled"
+    devices, _ = request("Desktop discovers its active platform passkey", discover, 200, token=desktop, cookie=cookie)
+    assert len(devices) == 1 and set(devices[0]) == {"device_id", "credential_id", "enabled_at", "last_seen_at"}
+    assert devices[0]["device_id"] == mobile["device_id"] and devices[0]["credential_id"] == b64(cid)
+    eligibility, _ = request("active UV platform eligibility without approval", eligible, 200, token=uv)
+    assert eligibility == {"eligible": True}
+    request("Desktop bearer cannot use Pocket eligibility", eligible, 401, token=desktop, cookie=cookie)
+    request("durable bearer cannot use Pocket eligibility", eligible, 423, token=token)
     request("durable token denied after enabling gate", S, (403,423), token=token)
     request("self-enrolled active UV has no independent authority", S, 403, token=uv)
     approve_path = P + "/platform-approval"
@@ -274,6 +293,9 @@ def run():
             data={"credential_id": b64(ordinary_cid)})
     request("ordinary active UV never gains platform authority", S, 403, token=ordinary_uv, approval=approval)
     request("facade ordinary active UV denied with approval", F + "/clients", 403, token=ordinary_uv, approval=approval)
+    request("ordinary active UV eligibility refused", eligible, 403, token=ordinary_uv)
+    own_only, _ = request("Desktop discovery excludes other active passkey", discover, 200, token=desktop, cookie=cookie)
+    assert len(own_only) == 1 and own_only[0]["device_id"] == mobile["device_id"]
 
     # Real HTTP races; no test-generated JWT, clock override or mocked verifier.
     superseded = options(token)
@@ -327,6 +349,8 @@ def run():
             200, method="POST", token=desktop, cookie=cookie)
     request("revoked device current UV refused", S, 401, token=uv3, approval=approval)
     request("facade revoked device denied", F + "/trial-codes", 401, token=uv3, approval=approval)
+    revoked_devices, _ = request("Desktop discovery excludes revoked device", discover, 200, token=desktop, cookie=cookie)
+    assert revoked_devices == []
     request("revoked device durable refresh refused", M + "/refresh-token", 401, method="POST",
             data={"refresh_token": mobile["refresh_token"]})
     request("other device remains alive", P + "/status", 200, token=other)

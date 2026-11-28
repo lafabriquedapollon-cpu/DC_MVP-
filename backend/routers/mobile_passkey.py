@@ -112,6 +112,36 @@ def install_stable_lan_url_overrides() -> None:
     _legacy.get_lan_frontend_url = lambda: WEBAUTHN_ORIGIN
 
 
+@router.get("/passkey/platform-devices", summary="Appareils personnels autorisables par le SuperAdmin Desktop")
+def platform_devices(response: Response, db: Session = Depends(database.get_db),
+                     admin: models.User = Depends(require_superadmin)):
+    tenant_id = admin.get_employer_id()
+    c = MobilePasskeyCredential
+    d = models.MobilePairedDevice
+    rows = db.query(c.device_id, c.credential_id, c.enabled_at, d.last_seen_at).join(
+        d, d.device_id == c.device_id
+    ).filter(
+        c.user_id == admin.id, c.employer_id == tenant_id,
+        d.user_id == admin.id, d.employer_id == tenant_id, d.revoked_at.is_(None),
+        c.enabled_at.is_not(None), c.last_used_at.is_not(None),
+    ).order_by(c.enabled_at.desc(), c.device_id).limit(200).all()
+    response.headers["Cache-Control"] = "no-store"
+    return [dict(row._mapping) for row in rows]
+
+
+@router.get("/passkey/platform-eligibility", summary="Vérifier l'identité plateforme Pocket avant autorisation")
+def platform_eligibility(response: Response, authorization: str = Header(...),
+                         db: Session = Depends(database.get_db)):
+    user, tenant_id, payload = _legacy._decode_mobile_identity(authorization, db)
+    if not is_superadmin_user(user):
+        raise HTTPException(status_code=403, detail="Accès SuperAdmin requis.")
+    credential = credential_for_device(db, user_id=user.id, employer_id=tenant_id,
+                                       device_id=str(payload.get("device_id") or ""))
+    require_bound_biometric_uv(payload, credential, active=True)
+    response.headers["Cache-Control"] = "no-store"
+    return {"eligible": True}
+
+
 @router.post("/passkey/platform-approval", summary="Autorisation Desktop indépendante d'une passkey SuperAdmin")
 def approve_platform_passkey(
     body: PlatformApprovalRequest,
