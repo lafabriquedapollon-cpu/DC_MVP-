@@ -364,6 +364,40 @@ def run():
             assert db.get(MobileWebAuthnChallenge,grant3["challenge_id"]).used_at is None
             assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial3["id"])).count()==0
     tx_check("pilot expiry leaves target and audit unchanged",expired_unchanged)
+    # No manual secret transfer: Desktop finds a server-persisted exact request.
+    trial4,_=request("rendezvous synthetic trial","/api/superadmin/trial-codes",200,method="POST",
+        token=desktop,cookie=cookie,data={"email":"ci-trial4@example.com","trial_days":14})
+    path4=F+"/trial-codes/"+str(trial4["id"])
+    inbox=F+"/revocation-requests"
+    pending,_=request("Pocket creates persisted revocation request",path4+"/revocation-request",200,
+        method="POST",token=uv,approval=approval,origin=ORIGIN)
+    assert set(pending)=={"challenge_id","nonce","expires_in"}
+    checkbody={"challenge_id":pending["challenge_id"],"nonce":pending["nonce"]}
+    request("Pocket cannot list Desktop pending requests",inbox,401,token=uv,approval=approval)
+    request("ordinary Desktop cannot list platform requests",inbox,403,token=ordinary_desktop,cookie=ordinary_cookie)
+    listing,_=request("Desktop sees exact pending request",inbox,200,token=desktop,cookie=cookie)
+    assert len(listing)==1 and listing[0]["request_id"]==pending["challenge_id"] and listing[0]["target_id"]==trial4["id"]
+    assert set(listing[0])=={"request_id","target_id","email","cabinet_name","device_id","expires_in"} and pending["nonce"] not in json.dumps(listing)
+    status4,_=request("Pocket observes pending state",path4+"/revocation-status",200,method="POST",
+        token=uv,approval=approval,origin=ORIGIN,data=checkbody)
+    assert status4["state"]=="pending"
+    request("pending request cannot execute",path4+"/revoke",409,method="POST",token=uv,approval=approval,origin=ORIGIN,data={**checkbody,"confirm":True})
+    approval4=inbox+"/"+pending["challenge_id"]+"/approve"
+    b4={"target_id":trial4["id"],"password":os.environ["DC_SYNTH_PASSWORD"],"confirm":True}
+    request("Desktop cannot approve wrong target",approval4,409,method="POST",token=desktop,cookie=cookie,data={**b4,"target_id":trial3["id"]})
+    request("Desktop explicitly approves stored target",approval4,200,method="POST",token=desktop,cookie=cookie,data=b4)
+    request("Desktop approval replay denied",approval4,409,method="POST",token=desktop,cookie=cookie,data=b4)
+    request("Pocket wrong nonce cannot see approval",path4+"/revocation-status",409,method="POST",
+        token=uv,approval=approval,origin=ORIGIN,data={**checkbody,"nonce":secrets.token_hex(32)})
+    approved4,_=request("Pocket observes approved state",path4+"/revocation-status",200,method="POST",
+        token=uv,approval=approval,origin=ORIGIN,data=checkbody)
+    assert approved4["state"]=="approved"
+    request("Pocket executes stored approved request",path4+"/revoke",200,method="POST",token=uv,approval=approval,origin=ORIGIN,data={**checkbody,"confirm":True})
+    request("Pocket stored approval replay denied",path4+"/revoke",409,method="POST",token=uv,approval=approval,origin=ORIGIN,data={**checkbody,"confirm":True})
+    with database.SessionLocal() as db:
+        assert db.get(models.TrialActivationCode,trial4["id"]).revoked_at is not None
+        assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial4["id"])).count()==1
+        assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOCATION_APPROVED",resource_id=str(trial4["id"])).count()==1
     overview, _ = request("facade Marketplace summary", F + "/marketplace/overview", 200, token=uv, approval=approval)
     desktop_overview, _ = request("Desktop Marketplace summary for comparison", S, 200, token=desktop, cookie=cookie)
     assert overview == desktop_overview

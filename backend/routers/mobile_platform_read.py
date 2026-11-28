@@ -184,3 +184,134 @@ def execute_revocation(target_id: int, body: RevocationExecution, request: Reque
         raise
     response.headers["Cache-Control"] = "no-store"
     return {"revoked": True}
+
+
+# Rendezvous candidate: the Desktop independently finds the pending action.
+# The existing challenge table is reused, with a distinct purpose and a bounded
+# binary representation. No schema migration or transfer of a JWT is required.
+import struct
+from backend.services.mobile_biometric import b64url_decode
+
+REQUEST_PURPOSE = "platform_mutation_req"
+
+class RendezvousApproval(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_id: int = Field(gt=0, le=2**63-1, strict=True)
+    password: SecretStr = Field(min_length=1,max_length=72)
+    confirm: StrictBool
+
+class RendezvousStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    challenge_id: str = Field(min_length=36,max_length=36)
+    nonce: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+def _encode_pending(intent):
+    intent.digest()  # validates all input before packing
+    return b64url_encode(struct.pack(">Q16s32s32s32s", intent.target_id,
+        bytes.fromhex(intent.approval_jti),bytes.fromhex(intent.uv_jti),
+        bytes.fromhex(intent.nonce),bytes.fromhex(intent.credential_binding)))
+
+def _decode_pending(row):
+    target, approval, uv, nonce, credential = struct.unpack(">Q16s32s32s32s",b64url_decode(row.challenge_b64url))
+    intent=PlatformMutationIntent("trial-code.revoke",target,row.user_id,row.employer_id,
+        row.device_id,credential.hex(),approval.hex(),uv.hex(),nonce.hex())
+    intent.digest()
+    return intent
+
+def _owned_pending(db, admin):
+    return db.query(MobileWebAuthnChallenge).filter(
+        MobileWebAuthnChallenge.purpose==REQUEST_PURPOSE,
+        MobileWebAuthnChallenge.user_id==admin.id,
+        MobileWebAuthnChallenge.employer_id==int(admin.get_employer_id()),
+        MobileWebAuthnChallenge.used_at.is_(None),
+        MobileWebAuthnChallenge.expires_at>datetime.utcnow())
+
+def _pending_projection(db, row):
+    try: intent=_decode_pending(row)
+    except (ValueError,TypeError,struct.error): return None
+    d=models.MobilePairedDevice
+    active=db.query(d).filter(d.device_id==intent.device_id,d.user_id==intent.actor_id,
+        d.employer_id==intent.tenant_id,d.revoked_at.is_(None)).first()
+    cred=credential_for_device(db,user_id=intent.actor_id,employer_id=intent.tenant_id,device_id=intent.device_id)
+    if active is None or cred is None or cred.enabled_at is None or platform_credential_binding(cred)!=intent.credential_binding:
+        return None
+    t=models.TrialActivationCode
+    trial=db.query(t).filter(t.id==intent.target_id,t.consumed_at.is_(None),t.revoked_at.is_(None)).first()
+    if trial is None: return None
+    return {"request_id":row.id,"target_id":trial.id,"email":trial.email,
+            "cabinet_name":trial.cabinet_name,"device_id":row.device_id,
+            "expires_in":max(0,int((row.expires_at-datetime.utcnow()).total_seconds()))}
+
+@router.post("/trial-codes/{target_id}/revocation-request")
+def request_revocation(target_id:int, request:Request,response:Response,db:Session=Depends(database.get_db)):
+    intent=_pocket_intent(request,db,target_id,secrets.token_hex(32))
+    check_rate_limit(request,scope="platform-revocation-rendezvous-create")
+    _active_trial(db,target_id)
+    now=datetime.utcnow()
+    rid=str(uuid.uuid4())
+    try:
+        # Starting a new rendezvous retires pending or approved actions of this device.
+        db.query(MobileWebAuthnChallenge).filter(
+            MobileWebAuthnChallenge.purpose.in_([REQUEST_PURPOSE,PURPOSE]),
+            MobileWebAuthnChallenge.user_id==intent.actor_id,MobileWebAuthnChallenge.employer_id==intent.tenant_id,
+            MobileWebAuthnChallenge.device_id==intent.device_id,MobileWebAuthnChallenge.used_at.is_(None),
+        ).update({MobileWebAuthnChallenge.used_at:now},synchronize_session=False)
+        db.add(MobileWebAuthnChallenge(id=rid,purpose=REQUEST_PURPOSE,challenge_b64url=_encode_pending(intent),
+            user_id=intent.actor_id,employer_id=intent.tenant_id,device_id=intent.device_id,expires_at=now+CHALLENGE_TTL))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    response.headers["Cache-Control"]="no-store"
+    return {"challenge_id":rid,"nonce":intent.nonce,"expires_in":int(CHALLENGE_TTL.total_seconds())}
+
+@router.get("/revocation-requests")
+def pending_revocations(response:Response,db:Session=Depends(database.get_db),admin:models.User=Depends(require_superadmin)):
+    response.headers["Cache-Control"]="no-store"
+    return [v for row in _owned_pending(db,admin).order_by(MobileWebAuthnChallenge.expires_at).limit(50).all()
+            if (v:=_pending_projection(db,row)) is not None]
+
+@router.post("/revocation-requests/{request_id}/approve")
+def approve_pending_revocation(request_id:str,body:RendezvousApproval,request:Request,response:Response,
+                              db:Session=Depends(database.get_db),admin:models.User=Depends(require_superadmin)):
+    _enforce_marketplace_control_plane_request(request,require_cookie_origin=True)
+    check_rate_limit(request,scope="platform-revocation-rendezvous-approve")
+    if body.confirm is not True: raise HTTPException(status_code=409,detail="Confirmation explicite requise.")
+    try: valid=verify_password(body.password.get_secret_value(),admin.hashed_password)
+    except (ValueError,TypeError): valid=False
+    if not valid: raise HTTPException(status_code=401,detail="Vérification Desktop refusée.")
+    row=_owned_pending(db,admin).filter(MobileWebAuthnChallenge.id==request_id).first()
+    projection=_pending_projection(db,row) if row is not None else None
+    if projection is None or projection["target_id"]!=body.target_id:
+        raise HTTPException(status_code=409,detail="Demande ou cible indisponible.")
+    intent=_decode_pending(row)
+    try:
+        changed=_owned_pending(db,admin).filter(MobileWebAuthnChallenge.id==request_id,
+            MobileWebAuthnChallenge.challenge_b64url==row.challenge_b64url).update(
+            {MobileWebAuthnChallenge.purpose:PURPOSE,MobileWebAuthnChallenge.challenge_b64url:b64url_encode(intent.digest())},
+            synchronize_session=False)
+        if changed!=1: raise HTTPException(status_code=409,detail="Demande indisponible.")
+        db.add(models.AuditLog(user_id=admin.id,employer_id=intent.tenant_id,
+            action="PLATFORM_TRIAL_REVOCATION_APPROVED",resource_type="TrialActivationCode",
+            resource_id=str(intent.target_id),severity="CRITICAL",details="Desktop approved exact pending trial revocation."))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    response.headers["Cache-Control"]="no-store"
+    return {"approved":True}
+
+@router.post("/trial-codes/{target_id}/revocation-status")
+def revocation_request_status(target_id:int,body:RendezvousStatus,request:Request,response:Response,
+                              db:Session=Depends(database.get_db)):
+    intent=_pocket_intent(request,db,target_id,body.nonce)
+    row=db.query(MobileWebAuthnChallenge).filter(MobileWebAuthnChallenge.id==body.challenge_id,
+        MobileWebAuthnChallenge.user_id==intent.actor_id,MobileWebAuthnChallenge.employer_id==intent.tenant_id,
+        MobileWebAuthnChallenge.device_id==intent.device_id,MobileWebAuthnChallenge.used_at.is_(None),
+        MobileWebAuthnChallenge.expires_at>datetime.utcnow()).first()
+    if row is None: raise HTTPException(status_code=409,detail="Demande indisponible.")
+    if row.purpose==REQUEST_PURPOSE and row.challenge_b64url==_encode_pending(intent): state="pending"
+    elif row.purpose==PURPOSE and row.challenge_b64url==b64url_encode(intent.digest()): state="approved"
+    else: raise HTTPException(status_code=409,detail="Demande indisponible.")
+    response.headers["Cache-Control"]="no-store"
+    return {"state":state,"expires_in":max(0,int((row.expires_at-datetime.utcnow()).total_seconds()))}
