@@ -50,7 +50,7 @@ async function page(endpoint,origin){
   };
   for(let i=0;i<100;i++){if(await evaluate('location.origin')===origin)break;await delay(100);}
   assert.equal(await evaluate('location.origin'),origin);
-  await evaluate("globalThis.k=await import('/key.mjs'); true");
+  await evaluate("import('/key.mjs').then(module=>{globalThis.k=module;return true})");
   return {evaluate,close:()=>ws.close()};
 }
 let a,b;
