@@ -22,6 +22,7 @@ const STORE_BRIDGE_CONTEXT_ID = 'zka_bridge_context';
 const STORE_ACTION_QUEUE_ID = 'zka_action_queue_v2';
 const LEGACY_ACTION_QUEUE_ID = 'zka_action_queue';
 const STORE_BIOMETRIC_VAULT_ID = 'zka_biometric_vault_v1';
+const STORE_PLATFORM_APPROVAL_ID = 'zka_platform_approval_v1';
 
 export interface ZKACredentials {
   publicId: string;
@@ -104,6 +105,83 @@ let refreshInFlightEpoch = -1;
 let mobileSessionEpoch = 0;
 let biometricAccessToken: string | null = null;
 let unlockedVault: { key: CryptoKey; payload: BiometricVaultPayload; envelope: BiometricVaultEnvelope } | null = null;
+
+// The platform proof is deliberately isolated from clinical cache writes.
+interface PlatformApprovalEnvelope {
+  version: 1;
+  iv: string;
+  ciphertext: string;
+}
+export interface PlatformVaultContext {
+  readonly epoch: number;
+  readonly generation: number;
+  readonly token: string;
+  readonly apiBaseUrl: string;
+  readonly deviceId: string;
+  readonly credentialId: string;
+  readonly publicId: string;
+}
+let platformGeneration = 0;
+let platformQueue: Promise<unknown> = Promise.resolve();
+function queuePlatform<T>(operation: () => Promise<T>): Promise<T> {
+  const next = platformQueue.then(operation);
+  platformQueue = next.catch(() => undefined);
+  return next;
+}
+function invalidatePlatformMemory(): void {
+  platformGeneration += 1;
+}
+function erasePlatformApproval(): Promise<void> {
+  invalidatePlatformMemory();
+  return queuePlatform(async () => {
+    await mobileStore().removeItem(STORE_PLATFORM_APPROVAL_ID);
+  });
+}
+function localClaims(token: string): Record<string, unknown> | null {
+  // Local validation only, never grants server authority.
+  try {
+    if (token.length > 4096 || token.split('.').length !== 3) return null;
+    const value = JSON.parse(new TextDecoder().decode(base64UrlToBytes(token.split('.')[1])));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch { return null; }
+}
+function isFreshUv(token: string, deviceId: string): boolean {
+  const claims = localClaims(token);
+  return claims?.type === 'mobile' && claims.biometric_uv === true
+    && claims.device_id === deviceId && typeof claims.exp === 'number'
+    && claims.exp * 1000 > Date.now();
+}
+function validLocalApproval(proof: string, ctx: PlatformVaultContext): boolean {
+  const claims = localClaims(proof), uv = localClaims(ctx.token);
+  return claims?.type === 'mobile_platform_approval' && claims.device_id === ctx.deviceId
+    && claims.sub === uv?.sub && claims.tenant_id === uv?.tenant_id
+    && typeof claims.exp === 'number' && claims.exp * 1000 > Date.now();
+}
+function platformAad(ctx: PlatformVaultContext): Uint8Array<ArrayBuffer> {
+  return new TextEncoder().encode(JSON.stringify([
+    'digital-crown-platform-approval-v1', ctx.publicId, ctx.deviceId,
+    ctx.credentialId, ctx.apiBaseUrl,
+  ]));
+}
+function currentPlatformVault(ctx: PlatformVaultContext) {
+  const vault = unlockedVault;
+  if (!vault || ctx.epoch !== mobileSessionEpoch || ctx.generation !== platformGeneration
+      || ctx.token !== biometricAccessToken || !isFreshUv(ctx.token, ctx.deviceId)
+      || vault.envelope.deviceId !== ctx.deviceId || vault.envelope.publicId !== ctx.publicId
+      || vault.envelope.credential_id !== ctx.credentialId) {
+    throw new Error('Session biométrique SuperAdmin verrouillée.');
+  }
+  return vault;
+}
+async function verifyPlatformContext(ctx: PlatformVaultContext) {
+  currentPlatformVault(ctx);
+  const creds = await rawCredentials();
+  if (!creds || creds.publicId !== ctx.publicId || creds.device_id !== ctx.deviceId
+      || resolveMobileApiBaseUrl(creds.api_base_url) !== ctx.apiBaseUrl) {
+    throw new Error('Session SuperAdmin incompatible.');
+  }
+  return currentPlatformVault(ctx);
+}
 
 function bytesToBase64Url(bytes: Uint8Array): string {
   let binary = '';
@@ -220,6 +298,9 @@ async function sanitizePlaintextCopies(creds: ZKACredentials): Promise<void> {
 
 async function clearSessionData(): Promise<void> {
   mobileSessionEpoch += 1; // invalidates every outstanding refresh before any IndexedDB await
+  biometricAccessToken = null;
+  unlockedVault = null;
+  await erasePlatformApproval();
   await mobileStore().removeItem(STORE_CREDENTIALS_ID);
   await mobileStore().removeItem(STORE_SNAPSHOT_ID);
   await mobileStore().removeItem(STORE_BRIDGE_CONTEXT_ID);
@@ -316,6 +397,9 @@ export const MobileStorage = {
       || previous.api_base_url !== creds.api_base_url;
     if (scopeChanged) {
       mobileSessionEpoch += 1;
+      biometricAccessToken = null;
+      unlockedVault = null;
+      await erasePlatformApproval();
       await mobileStore().removeItem(STORE_SNAPSHOT_ID);
       await mobileStore().removeItem(STORE_BRIDGE_CONTEXT_ID);
       await mobileStore().removeItem(STORE_ACTION_QUEUE_ID);
@@ -557,6 +641,7 @@ export const MobileStorage = {
   },
 
   setBiometricAccessToken(token: string | null): void {
+    invalidatePlatformMemory();
     biometricAccessToken = token;
   },
 
@@ -565,7 +650,60 @@ export const MobileStorage = {
   },
 
   clearBiometricAccessToken(): void {
+    invalidatePlatformMemory();
     biometricAccessToken = null;
+  },
+
+  async capturePlatformVaultContext(): Promise<PlatformVaultContext> {
+    const vault = unlockedVault, token = biometricAccessToken;
+    const epoch = mobileSessionEpoch, generation = platformGeneration;
+    if (!vault || !token) throw new Error('Vérification biométrique en ligne requise.');
+    const creds = await rawCredentials();
+    if (!creds?.device_id) throw new Error('Session mobile non appairée.');
+    const ctx = {
+      epoch, generation, token, apiBaseUrl: resolveMobileApiBaseUrl(creds.api_base_url),
+      deviceId: creds.device_id, publicId: creds.publicId, credentialId: vault.envelope.credential_id,
+    };
+    await verifyPlatformContext(ctx);
+    return ctx;
+  },
+
+  async savePlatformApproval(proof: string, ctx: PlatformVaultContext): Promise<void> {
+    if (!validLocalApproval(proof, ctx)) throw new Error('Autorisation SuperAdmin incompatible.');
+    return queuePlatform(async () => {
+      const vault = await verifyPlatformContext(ctx);
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const ciphertext = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv, additionalData: platformAad(ctx) },
+        vault.key, new TextEncoder().encode(proof),
+      );
+      await verifyPlatformContext(ctx);
+      await mobileStore().setItem<PlatformApprovalEnvelope>(STORE_PLATFORM_APPROVAL_ID, {
+        version: 1, iv: bytesToBase64Url(iv), ciphertext: bytesToBase64Url(new Uint8Array(ciphertext)),
+      });
+      // A lock or scope change during the IndexedDB write must not surface success.
+      currentPlatformVault(ctx);
+    });
+  },
+
+  async getPlatformApproval(ctx: PlatformVaultContext): Promise<string | null> {
+    return queuePlatform(async () => {
+      const vault = await verifyPlatformContext(ctx);
+      const envelope = await mobileStore().getItem<PlatformApprovalEnvelope>(STORE_PLATFORM_APPROVAL_ID);
+      await verifyPlatformContext(ctx);
+      if (!envelope) return null;
+      if (envelope.version !== 1) throw new Error('Coffre SuperAdmin incompatible.');
+      const clear = await crypto.subtle.decrypt({
+        name: 'AES-GCM', iv: base64UrlToBytes(envelope.iv), additionalData: platformAad(ctx),
+      }, vault.key, base64UrlToBytes(envelope.ciphertext));
+      await verifyPlatformContext(ctx);
+      const proof = new TextDecoder().decode(clear);
+      return validLocalApproval(proof, ctx) ? proof : null;
+    });
+  },
+
+  async clearPlatformApproval(): Promise<void> {
+    await erasePlatformApproval();
   },
 
   async getBiometricVaultEnvelope(): Promise<BiometricVaultEnvelope | null> {
@@ -581,6 +719,7 @@ export const MobileStorage = {
     if (!creds?.device_id || !/^[0-9a-fA-F]{64}$/.test(creds.masterKey)) {
       throw new Error('Clé maître indisponible pour le scellement biométrique.');
     }
+    await erasePlatformApproval();
     const key = await importPrfKey(input.prfOutput);
     const payload: BiometricVaultPayload = {
       masterKey: creds.masterKey,
@@ -617,6 +756,7 @@ export const MobileStorage = {
   },
 
   lockBiometricVault(): void {
+    invalidatePlatformMemory();
     unlockedVault = null;
     biometricAccessToken = null;
   },
@@ -626,6 +766,8 @@ export const MobileStorage = {
     const creds = await rawCredentials();
     if (!creds?.device_id) throw new Error('Session mobile non appairée.');
     const payload = unlockedVault.payload;
+    biometricAccessToken = null;
+    await erasePlatformApproval();
     await mobileStore().setItem(STORE_CREDENTIALS_ID, { ...creds, masterKey: payload.masterKey });
     if (payload.snapshot) await mobileStore().setItem(STORE_SNAPSHOT_ID, payload.snapshot);
     else await mobileStore().removeItem(STORE_SNAPSHOT_ID);

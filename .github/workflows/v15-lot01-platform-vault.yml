@@ -1,0 +1,47 @@
+name: V1.5 LOT01 R5 - Pocket platform vault
+on:
+  push:
+    branches: [ci/v15-lot01-stock-r0-20261128]
+permissions:
+  contents: read
+concurrency:
+  group: v15-lot01-r5-vault
+  cancel-in-progress: true
+jobs:
+  browser-vault:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install locked frontend and isolated browser tool
+        run: |
+          npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+          mkdir -p "$RUNNER_TEMP/dc-vault-tools"
+          npm install --prefix "$RUNNER_TEMP/dc-vault-tools" --ignore-scripts --no-audit --no-fund --save-exact --registry https://registry.npmjs.org playwright-core@1.61.0
+          node --check frontend/scripts/ci-v15-lot01-platform-vault.mjs
+      - name: Real Chromium storage in loopback-only LAB
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          lab=$(mktemp -d "$RUNNER_TEMP/dc-pocket-vault.XXXXXXXX")
+          ns="dc-pocket-vault-$GITHUB_RUN_ID"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab" "$RUNNER_TEMP/dc-vault-tools"' EXIT
+          mkdir -p "$lab/home" "$RUNNER_TEMP/dc-vault-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/dc-vault-evidence/head.txt"
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          chrome=$(command -v google-chrome || command -v chromium)
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" HOME="$lab/home" GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" DC_VAULT_LAB="$lab" DC_BROWSER_TOOLS="$RUNNER_TEMP/dc-vault-tools" DC_CHROME="$chrome" DC_VAULT_EVIDENCE="$RUNNER_TEMP/dc-vault-evidence" timeout 150s node frontend/scripts/ci-v15-lot01-platform-vault.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-lot01-platform-vault-synthetic
+          path: ${{ runner.temp }}/dc-vault-evidence/
+          if-no-files-found: error
+          retention-days: 3
