@@ -31,6 +31,17 @@ export function PocketPlatformPage() {
   const generation=useRef(0);
   const current=useRef<PlatformVaultContext|null>(null);
   const peerChannel=useRef<BroadcastChannel|null>(null);
+  const activeTrial=useRef<number|null>(null);
+  const [activeTrialId,setActiveTrialId]=useState<number|null>(null);
+  const changeTrialActivity=useCallback((id:number,active:boolean):boolean=>{
+    if(active){
+      if(activeTrial.current!==null&&activeTrial.current!==id)return false;
+      activeTrial.current=id;setActiveTrialId(id);return true;
+    }
+    if(activeTrial.current===id){activeTrial.current=null;setActiveTrialId(null);}
+    return true;
+  },[]);
+
   const clear=useCallback((next:State='locked')=>{
     generation.current++; active.current?.abort(); active.current=null; current.current=null;
     if(ticket.current)ticket.current.value='';
@@ -134,8 +145,8 @@ export function PocketPlatformPage() {
       }catch{if(current.current===ctx)clear(navigator.onLine?'locked':'offline');}
       finally{checking=false;}
     },1000);
-    const recheck=window.setTimeout(()=>{void run('read',tab,offset)},30000);
-    return()=>{window.clearInterval(id);window.clearTimeout(recheck)};
+    const recheck=window.setInterval(()=>{if(activeTrial.current===null)void run('read',tab,offset)},30000);
+    return()=>{window.clearInterval(id);window.clearInterval(recheck)};
   },[state,tab,offset,clear,run]);
   function claim(e:FormEvent){e.preventDefault();const code=ticket.current?.value??'';if(ticket.current)ticket.current.value='';if(code&&!busy)void run('claim','clients',0,code);}
   const select=(t:Tab)=>{setTab(t);setOffset(0);void run('read',t,0);};
@@ -156,7 +167,7 @@ export function PocketPlatformPage() {
         <div className="flex flex-wrap items-center justify-between gap-2"><span className="rounded-full bg-success-surface px-3 py-2 text-xs font-bold text-success">Accès vérifié · action ciblée sur accord Desktop</span><button type="button" onClick={()=>{MobileStorage.lockBiometricVault();clear()}} className={control}>Verrouiller</button></div>
         <nav aria-label="Sections SuperAdmin" className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,7rem),1fr))] gap-2">{([{id:'clients',label:'Clients',Icon:Users},{id:'trials',label:'Essais',Icon:KeyRound},{id:'marketplace',label:'Marketplace',Icon:Store}] as const).map(({id,label,Icon})=><button key={id} type="button" aria-pressed={tab===id} onClick={()=>select(id)} className={control+' flex min-w-0 flex-col items-center justify-center gap-1 !px-[4px] '+(tab===id?'bg-primary text-on-primary':'')}><Icon size={18}/><span className="max-w-full whitespace-nowrap text-xs">{label}</span></button>)}</nav>
         {content.tab==='clients'&&<div className="grid gap-3 sm:grid-cols-2">{content.rows.length===0?<p className="text-sm text-text-muted">Aucun client sur cette page.</p>:content.rows.map(c=><article key={c.id} className="min-w-0 rounded-[20px] border border-glass-border bg-card p-4"><h3 className="break-words font-bold">{c.nom_complet||'Client'}</h3><p className="break-all text-sm text-text-muted">{c.email}</p><div className="mt-3 flex flex-wrap gap-2 text-xs font-bold"><span className="rounded-lg bg-background px-2 py-1">{clientStatus(c)}</span><span className="rounded-lg bg-background px-2 py-1">{c.subscription_plan||'Sans pack'}</span></div><p className="mt-2 text-sm text-text-muted">Échéance : {date(c.license_expires_at)}</p></article>)}</div>}
-        {content.tab==='trials'&&<div className="grid gap-3 sm:grid-cols-2">{content.rows.length===0?<p className="text-sm text-text-muted">Aucun essai sur cette page.</p>:content.rows.map(t=><article key={t.id} className="min-w-0 rounded-[20px] border border-glass-border bg-card p-4"><h3 className="break-words font-bold">{t.cabinet_name||'Cabinet'}</h3><p className="break-all text-sm text-text-muted">{t.email}</p><p className="mt-3 text-sm">{trialStatus(t)} · {t.trial_days} jours</p><p className="text-sm text-text-muted">Échéance : {date(t.expires_at)}</p>{!t.revoked_at&&!t.consumed_at&&<TrialRevocation id={t.id} onRevoked={()=>void run('read','trials',offset)}/>}</article>)}</div>}
+        {content.tab==='trials'&&<div className="grid gap-3 sm:grid-cols-2">{content.rows.length===0?<p className="text-sm text-text-muted">Aucun essai sur cette page.</p>:content.rows.map(t=><article key={t.id} className="min-w-0 rounded-[20px] border border-glass-border bg-card p-4"><h3 className="break-words font-bold">{t.cabinet_name||'Cabinet'}</h3><p className="break-all text-sm text-text-muted">{t.email}</p><p className="mt-3 text-sm">{trialStatus(t)} · {t.trial_days} jours</p><p className="text-sm text-text-muted">Échéance : {date(t.expires_at)}</p>{!t.revoked_at&&!t.consumed_at&&<TrialRevocation id={t.id} disabled={activeTrialId!==null&&activeTrialId!==t.id} onActivity={changeTrialActivity} onRevoked={()=>void run('read','trials',offset)}/>}</article>)}</div>}
         {content.tab==='marketplace'&&<div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,9rem),1fr))] gap-3">{[['Cabinets',content.overview.cabinetsCount],['Fournisseurs actifs',content.overview.activeSuppliersCount],['Produits',content.overview.productsCount],['Commandes',content.overview.ordersCount],['Revenus reconnus',money(content.overview.recognizedRevenueAmount)],['Facturé fournisseurs',money(content.overview.invoicedSupplierAmount)],['Synchronisations dégradées',content.overview.syncDegradedCount],['Synchronisations périmées',content.overview.syncStaleCount],['Accords actifs',content.overview.activeAgreementsCount]].map(([label,value])=><article key={label} className="min-w-0 rounded-[20px] border border-glass-border bg-card p-4"><p className="text-xs font-semibold text-text-muted">{label}</p><p className="mt-2 break-words text-lg font-bold">{value}</p></article>)}</div>}
         <div className="flex flex-wrap items-center justify-between gap-2">{content.tab!=='marketplace'&&<><button type="button" disabled={offset===0} onClick={()=>void run('read',tab,Math.max(0,offset-50))} className={control}>Précédent</button><span className="text-xs text-text-muted">Page {offset/50+1}</span><button type="button" disabled={content.rows.length!==50} onClick={()=>void run('read',tab,offset+50)} className={control}>Suivant</button></>}<button type="button" onClick={()=>void run('read',tab,offset)} className={control}><RefreshCw size={16} className="mr-1 inline"/> Actualiser</button></div>
       </section>}
