@@ -55,6 +55,14 @@ try{
   await d.waitForFunction(()=>JSON.parse(localStorage.getItem('auth-storage')||'null')?.state?.user?.is_superadmin===true,null,{timeout:45000});
   await d.goto(origin+'/super-admin');const panel=d.locator('[data-r5-desktop-authorization]');await panel.waitFor({timeout:30000});
   mark('actual HTTPS Desktop login and platform panel');
+  stage='synthetic-trial-fixture';
+  const fixture=await d.evaluate(async()=>{
+    const r=await fetch('/api/superadmin/trial-codes',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({email:'ci-trial@example.com',trial_days:14,cabinet_name:'CI SYNTHETIC',notes:'CI PRIVATE MARKER'})});
+    if(!r.ok)return {status:r.status};
+    const x=await r.json();return {status:r.status,idPresent:typeof x.id==='number',codePresent:typeof x.code==='string'&&x.code.length>0};
+  });
+  assert.deepEqual(fixture,{status:200,idPresent:true,codePresent:true});
+  mark('actual Desktop creates isolated synthetic trial fixture');
   stage='pairing';
   const pairing=await d.evaluate(async()=>{
     const me=await fetch('/api/auth/me',{credentials:'include'});if(!me.ok)throw Error('identity');
@@ -141,6 +149,12 @@ try{
   for(const [name,endpoint] of [['Essais','trial-codes'],['Marketplace','marketplace/overview'],['Clients','clients']]){
     await response(p,'/api/mobile/superadmin/'+endpoint,'GET',200,()=>p.getByRole('button',{name,exact:true}).click());await waitState('ready');
     assert.equal(await readRegion.locator('input,textarea,form').count(),0);
+    if(endpoint==='trial-codes'){
+      assert.equal(await readRegion.getByText('ci-trial@example.com',{exact:true}).count(),1);
+      assert.equal(await readRegion.getByText('CI SYNTHETIC',{exact:true}).count(),1);
+      assert.equal(await readRegion.getByText('CI PRIVATE MARKER',{exact:false}).count(),0);
+      mark('real nonempty trial projection rendered without private marker');
+    }
     await shot(p,'https-pocket-tab-'+endpoint.replace('/','-')+'-1280');
   }
   stage='offline-lock';
@@ -157,6 +171,30 @@ try{
   mark('all observed platform reads GET and no-store');
   // Separate assertions; preserve both diagnostics and continue the security
   // tests if accessibility fails, without ever granting a GREEN verdict.
+  stage='contrast-and-labels';
+  await p.setViewportSize({width:390,height:900});
+  const contrast=await p.evaluate(()=>{
+    const root=document.querySelector('[data-r5-pocket-platform]');
+    const rgba=x=>{const m=x.match(/^rgba?\(([^)]+)\)$/);if(!m)return null;const a=m[1].split(/[, ]+/).filter(Boolean).map(Number);return [a[0],a[1],a[2],a.length>3?a[3]:1]};
+    const blend=(f,b)=>[0,1,2].map(i=>f[i]*f[3]+b[i]*(1-f[3])).concat(1);
+    const luminance=c=>[.2126,.7152,.0722].reduce((sum,k,i)=>{let v=c[i]/255;return sum+k*(v<=.04045?v/12.92:((v+.055)/1.055)**2.4)},0);
+    let checked=0,unsupported=0;const failures=[];
+    for(const el of root.querySelectorAll('*')){
+      if(el.closest('button:disabled')||!Array.from(el.childNodes).some(n=>n.nodeType===3&&n.textContent.trim())||el.getBoundingClientRect().width===0)continue;
+      const style=getComputedStyle(el);const fg=rgba(style.color);let bg=[255,255,255,1],layers=[],supported=!!fg;
+      for(let a=el;a;a=a.parentElement){const css=getComputedStyle(a),c=rgba(css.backgroundColor);if(css.backgroundImage!=='none'||css.opacity!=='1'||!c){supported=false;break;}layers.push(c);if(c[3]===1)break;}
+      if(!supported){unsupported++;continue;}
+      for(const layer of layers.reverse())bg=blend(layer,bg);
+      const f=luminance(blend(fg,bg)),b=luminance(bg),ratio=(Math.max(f,b)+.05)/(Math.min(f,b)+.05);
+      const size=parseFloat(style.fontSize),weight=parseInt(style.fontWeight),minimum=size>=24||(size>=18.66&&weight>=700)?3:4.5;
+      checked++;if(ratio+1e-6<minimum)failures.push({tag:el.tagName,ratio:Number(ratio.toFixed(2)),minimum});
+    }
+    const labels=[...root.querySelectorAll('nav button span')].map(el=>{const range=document.createRange();range.selectNodeContents(el);return {lines:range.getClientRects().length,fits:range.getBoundingClientRect().width<=el.closest('button').clientWidth-8+1}});
+    return {checked,unsupported,failures,labels};
+  });
+  console.log('LOT01_HTTPS_CONTRAST '+JSON.stringify(contrast));
+  const contrastOK=contrast.checked>=10&&contrast.unsupported===0&&contrast.failures.length===0&&contrast.labels.length===3&&contrast.labels.every(x=>x.lines===1&&x.fits);
+  rows.push({label:'Pocket ready text contrast and unbroken navigation labels at 390',pass:contrastOK});
   stage='keyboard-focus';
   await p.setViewportSize({width:390,height:900});
   const clients=p.getByRole('button',{name:'Clients',exact:true});
@@ -233,5 +271,5 @@ finally{
   proxy.closeAllConnections();await new Promise(resolve=>proxy.close(resolve));
   fs.writeFileSync(path.join(evidence,'https-status.json'),JSON.stringify(rows));
 }
-assert.equal(rows.length,23);
+assert.equal(rows.length,26);
 assert(rows.every(r=>r.pass===true),'accessibility gate failed; see explicit focus and reflow diagnostics');
