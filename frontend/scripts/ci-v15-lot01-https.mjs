@@ -155,17 +155,35 @@ try{
   assert(platform.length>=4&&platform.every(x=>x.method==='GET'&&x.status===200&&x.cacheNoStore));
   assert(observed.some(x=>x.path==='/api/mobile/passkey/platform-approval/claim'&&x.status===200&&x.cacheNoStore));
   mark('all observed platform reads GET and no-store');
-  stage='keyboard-reflow';
+  // Separate assertions; preserve both diagnostics and continue the security
+  // tests if accessibility fails, without ever granting a GREEN verdict.
+  stage='keyboard-focus';
   await p.setViewportSize({width:390,height:900});
-  await p.getByRole('button',{name:'Clients',exact:true}).focus();
+  const clients=p.getByRole('button',{name:'Clients',exact:true});
+  await clients.focus();
   await p.keyboard.press('Tab');
-  assert(await p.getByRole('button',{name:'Essais',exact:true}).evaluate(el=>el===document.activeElement&&getComputedStyle(el).outlineStyle!=='none'));
+  const focus=await p.getByRole('button',{name:'Essais',exact:true}).evaluate(el=>{
+    const css=getComputedStyle(el);
+    return {active:el===document.activeElement,focusVisible:el.matches(':focus-visible'),outline:css.outlineStyle,width:parseFloat(css.outlineWidth),shadow:css.boxShadow!=='none'};
+  });
+  console.log('LOT01_HTTPS_A11Y_FOCUS '+JSON.stringify(focus));
+  const focusOK=focus.active&&focus.focusVisible&&((focus.outline!=='none'&&focus.width>=2)||focus.shadow);
+  stage='text-reflow';
   await p.evaluate(()=>{document.documentElement.style.fontSize='200%'});
+  let reflowOK=false;
   try{
-    assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'200 percent root text horizontal reflow');
-    await shot(p,'https-pocket-text-200-390');
+    const reflow=await p.evaluate(()=>{
+      const width=innerWidth,scroll=document.documentElement.scrollWidth;
+      return {width,scroll,overflow:[...document.querySelectorAll('[data-r5-pocket-platform] *')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&(r.right>width+1||r.left< -1)}).slice(0,10).map(e=>({tag:e.tagName,w:Math.round(e.getBoundingClientRect().width)}))};
+    });
+    console.log('LOT01_HTTPS_A11Y_REFLOW '+JSON.stringify(reflow));
+    reflowOK=reflow.scroll<=reflow.width+1&&reflow.overflow.length===0;
+    await p.screenshot({path:path.join(evidence,'https-pocket-text-200-390.png'),animations:'disabled',mask:[p.locator('input,textarea')]});
+    if(reflowOK)mark('https-pocket-text-200-390');
+    else rows.push({label:'https-pocket-text-200-390',pass:false});
   }finally{await p.evaluate(()=>{document.documentElement.style.fontSize=''})}
-  mark('keyboard focus visible and 200 percent root text reflow at 390');
+  if(focusOK&&reflowOK)mark('keyboard focus visible and 200 percent root text reflow at 390');
+  else rows.push({label:'keyboard focus visible and 200 percent root text reflow at 390',pass:false});
   stage='multi-tab';
   const second=await pocket.newPage();
   await second.bringToFront();await second.goto(origin+'/mobile/superadmin');
@@ -207,3 +225,4 @@ finally{
   fs.writeFileSync(path.join(evidence,'https-status.json'),JSON.stringify(rows));
 }
 assert.equal(rows.length,23);
+assert(rows.every(r=>r.pass===true),'accessibility gate failed; see explicit focus and reflow diagnostics');
