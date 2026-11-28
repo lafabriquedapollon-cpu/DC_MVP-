@@ -38,7 +38,7 @@ def sha(x):
     return hashlib.sha256(x).digest()
 
 def request(label, path, expected, *, method="GET", token=None, data=None,
-            cookie=None, origin=None, soft=False, form=False):
+            cookie=None, origin=None, soft=False, form=False, approval=None):
     headers = {"Accept": "application/json"}
     if token is not None:
         headers["Authorization"] = "Bearer " + token
@@ -46,6 +46,8 @@ def request(label, path, expected, *, method="GET", token=None, data=None,
         headers["Cookie"] = cookie
     if origin:
         headers["Origin"] = origin
+    if approval:
+        headers["X-Platform-Approval"] = approval
     body = None
     if data is not None:
         headers["Content-Type"] = "application/x-www-form-urlencoded" if form else "application/json"
@@ -155,14 +157,33 @@ def run():
                          data={"credential_id": b64(cid)})
     assert enabled["state"] == "enabled"
     request("durable token denied after enabling gate", S, (403,423), token=token)
-    request("active verified platform read", S, 200, token=uv)
+    request("self-enrolled active UV has no independent authority", S, 403, token=uv)
+    approve_path = P + "/platform-approval"
+    approve_body = {"device_id": mobile["device_id"], "credential_id": b64(cid),
+                    "password": os.environ["DC_SYNTH_PASSWORD"], "confirm": True}
+    request("mobile bearer cannot approve platform credential", approve_path, 401,
+            method="POST", token=token, data=approve_body)
+    request("ordinary desktop cannot approve platform credential", approve_path, 403,
+            method="POST", token=ordinary_desktop, cookie=ordinary_cookie, data=approve_body)
+    request("wrong Desktop password cannot approve", approve_path, 401, method="POST",
+            token=desktop, cookie=cookie, data={**approve_body, "password": "wrong-synthetic-password"})
+    request("explicit approval confirmation required", approve_path, 409, method="POST",
+            token=desktop, cookie=cookie, data={**approve_body, "confirm": False})
+    granted, _ = request("independent Desktop approval", approve_path, 200, method="POST",
+                         token=desktop, cookie=cookie, data=approve_body)
+    approval = granted["approval"]
+    assert granted["expires_in"] == 30 * 86400
+    request("active verified platform read", S, 200, token=uv, approval=approval)
+    request("approval alone is not Desktop session", "/api/superadmin/clients", 401, token=approval)
+    request("approval alone is not mobile UV session", S, 401, token=approval)
+    request("tampered approval refused", S, 403, token=uv, approval=approval[:-5]+"xxxxx")
     request("active mobile UV cannot mutate Marketplace", "/api/superadmin/marketplace/suppliers/999999/governance",
-            403, method="PATCH", token=uv, data={"confirm": True, "isActive": False})
+            403, method="PATCH", token=uv, approval=approval, data={"confirm": True, "isActive": False})
     request("desktop mutation boundary unchanged", "/api/superadmin/marketplace/suppliers/999999/governance",
             404, method="PATCH", token=desktop, cookie=cookie, data={"confirm": True, "isActive": False})
     request("UV mobile token refused on desktop clients", "/api/superadmin/clients", 401, token=uv)
     request("disable credential after UV", P, 200, method="DELETE", token=uv)
-    request("disabled credential must invalidate old privileged token", S, (401,403,423), token=uv, soft=True)
+    request("disabled credential must invalidate old privileged token", S, (401,403,423), token=uv, approval=approval, soft=True)
     request("stale UV cannot enable another credential", P + "/enable", 423, method="POST",
             token=uv, data={"credential_id": b64(cid)})
     reg2, _ = request("re-enrollment challenge", P + "/registration/options", 200, method="POST", token=token, origin=ORIGIN)
@@ -174,13 +195,18 @@ def run():
     uv2 = renewed["access_token"]
     request("enable re-enrolled credential", P + "/enable", 200, method="POST", token=uv2, data={"credential_id": b64(cid)})
     request("old UV remains denied after same credential re-enrollment", S, 423, token=uv)
-    request("fresh UV accepted after re-enrollment", S, 200, token=uv2)
+    request("old approval cannot authorize re-enrollment", S, 403, token=uv2, approval=approval)
+    request("fresh UV without new Desktop approval denied", S, 403, token=uv2)
+    granted2, _ = request("Desktop approves replacement credential", approve_path, 200, method="POST",
+                          token=desktop, cookie=cookie, data=approve_body)
+    approval = granted2["approval"]
+    request("fresh UV accepted after re-enrollment", S, 200, token=uv2, approval=approval)
     next_challenge = options(token)
     next_verified, _ = request("new signed UV ceremony", P + "/authentication/verify", 200, method="POST", token=token,
                                origin=ORIGIN, data=verify_body(next_challenge, assertion(next_challenge, key, cid, 3)))
     uv3 = next_verified["access_token"]
     request("previous UV invalidated by new ceremony", S, 423, token=uv2)
-    request("latest UV active", S, 200, token=uv3)
+    request("latest UV active", S, 200, token=uv3, approval=approval)
     ordinary_reg, _ = request("ordinary registration challenge", P + "/registration/options", 200, method="POST",
                               token=other, origin=ORIGIN)
     ordinary_key, ordinary_cid = ec.generate_private_key(ec.SECP256R1()), secrets.token_bytes(32)
@@ -192,7 +218,7 @@ def run():
     ordinary_uv = ordinary_verified["access_token"]
     request("ordinary credential enabled", P + "/enable", 200, method="POST", token=ordinary_uv,
             data={"credential_id": b64(ordinary_cid)})
-    request("ordinary active UV never gains platform authority", S, 403, token=ordinary_uv)
+    request("ordinary active UV never gains platform authority", S, 403, token=ordinary_uv, approval=approval)
 
     # Real HTTP races; no test-generated JWT, clock override or mocked verifier.
     superseded = options(token)
@@ -215,7 +241,7 @@ def run():
     assert sorted(row["status"] for row in race_rows) == [200, 410] and len(winners) == 1
     winner = winners[0]
     uv3 = winner["access_token"]
-    request("winning UV session active", S, 200, token=uv3)
+    request("winning UV session active", S, 200, token=uv3, approval=approval)
     expiring_challenge = options(token)
     # Use the actual production TTL and wall-clock passage, never shorten it.
     assert winner["expires_in"] == 300
@@ -223,7 +249,7 @@ def run():
     start = time.monotonic()
     time.sleep(winner["expires_in"] + 2)
     assert time.monotonic() - start >= winner["expires_in"]
-    request("expired UV token refused on platform API", S, 401, token=uv3)
+    request("expired UV token refused on platform API", S, 401, token=uv3, approval=approval)
     request("expired UV token refused on passkey API", P + "/status", 401, token=uv3)
     request("expired challenge refused", P + "/authentication/verify", 410, method="POST",
             token=token, origin=ORIGIN, data=verify_body(expiring_challenge, assertion(expiring_challenge, key, cid, 5)))
@@ -231,7 +257,7 @@ def run():
     replacement, _ = request("new UV after actual expiration", P + "/authentication/verify", 200, method="POST",
                               token=token, origin=ORIGIN, data=verify_body(refreshed, assertion(refreshed, key, cid, 5)))
     uv3 = replacement["access_token"]
-    request("fresh UV active after expiration", S, 200, token=uv3)
+    request("fresh UV active after expiration", S, 200, token=uv3, approval=approval)
     # Ordinary session also expired during the real-time window; authenticate again.
     ordinary_fresh = options(other)
     ordinary_new, _ = request("ordinary UV renewed after expiration", P + "/authentication/verify", 200, method="POST",
@@ -239,7 +265,7 @@ def run():
     ordinary_uv = ordinary_new["access_token"]
     request("desktop revokes paired platform device", "/api/admin/mobile-devices/" + mobile["device_id"] + "/revoke",
             200, method="POST", token=desktop, cookie=cookie)
-    request("revoked device current UV refused", S, 401, token=uv3)
+    request("revoked device current UV refused", S, 401, token=uv3, approval=approval)
     request("revoked device durable refresh refused", M + "/refresh-token", 401, method="POST",
             data={"refresh_token": mobile["refresh_token"]})
     request("other device remains alive", P + "/status", 200, token=other)

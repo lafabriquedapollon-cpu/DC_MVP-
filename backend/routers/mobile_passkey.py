@@ -5,8 +5,8 @@ import json
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -25,12 +25,16 @@ from backend.services.mobile_biometric import (
     credential_uv_binding,
     require_bound_biometric_uv,
     issue_biometric_access_token,
+    issue_platform_approval,
     issue_challenge,
     opaque_user_handle,
     payload_has_biometric_uv,
 )
 from backend.services.mobile_mdns import start_mdns_if_secure, stop_mdns
-from backend.security import token_blacklist
+from backend.security import token_blacklist, verify_password
+from backend.routers.auth import require_superadmin
+from backend.services.audit_service import audit_service
+from backend.utils.rate_limit import check_rate_limit
 
 router = APIRouter(
     tags=["Mobile Passkey"],
@@ -43,6 +47,14 @@ class CeremonyResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     challenge_id: str = Field(min_length=36, max_length=36)
     credential: dict[str, Any]
+
+
+class PlatformApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    device_id: str = Field(min_length=36, max_length=36)
+    credential_id: str = Field(min_length=8, max_length=1024)
+    password: SecretStr = Field(min_length=1, max_length=72)
+    confirm: bool
 
 
 class EnablePasskeyRequest(BaseModel):
@@ -92,6 +104,47 @@ def install_stable_lan_url_overrides() -> None:
         return
     _legacy.get_lan_base_url = lambda: WEBAUTHN_ORIGIN
     _legacy.get_lan_frontend_url = lambda: WEBAUTHN_ORIGIN
+
+
+@router.post("/passkey/platform-approval", summary="Autorisation Desktop indépendante d'une passkey SuperAdmin")
+def approve_platform_passkey(
+    body: PlatformApprovalRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(database.get_db),
+    admin: models.User = Depends(require_superadmin),
+):
+    # Desktop identity/Station is resolved by the canonical desktop dependency.
+    # Cookie-based mutations must also satisfy the existing control-plane policy.
+    from backend.routers.partner_superadmin_security import _enforce_marketplace_control_plane_request
+    _enforce_marketplace_control_plane_request(request)
+    check_rate_limit(request, scope="platform-passkey-approval")
+    if body.confirm is not True:
+        raise HTTPException(status_code=409, detail="Confirmation explicite requise.")
+    try:
+        password_ok = verify_password(body.password.get_secret_value(), admin.hashed_password)
+    except (ValueError, TypeError):
+        password_ok = False
+    if not password_ok:
+        raise HTTPException(status_code=401, detail="Vérification Desktop refusée.")
+    tenant_id = admin.get_employer_id()
+    device = db.query(models.MobilePairedDevice).filter(
+        models.MobilePairedDevice.device_id == body.device_id,
+        models.MobilePairedDevice.user_id == admin.id,
+        models.MobilePairedDevice.employer_id == tenant_id,
+        models.MobilePairedDevice.revoked_at.is_(None),
+    ).first()
+    credential = credential_for_device(db, user_id=admin.id, employer_id=tenant_id, device_id=body.device_id)
+    if device is None or credential is None or credential.credential_id != body.credential_id:
+        raise HTTPException(status_code=404, detail="Appareil ou passkey introuvable.")
+    proof, expires_in = issue_platform_approval(db, credential)
+    if audit_service.log(db=db, user_id=admin.id, employer_id=tenant_id,
+                         action="PLATFORM_PASSKEY_APPROVED", resource_type="MobilePairedDevice",
+                         resource_id=device.device_id, severity="CRITICAL",
+                         details="Autorisation Desktop indépendante de la passkey active.") is not True:
+        raise HTTPException(status_code=503, detail="Audit de l'autorisation indisponible.")
+    response.headers["Cache-Control"] = "no-store"
+    return {"approval": proof, "expires_in": expires_in}
 
 
 @router.get("/passkey/status", summary="État du verrou biométrique de l'appareil")

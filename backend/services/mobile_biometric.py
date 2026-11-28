@@ -4,13 +4,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException
-from jose import jwt
+from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from backend.core.key_material import MOBILE_KEY_VERSION
@@ -25,6 +26,7 @@ WEBAUTHN_ORIGIN = os.getenv(
 WEBAUTHN_RP_NAME = "Digital Crown"
 CHALLENGE_TTL = timedelta(minutes=3)
 BIOMETRIC_SESSION_TTL = timedelta(minutes=5)
+PLATFORM_APPROVAL_TTL = timedelta(days=30)
 
 
 def b64url_encode(raw: bytes) -> str:
@@ -120,6 +122,60 @@ def consume_challenge(
         raise HTTPException(status_code=410, detail="Challenge WebAuthn déjà utilisé.")
     db.commit()
     return b64url_decode(row.challenge_b64url)
+
+
+def platform_credential_binding(credential: MobilePasskeyCredential) -> str:
+    # Independent approval survives normal UV ceremonies, never re-enrollment.
+    material = [credential.credential_id, credential.credential_public_key,
+                credential.created_at.isoformat(), credential.enabled_at.isoformat() if credential.enabled_at else ""]
+    return hashlib.sha256(json.dumps(material, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def issue_platform_approval(db: Session, credential: MobilePasskeyCredential) -> tuple[str, int]:
+    if credential.enabled_at is None or credential.last_used_at is None:
+        raise HTTPException(status_code=409, detail="Passkey active requise.")
+    now = datetime.now(timezone.utc)
+    payload = {
+        "type": "mobile_platform_approval",
+        "sub": str(credential.user_id),
+        "tenant_id": int(credential.employer_id),
+        "device_id": str(credential.device_id),
+        "credential_binding": platform_credential_binding(credential),
+        "mobile_key_version": MOBILE_KEY_VERSION,
+        "mobile_epoch": token_blacklist.current_mobile_epoch(credential.employer_id, db),
+        "jti": uuid.uuid4().hex,
+        "iat": now,
+        "exp": now + PLATFORM_APPROVAL_TTL,
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM), int(PLATFORM_APPROVAL_TTL.total_seconds())
+
+
+def require_platform_approval(db: Session, *, user_id: int, employer_id: int, device_id: str, proof: str) -> None:
+    denied = HTTPException(status_code=403, detail={
+        "code": "PLATFORM_APPROVAL_REQUIRED", "message": "Autorisation indépendante SuperAdmin requise."
+    })
+    if not proof or len(proof) > 4096:
+        raise denied
+    try:
+        claims = jwt.decode(proof, SECRET_KEY, algorithms=[ALGORITHM], options={
+            "require_exp": True, "require_iat": True, "require_sub": True, "require_jti": True,
+        })
+        if (claims.get("type") != "mobile_platform_approval"
+            or claims.get("mobile_key_version") != MOBILE_KEY_VERSION
+            or claims.get("sub") != str(user_id)
+            or claims.get("tenant_id") != employer_id
+            or claims.get("device_id") != device_id
+            or claims["exp"] - claims["iat"] > int(PLATFORM_APPROVAL_TTL.total_seconds())
+            or claims.get("mobile_epoch") != token_blacklist.current_mobile_epoch(employer_id, db)
+            or token_blacklist.is_revoked(claims["jti"], db)):
+            raise denied
+        credential = credential_for_device(db, user_id=user_id, employer_id=employer_id, device_id=device_id)
+        binding = claims.get("credential_binding")
+        if (credential is None or credential.enabled_at is None or not isinstance(binding, str)
+            or not hmac.compare_digest(binding, platform_credential_binding(credential))):
+            raise denied
+    except (JWTError, ValueError, TypeError, KeyError):
+        raise denied
 
 
 def credential_uv_binding(credential: MobilePasskeyCredential) -> str:

@@ -106,6 +106,10 @@ async def require_marketplace_superadmin(
                 "MARKETPLACE_SUPERADMIN_BIOMETRIC_REQUIRED",
                 "Le control-plane Marketplace requiert une vérification biométrique récente sur mobile.",
             )
+        from backend.services.mobile_biometric import require_platform_approval
+        require_platform_approval(db, user_id=user.id, employer_id=int(_tenant_id),
+                                  device_id=verified_claims["device_id"],
+                                  proof=request.headers.get("x-platform-approval", ""))
         # R5-A is read-only. Do not allow the existing mobile UV exception
         # to authorize any Marketplace mutation before R5-B is qualified.
         if request.method.upper() not in {"GET", "HEAD"}:

@@ -5,7 +5,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: v15-lot01-r5-uv
+  group: v15-lot01-r5-approval
   cancel-in-progress: true
 jobs:
   desktop-integration:
