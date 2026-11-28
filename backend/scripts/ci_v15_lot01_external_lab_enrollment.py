@@ -130,4 +130,44 @@ try:
 finally:
     metadata.drop_all(database.engine);database.engine.dispose()
     Path(os.environ["DC_EVIDENCE"],"external-lab-enrollment.json").write_text(json.dumps(rows,indent=2))
-assert len(rows)==36
+EXPECTED_LABELS = [
+    "staff denied",
+    "foreign owner denied",
+    "cross cabinet lab denied",
+    "wrong password denied",
+    "confirmation required",
+    "key fingerprint mismatch denied",
+    "malformed public key denied",
+    "no pending or authority on refusals",
+    "owner prepares enrollment",
+    "pending grants nothing",
+    "duplicate lab refused",
+    "duplicate key for different lab refused",
+    "wrong key proof denied",
+    "malformed proof denied",
+    "altered nonce denied",
+    "denied proofs create nothing",
+    "completion rollback leaves no authority",
+    "correct proof completes",
+    "replay denied",
+    "exact one principal device binding",
+    "no automatic order grant or session",
+    "exact cabinet lab and principal binding",
+    "public key only",
+    "enrolled key can read explicitly granted minimal order",
+    "pre-revocation challenge exists",
+    "foreign owner cannot revoke",
+    "owner revokes",
+    "issued proof refused after enrollment revoke",
+    "new challenge refused after enrollment revoke",
+    "repeat revocation denied",
+    "revoked cannot reenroll",
+    "revocation persists across connection",
+    "exact audit lifecycle",
+    "expired challenge denied",
+    "pending revocation accepted",
+    "cancelled challenge denied",
+    "no new authority after expired or cancelled"
+]
+assert [row['label'] for row in rows] == EXPECTED_LABELS
+assert all(row['pass'] is True for row in rows)
