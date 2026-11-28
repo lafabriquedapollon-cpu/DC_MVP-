@@ -10,7 +10,7 @@ const request=async(label,path,{method='GET',headers={},body,status}={})=>{
  const r=await fetch(base+path,{method,headers:{...headers,...(body===undefined?{}:{'Content-Type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});
  const row={label,method,status:r.status,expected:status,pass:r.status===status};evidence.push(row);console.log('LOT01_STOCK_CASE '+JSON.stringify(row));
  assert.equal(r.status,status,label);
- return {body:await r.json().catch(()=>null),cookies:r.headers.getSetCookie()};
+ return {body:await r.json().catch(()=>null),cookies:r.headers.getSetCookie(),retryAfter:r.headers.get('Retry-After')};
 };
 const bearer=t=>({Authorization:'Bearer '+t});
 const login=async email=>{
@@ -27,14 +27,18 @@ const staff=async(email,cookie)=>{
  const me=await request('staff identity','/api/auth/me',{headers,status:200});assert(Number.isInteger(me.body.id));
  return {headers,id:me.body.id,token};
 };
-const pair=async(owner,target)=>{
+const pair=async(owner,target,replayStatus=404)=>{
  const issue=await request('owner issues authorized Pocket pairing','/api/mobile/bridge-pairing',{method:'POST',headers:owner,body:{target_user_id:target,destination:'agenda'},status:200});
  assert(issue.body.token_code&&issue.body.target_user_id===target&&issue.body.contains_patient_data===false);
  const key=createECDH('prime256v1');key.generateKeys();
  const claim={token:issue.body.token_code,client_public_key_hex:key.getPublicKey('hex','uncompressed')};
  const paired=await request('real ECDH Pocket claim','/api/mobile/claim-token',{method:'POST',body:claim,status:200});
  assert(paired.body.access_token&&paired.body.refresh_token&&paired.body.user_id===target&&paired.body.server_public_key_hex&&paired.body.encrypted_master_key_hex);
- await request('one-shot pairing replay refused','/api/mobile/claim-token',{method:'POST',body:claim,status:404});
+ // Same real loopback client: first two replays prove one-shot consumption (404).
+ // The sixth claim attempt must trigger the unmodified server's five-attempt limit.
+ const replay=await request(replayStatus===429?'sixth pairing request rate limited':'one-shot pairing replay refused','/api/mobile/claim-token',{method:'POST',body:claim,status:replayStatus});
+ if(replayStatus===429){const seconds=Number(replay.retryAfter);assert(Number.isInteger(seconds)&&seconds>=1&&seconds<=600,'Retry-After contract');console.log('LOT01_PAIRING_RATE_LIMIT_PASS');}
+ assert(!replay.body?.access_token&&!replay.body?.refresh_token,'refusal must not issue credentials');
  return paired.body;
 };
 const D='/api/stock/items',M='/api/mobile/stock/items';
@@ -55,7 +59,7 @@ try{
  await request('cross-tenant desktop mutation denied',D+'/'+id,{method:'PATCH',headers:B,body:{quantite:99},status:404});
  await request('cross-tenant desktop deletion denied',D+'/'+id,{method:'DELETE',headers:B,status:404});
  // Validate actual paired identities and authorization, not manufactured JWTs.
- const readerPocket=await pair(A,reader.id),writerPocket=await pair(A,writer.id),otherPocket=await pair(B,oth.body.id);
+ const readerPocket=await pair(A,reader.id),writerPocket=await pair(A,writer.id),otherPocket=await pair(B,oth.body.id,429);
  const R=bearer(readerPocket.access_token),W=bearer(writerPocket.access_token),O=bearer(otherPocket.access_token);
  await request('desktop JWT cannot enter Pocket stock',M,{headers:A,status:401});
  await request('Pocket JWT cannot enter desktop stock',D,{headers:R,status:401});
