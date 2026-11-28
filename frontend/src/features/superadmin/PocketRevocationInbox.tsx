@@ -2,7 +2,7 @@ import { useEffect,useRef,useState,type FormEvent } from 'react';
 import { API_BASE,getRuntimeAuthToken } from '../../services/api';
 
 type Pending={request_id:string;target_id:number;email:string;cabinet_name:string|null;device_id:string;expires_in:number};
-const btn='min-h-12 rounded-xl border border-border-main px-4 py-2 text-sm font-bold break-words focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50';
+const btn='min-h-12 max-w-full whitespace-normal rounded-xl border border-border-main px-4 py-2 text-sm font-bold break-words focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50';
 function isPending(v:unknown):v is Pending{
   if(!v||typeof v!=='object')return false;const x=v as Partial<Pending>;
   return Object.keys(v).length===6&&typeof x.request_id==='string'&&/^[0-9a-f-]{36}$/.test(x.request_id)&&Number.isSafeInteger(x.target_id)&&Number(x.target_id)>0&&typeof x.email==='string'&&(x.cabinet_name===null||typeof x.cabinet_name==='string')&&typeof x.device_id==='string'&&x.device_id.length===36&&typeof x.expires_in==='number'&&Number.isSafeInteger(x.expires_in)&&x.expires_in>0&&x.expires_in<=300;

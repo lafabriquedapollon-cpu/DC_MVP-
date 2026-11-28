@@ -427,6 +427,34 @@ def run():
             assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial5["id"])).count()==0
             assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOCATION_CANCELLED",resource_id=str(trial5["id"]),severity="CRITICAL").count()==2
     tx_check("cancel both phases persists without revoking trial",cancellation_persistence)
+    # Race between cancellation and execution of a single already approved intent.
+    race_trial,_=request("cancel-execute race fixture","/api/superadmin/trial-codes",200,method="POST",
+        token=desktop,cookie=cookie,data={"email":"ci-race-cancel@example.com","trial_days":14})
+    racepath=F+"/trial-codes/"+str(race_trial["id"])
+    race_intent,_=request("cancel-execute race prepare",racepath+"/revocation-request",200,method="POST",
+        token=uv,approval=approval,origin=ORIGIN)
+    rb={"challenge_id":race_intent["challenge_id"],"nonce":race_intent["nonce"]}
+    request("cancel-execute race Desktop approval",inbox+"/"+rb["challenge_id"]+"/approve",200,method="POST",
+        token=desktop,cookie=cookie,data={"target_id":race_trial["id"],"password":os.environ["DC_SYNTH_PASSWORD"],"confirm":True})
+    gate=Barrier(2)
+    def cancel_execute_race(action):
+        gate.wait(timeout=10)
+        request("cancel-execute race "+action,racepath+"/"+action,(200,409),method="POST",token=uv,
+            approval=approval,origin=ORIGIN,data=rb if action=="revocation-cancel" else {**rb,"confirm":True})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(cancel_execute_race,("revocation-cancel","revoke")))
+    def race_persisted():
+        outcomes={r["label"]:r["status"] for r in rows if r["label"] in ("cancel-execute race revocation-cancel","cancel-execute race revoke")}
+        assert sorted(outcomes.values())==[200,409]
+        cancelled=outcomes["cancel-execute race revocation-cancel"]==200
+        with database.SessionLocal() as db:
+            assert (db.get(models.TrialActivationCode,race_trial["id"]).revoked_at is None)==cancelled
+            for action,expected in (("PLATFORM_TRIAL_REVOCATION_CANCELLED",int(cancelled)),("PLATFORM_TRIAL_REVOKED",int(not cancelled))):
+                assert db.query(models.AuditLog).filter_by(action=action,resource_id=str(race_trial["id"]),severity="CRITICAL").count()==expected
+            assert db.get(MobileWebAuthnChallenge,rb["challenge_id"]).used_at is not None
+    tx_check("cancel-execute race exactly one terminal audit and consistent target",race_persisted)
+    request("cancel-execute race proof cannot cancel twice",racepath+"/revocation-cancel",409,method="POST",token=uv,approval=approval,origin=ORIGIN,data=rb)
+    request("cancel-execute race proof cannot execute twice",racepath+"/revoke",409,method="POST",token=uv,approval=approval,origin=ORIGIN,data={**rb,"confirm":True})
     overview, _ = request("facade Marketplace summary", F + "/marketplace/overview", 200, token=uv, approval=approval)
     desktop_overview, _ = request("Desktop Marketplace summary for comparison", S, 200, token=desktop, cookie=cookie)
     assert overview == desktop_overview

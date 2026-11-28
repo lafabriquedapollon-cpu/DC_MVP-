@@ -31,6 +31,26 @@ const proxy=https.createServer({key:fs.readFileSync(path.join(lab,'tls.key')),ce
 const waitState=(state)=>p.locator('[data-r5-pocket-platform][data-r5-platform-state="'+state+'"]').waitFor({timeout:30000});
 const noData=async()=>assert.equal(await p.getByRole('region',{name:'Consultation plateforme'}).count(),0);
 const shot=async(page,name)=>{await page.screenshot({path:path.join(evidence,name+'.png'),animations:'disabled',mask:[page.locator('input,textarea')]});mark(name)};
+const scopedContrast=async(page,selector)=>page.evaluate(selector=>{
+    const root=document.querySelector(selector);
+    const rgba=x=>{const m=x.match(/^rgba?\(([^)]+)\)$/);if(!m)return null;const a=m[1].split(/[, ]+/).filter(Boolean).map(Number);return [a[0],a[1],a[2],a.length>3?a[3]:1]};
+    const blend=(f,b)=>[0,1,2].map(i=>f[i]*f[3]+b[i]*(1-f[3])).concat(1);
+    const luminance=c=>[.2126,.7152,.0722].reduce((sum,k,i)=>{let v=c[i]/255;return sum+k*(v<=.04045?v/12.92:((v+.055)/1.055)**2.4)},0);
+    let checked=0,unsupported=0;const failures=[];
+    for(const el of root.querySelectorAll('*')){
+      if(el.closest('button:disabled')||!Array.from(el.childNodes).some(n=>n.nodeType===3&&n.textContent.trim())||el.getBoundingClientRect().width===0)continue;
+      const style=getComputedStyle(el);const fg=rgba(style.color);let bg=[255,255,255,1],layers=[],supported=!!fg;
+      for(let a=el;a;a=a.parentElement){const css=getComputedStyle(a),c=rgba(css.backgroundColor);if(css.backgroundImage!=='none'||css.opacity!=='1'||!c){supported=false;break;}layers.push(c);if(c[3]===1)break;}
+      if(!supported){unsupported++;continue;}
+      for(const layer of layers.reverse())bg=blend(layer,bg);
+      const f=luminance(blend(fg,bg)),b=luminance(bg),ratio=(Math.max(f,b)+.05)/(Math.min(f,b)+.05);
+      const size=parseFloat(style.fontSize),weight=parseInt(style.fontWeight),minimum=size>=24||(size>=18.66&&weight>=700)?3:4.5;
+      checked++;if(ratio+1e-6<minimum)failures.push({tag:el.tagName,ratio:Number(ratio.toFixed(2)),minimum});
+    }
+    const labels=[...root.querySelectorAll('nav button span')].map(el=>{const range=document.createRange();range.selectNodeContents(el);return {lines:range.getClientRects().length,fits:range.getBoundingClientRect().width<=el.closest('button').clientWidth-8+1}});
+    return {checked,unsupported,failures,labels};
+  },selector);
+
 const response=async(page,path,method,status,action)=>{
   const pending=page.waitForResponse(r=>new URL(r.url()).pathname===path&&r.request().method()===method,{timeout:30000});
   await action();const r=await pending;assert.equal(r.status(),status,path);return r;
@@ -275,6 +295,16 @@ try{
   await trialCard.getByRole('button',{name:'Demander la révocation'}).click();
   assert.equal((await replacement).status(),200);
   await trialCard.getByText('En attente de confirmation Desktop',{exact:false}).waitFor();
+  stage='mutation-pending-a11y';
+  const pendingContrast=await scopedContrast(p,'[data-lot01-trial-revocation]');
+  console.log('LOT01_MUTATION_PENDING_CONTRAST '+JSON.stringify(pendingContrast));
+  assert(pendingContrast.checked>=4&&pendingContrast.unsupported===0&&pendingContrast.failures.length===0);
+  mark('pending action text contrast at 390');
+  const checkButton=trialCard.getByRole('button',{name:'Vérifier l’accord Desktop'});
+  await checkButton.focus();await p.keyboard.press('Tab');
+  const abandonFocus=await trialCard.getByRole('button',{name:'Abandonner'}).evaluate(el=>({active:el===document.activeElement,visible:el.matches(':focus-visible'),outline:getComputedStyle(el).outlineStyle,width:parseFloat(getComputedStyle(el).outlineWidth)}));
+  assert(abandonFocus.active&&abandonFocus.visible&&abandonFocus.outline!=='none'&&abandonFocus.width>=2);
+  mark('pending action keyboard focus visible');
   await shot(p,'https-pocket-revocation-pending-390');
   stage='mutation-desktop-inbox';
   await response(md,'/api/mobile/superadmin/revocation-requests','GET',200,()=>inbox.getByRole('button',{name:'Actualiser les demandes'}).click());
@@ -282,6 +312,11 @@ try{
   await inbox.getByRole('button',{name:'Examiner cette demande'}).click();
   const confirmButton=inbox.getByRole('button',{name:'Approuver la révocation ciblée'});
   assert(await confirmButton.isDisabled());
+  stage='mutation-desktop-a11y';
+  const desktopContrast=await scopedContrast(md,'[data-lot01-revocation-inbox]');
+  console.log('LOT01_MUTATION_DESKTOP_CONTRAST '+JSON.stringify(desktopContrast));
+  assert(desktopContrast.checked>=6&&desktopContrast.unsupported===0&&desktopContrast.failures.length===0);
+  mark('Desktop approval panel text contrast at 1280');
   await shot(md,'https-desktop-revocation-review-1280');
   await inbox.getByLabel('Mot de passe de confirmation').fill(process.env.DC_SYNTH_PASSWORD);
   await inbox.locator('input[type=checkbox]').check();
@@ -297,6 +332,18 @@ try{
   await trialCard.getByRole('button',{name:'Vérifier l’accord Desktop'}).click();
   assert.equal((await statusResponse).status(),200);
   await trialCard.getByRole('button',{name:'Confirmer la révocation définitive'}).waitFor();
+  stage='mutation-approved-a11y';
+  const approvedContrast=await scopedContrast(p,'[data-lot01-trial-revocation]');
+  console.log('LOT01_MUTATION_APPROVED_CONTRAST '+JSON.stringify(approvedContrast));
+  assert(approvedContrast.checked>=4&&approvedContrast.unsupported===0&&approvedContrast.failures.length===0);
+  mark('approved action text contrast at 390');
+  await p.evaluate(()=>{document.documentElement.style.fontSize='200%'});
+  try{
+    const dimensions=await p.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth,overflow:[...document.querySelectorAll('[data-lot01-trial-revocation] *')].filter(el=>{const r=el.getBoundingClientRect();return r.width>0&&(r.left< -1||r.right>innerWidth+1)}).map(el=>el.tagName)}));
+    console.log('LOT01_MUTATION_REFLOW '+JSON.stringify(dimensions));
+    assert(dimensions.scroll<=dimensions.width+1&&dimensions.overflow.length===0);
+    await shot(p,'https-pocket-revocation-approved-text-200-390');
+  }finally{await p.evaluate(()=>{document.documentElement.style.fontSize=''})}
   await shot(p,'https-pocket-revocation-approved-390');
   stage='mutation-pocket-execute';
   const executionResponse=p.waitForResponse(r=>/\/api\/mobile\/superadmin\/trial-codes\/\d+\/revoke$/.test(new URL(r.url()).pathname)&&r.request().method()==='POST');
@@ -339,5 +386,5 @@ finally{
   proxy.closeAllConnections();await new Promise(resolve=>proxy.close(resolve));
   fs.writeFileSync(path.join(evidence,'https-status.json'),JSON.stringify(rows));
 }
-assert.equal(rows.length,33);
+assert.equal(rows.length,38);
 assert(rows.every(r=>r.pass===true),'accessibility gate failed; see explicit focus and reflow diagnostics');

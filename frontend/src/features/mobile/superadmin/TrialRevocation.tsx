@@ -2,7 +2,7 @@ import { useEffect,useRef,useState } from 'react';
 import { MobileStorage,type PlatformVaultContext } from '../../../services/zka/MobileStorage';
 import { beginTrialRevocation,checkTrialRevocation,executeTrialRevocation,cancelTrialRevocation,type TrialRevocationRequest } from '../../../services/zka/mobilePlatformApproval';
 
-const control='min-h-12 rounded-xl border border-glass-border bg-card px-3 py-2 text-sm font-bold break-words focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50';
+const control='min-h-12 max-w-full whitespace-normal rounded-xl border border-glass-border bg-card px-3 py-2 text-sm font-bold break-words focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50';
 export function TrialRevocation({id,onRevoked,disabled,onActivity}:{id:number;onRevoked:()=>void;disabled:boolean;onActivity:(id:number,active:boolean)=>boolean}){
   const [phase,setPhase]=useState<'idle'|'pending'|'approved'>('idle');
   const [busy,setBusy]=useState(false);
@@ -47,12 +47,12 @@ export function TrialRevocation({id,onRevoked,disabled,onActivity}:{id:number;on
     }catch{if(seq===gen.current)reset(action==='execute'?'Résultat non confirmé. Actualisez les essais avant toute nouvelle demande.':action==='cancel'?'Annulation serveur non confirmée. La demande locale est effacée ; vérifiez son expiration avant de poursuivre.':'Demande indisponible. Recommencez uniquement après vérification.');}
     finally{window.clearTimeout(timeout);if(seq===gen.current){op.current=null;setBusy(false);}}
   }
-  return <div data-lot01-trial-revocation className="mt-3 space-y-2 border-t border-glass-border pt-3">
+  return <div data-lot01-trial-revocation className="mt-3 min-w-0 space-y-2 border-t border-glass-border pt-3">
     {phase==='idle'?<button className={control} disabled={busy||disabled} onClick={()=>void run('begin')}>Demander la révocation</button>:<>
-      <p role="status" className="text-sm">{phase==='pending'?'En attente de confirmation Desktop':'Accord Desktop vérifié'} · {remaining} s</p>
+      <p role="status" className="text-sm">{phase==='pending'?'En attente de confirmation Desktop':'Accord Desktop vérifié'}</p><p className="text-xs text-text-muted" aria-live="off">Temps restant : {remaining} s</p>
       <p className="text-sm text-text-muted">Gardez Pocket ouvert. Seul cet essai est concerné.</p>
-      {phase==='pending'?<button className={control} disabled={busy||remaining===0} onClick={()=>void run('check')}>Vérifier l’accord Desktop</button>:<button className={control+' text-warning'} disabled={busy||remaining===0} onClick={()=>void run('execute')}>Confirmer la révocation définitive</button>}
-      <button className={control+' ml-2'} disabled={busy} onClick={()=>void run('cancel')}>Abandonner</button>
+      {phase==='pending'?<button className={control} disabled={busy||remaining===0} onClick={()=>void run('check')}>Vérifier l’accord Desktop</button>:<button className={control+' text-text-main'} disabled={busy||remaining===0} onClick={()=>void run('execute')}>Confirmer la révocation définitive</button>}
+      <button className={control} disabled={busy} onClick={()=>void run('cancel')}>Abandonner</button>
     </>}
     {message&&<p role="status" className="text-sm text-text-muted">{message}</p>}
   </div>;
