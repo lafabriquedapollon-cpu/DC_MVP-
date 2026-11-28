@@ -22,7 +22,7 @@ const proxy=https.createServer({key:fs.readFileSync(path.join(lab,'tls.key')),ce
   const pathname=new URL(incoming.url,origin).pathname;
   const backend=pathname.startsWith('/api/')||pathname==='/health'||pathname.startsWith('/media/');
   const upstream=http.request({hostname:'127.0.0.1',port:backend?8008:5173,path:incoming.url,method:incoming.method,headers:{...incoming.headers,'x-forwarded-proto':'https','x-forwarded-host':'digitalcrown.local:8005'}},res=>{
-    if(allowedPaths.has(pathname))observed.push({method:incoming.method,path:pathname,status:res.statusCode,cacheNoStore:String(res.headers['cache-control']||'').includes('no-store')});
+    if(allowedPaths.has(pathname))observed.push({method:incoming.method,path:pathname,status:res.statusCode,cacheNoStore:String(res.headers['cache-control']||'').includes('no-store'),originPresent:typeof incoming.headers.origin==='string',originMatches:incoming.headers.origin===origin});
     out.writeHead(res.statusCode,res.headers);res.pipe(out);
   });
   upstream.on('error',()=>{if(!out.headersSent)out.writeHead(502);out.end();});
@@ -78,9 +78,19 @@ try{
   stage='prf-enrollment';
   cdp=await pocket.newCDPSession(p);await cdp.send('WebAuthn.enable');
   const {authenticatorId}=await cdp.send('WebAuthn.addVirtualAuthenticator',{options:{protocol:'ctap2',ctap2Version:'ctap2_1',transport:'internal',hasResidentKey:true,hasUserVerification:true,isUserVerified:true,automaticPresenceSimulation:true,hasPrf:true,hasHmacSecret:true}});
+  await p.bringToFront();
   await p.goto(origin+'/mobile/dashboard?tab=securite');
-  await p.locator('[data-m6i-activate]').waitFor({timeout:30000});
-  await response(p,'/api/mobile/passkey/enable','POST',200,()=>p.locator('[data-m6i-activate]').click());
+  const capability=await p.evaluate(async()=>{
+    const {getMobilePasskeyStatus,isStablePasskeyOrigin,hasPlatformUserVerification}=await import('/src/services/zka/mobilePasskey.ts');
+    const status=await getMobilePasskeyStatus();
+    return {state:status.state,originReady:status.origin_ready,stable:isStablePasskeyOrigin(),
+      platformUV:await hasPlatformUserVerification()};
+  });
+  console.log('LOT01_HTTPS_PRF_CAPABILITY '+JSON.stringify(capability));
+  assert.deepEqual(capability,{state:'disabled',originReady:true,stable:true,platformUV:true});
+  const activate=p.locator('[data-m6i-activate]');
+  await activate.waitFor({timeout:15000});
+  await response(p,'/api/mobile/passkey/enable','POST',200,()=>activate.click());
   await p.getByText('Activé',{exact:true}).first().waitFor({timeout:15000});
   mark('real browser virtual authenticator PRF enrollment and server enable');
   stage='pocket-before-approval';
@@ -125,6 +135,8 @@ try{
   await p.getByRole('button',{name:'Vérifier ma biométrie'}).click();await waitState('ready');mark('fresh real UV reopens encrypted approval');
   stage='transport-check';
   const platform=observed.filter(x=>x.path.startsWith('/api/mobile/superadmin/'));
+  const ceremonies=observed.filter(x=>x.method==='POST'&&x.path.startsWith('/api/mobile/passkey/')&&!x.path.includes('platform-'));
+  assert(ceremonies.length>=5&&ceremonies.every(x=>x.originMatches&&x.status===200),'actual ceremony origin enforcement');
   assert(platform.length>=4&&platform.every(x=>x.method==='GET'&&x.status===200&&x.cacheNoStore));
   assert(observed.some(x=>x.path==='/api/mobile/passkey/platform-approval/claim'&&x.status===200&&x.cacheNoStore));
   mark('all observed platform reads GET and no-store');

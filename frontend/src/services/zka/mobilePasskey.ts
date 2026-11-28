@@ -155,7 +155,16 @@ export async function hasPlatformUserVerification(): Promise<boolean> {
 }
 
 export async function getMobilePasskeyStatus(): Promise<MobilePasskeyStatus> {
-  return jsonOrError(await durableFetch('/passkey/status'));
+  const status = await jsonOrError(await durableFetch('/passkey/status', { cache: 'no-store' })) as MobilePasskeyStatus;
+  // A same-origin browser GET may omit Origin. This flag is a UI hint only:
+  // derive it from the actual secure document origin, not the optional GET header.
+  // Every registration/authentication/enable POST retains its server origin,
+  // identity, challenge and UV checks. Never authorize an operation from this hint.
+  return {
+    ...status,
+    origin_ready: status.expected_origin === 'https://digitalcrown.local:8005'
+      && isStablePasskeyOrigin(status.expected_origin),
+  };
 }
 
 async function createPendingCredential(): Promise<string> {
