@@ -17,8 +17,20 @@ export const applyRuntimeTheme = (profile: RuntimeTheme | null, persist = false)
   const body = document.body;
   const primary = color(profile?.primary_color);
   const foreground = primary ? (() => {
-    const r = parseInt(primary.slice(1,3),16), g = parseInt(primary.slice(3,5),16), b = parseInt(primary.slice(5,7),16);
-    return (r * 299 + g * 587 + b * 114) / 1000 >= 128 ? '#0f172a' : '#ffffff';
+    // WCAG relative luminance, not a gamma-encoded brightness threshold.
+    const luminance = (hex: string) => [1, 3, 5]
+      .map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map(v => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)
+      .reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+    const bg = luminance(primary);
+    const white = 1.05 / (bg + 0.05);
+    const black = (bg + 0.05) / 0.05;
+    // Preserve the existing dark ink where it actually meets AA; use true
+    // black at the transition when navy and white would both fail 4.5:1.
+    if (white >= black) return '#ffffff';
+    const navy = luminance('#0f172a');
+    const navyRatio = (Math.max(bg, navy) + 0.05) / (Math.min(bg, navy) + 0.05);
+    return navyRatio >= 4.5 ? '#0f172a' : '#000000';
   })() : null;
   const tokens = {
     '--primary': primary,

@@ -1,12 +1,12 @@
 name: V1.5 LOT01 R5 - UI AFTER HTTP gate
 on:
   push:
-    branches: [ci/v15-lot01-stock-r0-20261128]
+    branches: [ci/v15-lot01-stock-r0-20261128, ci/v15-lot01-parallel-convergence-20261128]
     paths: ['frontend/src/**', '.github/workflows/v15-lot01-ui-after.yml', 'frontend/scripts/ci-v15-lot01-ui-after.mjs']
 permissions:
   contents: read
 concurrency:
-  group: v15-lot01-r5-ui-after
+  group: v15-lot01-r5-ui-after-convergence
   cancel-in-progress: true
 jobs:
   desktop-integration:

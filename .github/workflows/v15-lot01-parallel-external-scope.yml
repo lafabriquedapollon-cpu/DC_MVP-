@@ -1,0 +1,32 @@
+name: V1.5 LOT01 parallel B - external scope contract
+on:
+  push:
+    branches: [ci/v15-lot01-parallel-b-identities-20261128, ci/v15-lot01-parallel-convergence-20261128]
+permissions:
+  contents: read
+jobs:
+  external-scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Offline scope checks
+        run: |
+          set -euo pipefail
+          umask 077
+          evidence="$RUNNER_TEMP/dc-external-evidence"
+          mkdir -p "$evidence"
+          git rev-parse HEAD > "$evidence/head.txt"
+          DC_EVIDENCE="$evidence" python backend/scripts/ci_v15_lot01_external_scope.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-lot01-external-scope-synthetic
+          path: ${{ runner.temp }}/dc-external-evidence/
+          if-no-files-found: error
+          retention-days: 3

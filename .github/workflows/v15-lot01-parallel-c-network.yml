@@ -1,0 +1,37 @@
+name: V1.5 LOT01 parallel C - network contract LAB
+on:
+  push:
+    branches: [ci/v15-lot01-parallel-c-network-20261128, ci/v15-lot01-parallel-convergence-20261128]
+permissions:
+  contents: read
+jobs:
+  network-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Synthetic topology and actual local TLS
+        run: |
+          set -euo pipefail
+          umask 077
+          ns="dc-net-${GITHUB_RUN_ID}"
+          lab=$(mktemp -d)
+          evidence="$RUNNER_TEMP/dc-network-evidence"
+          mkdir -p "$evidence"
+          git rev-parse HEAD > "$evidence/head.txt"
+          trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf "$lab"' EXIT
+          sudo ip netns add "$ns"
+          sudo ip netns exec "$ns" ip link set lo up
+          sudo ip netns exec "$ns" runuser -u "$USER" -- env -i PATH="$PATH" HOME="$lab" GITHUB_ACTIONS=true DC_EVIDENCE="$evidence" python backend/scripts/ci_v15_lot01_network.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-lot01-network-synthetic
+          path: ${{ runner.temp }}/dc-network-evidence/
+          if-no-files-found: error
+          retention-days: 3

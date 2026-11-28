@@ -1,12 +1,12 @@
 name: V1.5 LOT01 R5 - HTTPS end-to-end
 on:
   push:
-    branches: [ci/v15-lot01-stock-r0-20261128, ci/v15-lot01-https-only-20261128]
+    branches: [ci/v15-lot01-stock-r0-20261128, ci/v15-lot01-https-only-20261128, ci/v15-lot01-parallel-convergence-20261128]
     paths: ['frontend/src/**', '.github/workflows/v15-lot01-https.yml', 'frontend/scripts/ci-v15-lot01-https.mjs']
 permissions:
   contents: read
 concurrency:
-  group: v15-lot01-r5-https
+  group: v15-lot01-r5-https-convergence
   cancel-in-progress: true
 jobs:
   desktop-integration:

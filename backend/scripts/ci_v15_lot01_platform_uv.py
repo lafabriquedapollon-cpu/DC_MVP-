@@ -238,6 +238,102 @@ def run():
     assert len(trials) == 1 and trials[0]["id"] == trial["id"] and trials[0]["trial_days"] == 14
     assert set(trials[0]) == {"id","email","cabinet_name","trial_days","expires_at","consumed_at","revoked_at","created_at"}
     assert trial["code"] not in json.dumps(trials) and "CI PRIVATE MARKER" not in json.dumps(trials)
+    # Transaction qualification in the already isolated SQLCipher LAB, no API exposure.
+    from dataclasses import replace
+    from jose import jwt
+    from backend import database, models
+    from backend.models_mobile_passkey import MobileWebAuthnChallenge
+    from backend.services.mobile_biometric import issue_challenge, credential_for_device, platform_credential_binding
+    from backend.services.platform_mutation_intent import PlatformMutationIntent
+    from backend.services.platform_mutation_transaction import stage_trial_revocation, MutationIntentRefused, PURPOSE
+    uclaims = jwt.get_unverified_claims(uv)
+    aclaims = jwt.get_unverified_claims(approval)
+    actor_id, tenant_id = int(uclaims["sub"]), int(uclaims["tenant_id"])
+    with database.SessionLocal() as db:
+        credential = credential_for_device(db,user_id=actor_id,employer_id=tenant_id,device_id=mobile["device_id"])
+        intent = PlatformMutationIntent("trial-code.revoke",trial["id"],actor_id,tenant_id,mobile["device_id"],
+            platform_credential_binding(credential),aclaims["jti"],hashlib.sha256(uclaims["jti"].encode()).hexdigest(),secrets.token_hex(32))
+        challenge = issue_challenge(db,purpose=PURPOSE,user_id=actor_id,employer_id=tenant_id,
+            device_id=mobile["device_id"],challenge=intent.digest())
+    def tx_check(label, fn):
+        fn()
+        row={"label":label,"pass":True}
+        rows.append(row)
+        print("LOT01_R5_UV_CASE "+json.dumps(row),flush=True)
+    def untouched():
+        with database.SessionLocal() as db:
+            assert db.get(MobileWebAuthnChallenge,challenge).used_at is None
+            assert db.get(models.TrialActivationCode,trial["id"]).revoked_at is None
+            assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial["id"])).count()==0
+    def wrong_intent():
+        with database.SessionLocal() as db:
+            try:
+                with db.begin():
+                    stage_trial_revocation(db,intent=replace(intent,target_id=trial["id"]+1),challenge_id=challenge)
+            except MutationIntentRefused: pass
+            else: raise AssertionError("wrong target admitted")
+        untouched()
+    tx_check("transaction rejects changed target without consumption",wrong_intent)
+    def rollback():
+        with database.SessionLocal() as db:
+            try:
+                with db.begin():
+                    stage_trial_revocation(db,intent=intent,challenge_id=challenge)
+                    raise RuntimeError("synthetic rollback")
+            except RuntimeError as e:
+                assert str(e)=="synthetic rollback"
+        untouched()
+    tx_check("transaction rollback restores intent target audit",rollback)
+    def commit():
+        with database.SessionLocal() as db:
+            with db.begin():
+                stage_trial_revocation(db,intent=intent,challenge_id=challenge)
+        with database.SessionLocal() as db:
+            assert db.get(MobileWebAuthnChallenge,challenge).used_at is not None
+            assert db.get(models.TrialActivationCode,trial["id"]).revoked_at is not None
+            assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial["id"]),severity="CRITICAL").count()==1
+    tx_check("transaction commits nonce target and audit together",commit)
+    def replay():
+        with database.SessionLocal() as db:
+            try:
+                with db.begin():
+                    stage_trial_revocation(db,intent=intent,challenge_id=challenge)
+            except MutationIntentRefused: pass
+            else: raise AssertionError("replay admitted")
+        with database.SessionLocal() as db:
+            assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial["id"])).count()==1
+    tx_check("transaction rejects replay without duplicate audit",replay)
+    request("facade sees persisted synthetic revocation", F + "/trial-codes", 200, token=uv, approval=approval)
+    # Dedicated HTTP pilot. Use independent real Desktop password approval for a second fixture.
+    trial2, _ = request("pilot second synthetic trial", "/api/superadmin/trial-codes", 200, method="POST",
+        token=desktop,cookie=cookie,data={"email":"ci-trial2@example.com","trial_days":14})
+    target = F + "/trial-codes/" + str(trial2["id"])
+    prepare = target + "/revocation-intent"
+    approve = target + "/desktop-approval"
+    execute = target + "/revoke"
+    request("pilot prepare requires platform approval",prepare,403,method="POST",token=uv,origin=ORIGIN)
+    binding, _ = request("pilot Pocket prepares exact intent",prepare,200,method="POST",token=uv,approval=approval,origin=ORIGIN)
+    assert set(binding)=={"device_id","approval_jti","uv_jti_hash","nonce"}
+    body={**binding,"password":os.environ["DC_SYNTH_PASSWORD"],"confirm":True}
+    request("pilot Pocket cannot approve itself",approve,401,method="POST",token=uv,approval=approval,origin=ORIGIN,data=body)
+    request("pilot ordinary Desktop cannot approve",approve,403,method="POST",token=ordinary_desktop,cookie=ordinary_cookie,data=body)
+    request("pilot Desktop confirmation required",approve,409,method="POST",token=desktop,cookie=cookie,data={**body,"confirm":False})
+    granted, _ = request("pilot independent Desktop action approval",approve,200,method="POST",token=desktop,cookie=cookie,data=body)
+    execution={"challenge_id":granted["challenge_id"],"nonce":binding["nonce"],"confirm":True}
+    request("pilot wrong target denied",F+"/trial-codes/"+str(trial["id"])+"/revoke",409,method="POST",token=uv,approval=approval,origin=ORIGIN,data=execution)
+    request("pilot wrong nonce denied",execute,409,method="POST",token=uv,approval=approval,origin=ORIGIN,data={**execution,"nonce":secrets.token_hex(32)})
+    request("pilot wrong origin denied",execute,409,method="POST",token=uv,approval=approval,origin="https://invalid.example",data=execution)
+    request("pilot missing approval denied",execute,403,method="POST",token=uv,origin=ORIGIN,data=execution)
+    request("pilot confirmation required",execute,409,method="POST",token=uv,approval=approval,origin=ORIGIN,data={**execution,"confirm":False})
+    with database.SessionLocal() as db:
+        assert db.get(models.TrialActivationCode,trial2["id"]).revoked_at is None
+    request("pilot executes exact approved revocation",execute,200,method="POST",token=uv,approval=approval,origin=ORIGIN,data=execution)
+    request("pilot execution replay denied",execute,409,method="POST",token=uv,approval=approval,origin=ORIGIN,data=execution)
+    with database.SessionLocal() as db:
+        assert db.get(models.TrialActivationCode,trial2["id"]).revoked_at is not None
+        assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOKED",resource_id=str(trial2["id"])).count()==1
+        assert db.query(models.AuditLog).filter_by(action="PLATFORM_TRIAL_REVOCATION_APPROVED",resource_id=str(trial2["id"])).count()==1
+        assert db.get(MobileWebAuthnChallenge,granted["challenge_id"]).used_at is not None
     overview, _ = request("facade Marketplace summary", F + "/marketplace/overview", 200, token=uv, approval=approval)
     desktop_overview, _ = request("Desktop Marketplace summary for comparison", S, 200, token=desktop, cookie=cookie)
     assert overview == desktop_overview
@@ -252,6 +348,14 @@ def run():
     request("desktop mutation boundary unchanged", "/api/superadmin/marketplace/suppliers/999999/governance",
             404, method="PATCH", token=desktop, cookie=cookie, data={"confirm": True, "isActive": False})
     request("UV mobile token refused on desktop clients", "/api/superadmin/clients", 401, token=uv)
+    # Parallel A: existing mobile facade must remain read-only before any new mutation design.
+    for resource in ("/clients", "/trial-codes", "/marketplace/overview"):
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            request("A baseline mobile facade refuses " + method + " " + resource,
+                    F + resource, 405, method=method, token=uv, approval=approval,
+                    data={} if method != "DELETE" else None)
+    request("A baseline read remains authorized after mutation denials", F + "/clients", 200,
+            token=uv, approval=approval)
     request("disable credential after UV", P, 200, method="DELETE", token=uv)
     request("disabled credential must invalidate old privileged token", S, (401,403,423), token=uv, approval=approval, soft=True)
     request("stale UV cannot enable another credential", P + "/enable", 423, method="POST",

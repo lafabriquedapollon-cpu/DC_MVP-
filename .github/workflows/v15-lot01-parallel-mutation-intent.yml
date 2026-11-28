@@ -1,0 +1,32 @@
+name: V1.5 LOT01 parallel A - mutation intent contract
+on:
+  push:
+    branches: [ci/v15-lot01-parallel-a-authority-20261128, ci/v15-lot01-parallel-convergence-20261128]
+permissions:
+  contents: read
+jobs:
+  intent-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Offline intent binding checks
+        run: |
+          set -euo pipefail
+          umask 077
+          evidence="$RUNNER_TEMP/dc-intent-evidence"
+          mkdir -p "$evidence"
+          git rev-parse HEAD > "$evidence/head.txt"
+          DC_EVIDENCE="$evidence" python backend/scripts/ci_v15_lot01_mutation_intent.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-lot01-mutation-intent-synthetic
+          path: ${{ runner.temp }}/dc-intent-evidence/
+          if-no-files-found: error
+          retention-days: 3

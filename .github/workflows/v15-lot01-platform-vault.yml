@@ -1,11 +1,11 @@
 name: V1.5 LOT01 R5 - Pocket platform vault
 on:
   push:
-    branches: [ci/v15-lot01-stock-r0-20261128]
+    branches: [ci/v15-lot01-stock-r0-20261128, ci/v15-lot01-parallel-convergence-20261128]
 permissions:
   contents: read
 concurrency:
-  group: v15-lot01-r5-vault
+  group: v15-lot01-r5-vault-convergence
   cancel-in-progress: true
 jobs:
   browser-vault:
