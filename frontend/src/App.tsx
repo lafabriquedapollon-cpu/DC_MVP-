@@ -56,6 +56,7 @@ const StationWallDisplay = lazy(() => import('./features/hub/StationWallDisplay'
 // MOBILE PWA
 const OnboardingScanner = lazy(() => import('./features/mobile/Onboarding/OnboardingScanner').then(m => ({ default: m.OnboardingScanner })));
 const MobileDashboard  = lazy(() => import('./features/mobile/Dashboard/MobileDashboard').then(m => ({ default: m.MobileDashboard })));
+const PocketPlatformPage = lazy(() => import('./features/mobile/superadmin/PocketPlatformPage').then(m => ({ default: m.PocketPlatformPage })));
 const MobileContext    = lazy(() => import('./features/mobile/Context/MobileContext').then(m => ({ default: m.MobileContext })));
 
 import { MobileStorage } from './services/zka/MobileStorage';
@@ -466,7 +467,7 @@ function CabinetRouteTree() {
           </MobileProtectedRoute>
         } />
         <Route path="/mobile/dentists" element={<Navigate to="/mobile/dashboard" replace />} />
-        <Route path="/mobile/superadmin" element={<Navigate to="/mobile/dashboard" replace />} />
+        <Route path="/mobile/superadmin" element={<Suspense fallback={<PageLoader />}><PocketPlatformPage /></Suspense>} />
 
         {/* V1.5 workstation Hub: data-free dispatcher remains available even if cabinet backend is down. */}
         <Route path="/hub" element={<Suspense fallback={<PageLoader />}><WorkstationModeGate target="hub"><HubPage /></WorkstationModeGate></Suspense>} />

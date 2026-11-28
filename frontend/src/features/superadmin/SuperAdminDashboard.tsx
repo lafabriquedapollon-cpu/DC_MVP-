@@ -4,6 +4,7 @@ import { api } from '../../services/api';
 import { Shield, CalendarRange, UserPlus, Zap, CheckCircle2, XCircle, Mail, Archive, AlertTriangle, MessageSquare, History, Ban, Search, Filter, Store } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { DigitalCrownLoader } from '../../components/DigitalCrownLoader';
+import { PocketPlatformAuthorization } from './PocketPlatformAuthorization';
 
 interface ClientStats {
   total_patients: number;
@@ -235,12 +236,12 @@ export const SuperAdminDashboard: React.FC = () => {
       <div className="bg-[#003380] text-white py-12 px-6 shadow-xl relative overflow-hidden">
         <div className="absolute inset-0 opacity-10 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-white via-transparent to-transparent"></div>
         <div className="max-w-7xl mx-auto relative z-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
-          <div className="flex items-center gap-6">
-            <div className="w-16 h-16 bg-white/10 rounded-2xl flex items-center justify-center border border-white/20 shadow-lg backdrop-blur-sm">
+          <div className="flex min-w-0 items-center gap-3 sm:gap-6">
+            <div className="shrink-0 w-12 h-12 sm:w-16 sm:h-16 bg-white/10 rounded-2xl flex items-center justify-center border border-white/20 shadow-lg backdrop-blur-sm">
               <Shield className="text-warning" size={32} />
             </div>
             <div>
-              <h1 className="text-3xl font-black tracking-tight flex items-center gap-3">
+              <h1 className="text-2xl sm:text-3xl font-black tracking-tight flex flex-wrap items-center gap-2">
                 Digital Crown <span className="bg-amber-400 text-warning px-3 py-1 rounded-lg text-sm font-black uppercase tracking-widest border border-warning-border">SuperAdmin</span>
               </h1>
               <p className="text-blue-200 font-medium mt-1">Gestion Globale des Licences & Clients</p>
@@ -269,6 +270,7 @@ export const SuperAdminDashboard: React.FC = () => {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 mt-8 space-y-6">
+        <PocketPlatformAuthorization />
         <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
           <div className="rounded-[2rem] border border-border-main bg-card p-6 shadow-sm">
             <div className="mb-5">

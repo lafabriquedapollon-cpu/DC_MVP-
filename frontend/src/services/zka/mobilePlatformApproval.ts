@@ -142,19 +142,20 @@ export async function readPocketPlatformOverview(signal?: AbortSignal): Promise<
   return parseOverview(await readPlatform('marketplace/overview', 0, signal));
 }
 
-export async function claimPocketPlatformTicket(ticket: string): Promise<void> {
+export async function claimPocketPlatformTicket(ticket: string, signal?: AbortSignal): Promise<void> {
   const clean = ticket.trim();
   if (!/^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/.test(clean)) throw new Error('Ticket SuperAdmin invalide.');
   const ctx = await MobileStorage.capturePlatformVaultContext();
   const origin = platformOrigin(ctx);
   const response = await fetch(origin + '/api/mobile/passkey/platform-approval/claim', {
     method: 'POST', headers: { Authorization: 'Bearer ' + ctx.token, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ticket: clean }), credentials: 'omit', cache: 'no-store', redirect: 'error',
+    body: JSON.stringify({ ticket: clean }), credentials: 'omit', cache: 'no-store', redirect: 'error', signal,
   });
   const result = await platformResponse(response);
   await MobileStorage.assertPlatformVaultContext(ctx);
   if (!result || typeof result !== 'object' || !('approval' in result) || typeof result.approval !== 'string') {
     throw new Error('Réponse SuperAdmin invalide.');
   }
+  if (signal?.aborted) throw new PocketPlatformError(0, 'PLATFORM_REQUEST_ABORTED');
   await MobileStorage.savePlatformApproval(result.approval, ctx);
 }

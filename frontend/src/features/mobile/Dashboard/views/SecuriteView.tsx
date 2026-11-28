@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { checkPocketPlatformEligibility } from '../../../../services/zka/mobilePlatformApproval';
 import { ShieldCheck, Wifi, WifiOff, RefreshCw, LogOut, FileText, AlertTriangle, Fingerprint, LockKeyhole, CheckCircle2 } from 'lucide-react';
 import { cn } from '../../../../utils/cn';
 import type { Snapshot, SyncStatus } from '../types';
@@ -36,6 +38,7 @@ export function SecuriteView({
   const [passkeyBusy, setPasskeyBusy] = useState(false);
   const [passkeyError, setPasskeyError] = useState('');
   const [confirmingPasskeyDisable, setConfirmingPasskeyDisable] = useState(false);
+  const [platformEligible, setPlatformEligible] = useState(false);
 
   const refreshPasskey = async () => {
     try {
@@ -80,6 +83,24 @@ export function SecuriteView({
   const passkeyPending = passkey?.state === 'pending';
   const passkeyOriginReady = passkey?.origin_ready !== false;
   const cabinetConnected = isOnline && syncStatus === 'success';
+  useEffect(() => {
+    let alive = true;
+    const controller = new AbortController();
+    setPlatformEligible(false);
+    if (passkeyEnabled && isOnline) {
+      void checkPocketPlatformEligibility(controller.signal).then(() => {
+        if (alive && !controller.signal.aborted) setPlatformEligible(true);
+      }).catch(() => undefined);
+    }
+    const clear = () => { controller.abort(); setPlatformEligible(false); };
+    window.addEventListener('offline', clear);
+    window.addEventListener('digitalcrown:mobile-biometric-locked', clear);
+    return () => {
+      alive = false; controller.abort();
+      window.removeEventListener('offline', clear);
+      window.removeEventListener('digitalcrown:mobile-biometric-locked', clear);
+    };
+  }, [passkeyEnabled, isOnline]);
 
   return (
     <div className="space-y-5">
@@ -195,6 +216,8 @@ export function SecuriteView({
           <p className="mt-3 text-[0.6875rem] text-text-muted leading-relaxed font-semibold">La biométrie reste gérée par votre téléphone. Digital Crown ne reçoit ni empreinte ni donnée Face ID.</p>
         </div>
       </section>
+
+      {platformEligible && <Link to="/mobile/superadmin" className="flex min-h-12 items-center justify-center gap-2 rounded-[20px] border border-glass-border bg-card px-4 py-3 text-sm font-bold text-primary"><ShieldCheck size={18} /> SuperAdmin · Lecture seule</Link>}
 
       {!confirming ? (
         <button onClick={() => setConfirming(true)} className="relative overflow-hidden w-full py-5 bg-danger-surface backdrop-blur-xl border border-danger-border text-danger rounded-[24px] font-bold text-xs uppercase tracking-widest flex items-center justify-center gap-3 shadow-sm active:scale-95 transition-all hover:bg-danger-surface">
