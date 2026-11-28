@@ -48,6 +48,16 @@ try{
     run('Desktop foreground contrast '+color,()=>{a.applyRuntimeTheme({primary_color:color});return ratio(color,prop('--text-on-primary'))>=4.5});
     run('Mobile foreground contrast '+color,()=>ratio(color,a.textColorForHex(color))>=4.5);
   }
+  run('Desktop contrast grid: 4096 colors, root/body synchronized',()=>{
+    const levels=Array.from({length:16},(_,i)=>i*17);
+    for(const r of levels)for(const g of levels)for(const b of levels){
+      const color='#'+[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('');
+      a.applyRuntimeTheme({primary_color:color});
+      const ink=prop('--text-on-primary');
+      if(ratio(color,ink)<4.5||document.body.style.getPropertyValue('--text-on-primary')!==ink)return false;
+    }
+    return true;
+  });
   return out;
  });
  rows.push(...result);for(const row of rows)console.log('LOT01_D_CASE '+JSON.stringify(row));
@@ -57,5 +67,5 @@ try{
  await new Promise(resolve=>server.close(resolve));
  fs.writeFileSync(path.join(process.env.DC_EVIDENCE,'theme.json'),JSON.stringify(rows,null,2));
 }
-assert.equal(rows.length,20);
+assert.equal(rows.length,21);
 assert(rows.every(r=>r.pass),'theme contract failure');
