@@ -44,7 +44,22 @@ const pair=async(owner,target,replayStatus=404)=>{
 };
 // Actual FastAPI/SQLCipher topology and annex workstation contract; not physical LAN.
 const W='/api/workstation';
+const phase=process.env.DC_RESTART_PHASE||'initial';
+assert(['initial','verify'].includes(phase)&&process.env.DC_LAB_ROOT);
+const statePath=process.env.DC_LAB_ROOT+'/restart-state.json';
 try{
+ if(phase==='verify'){
+ const {A,B,id,H}=JSON.parse(fs.readFileSync(statePath,'utf8'));
+ const health=await request('topology available after actual restart','/api/health/topology',{status:200});
+ assert.equal(health.body.status,'ok');assert.equal(health.body.lanExposed,false);
+ const own=await request('revoked annex persists after restart',W+'/registry',{headers:A,status:200});
+ assert(own.body.some(x=>x.workstationId===id&&x.revoked===true));
+ const other=await request('other tenant remains isolated after restart',W+'/registry',{headers:B,status:200});
+ assert(!other.body.some(x=>x.workstationId===id));
+ const boot=await request('revoked workstation not restored on bootstrap',W+'/bootstrap',{headers:H,status:200});
+ assert.notEqual(boot.body.workstationId,id);
+ await request('owner remains operational after restart','/api/auth/me',{headers:A,status:200});
+ }else{
  const health=await request('actual topology diagnostic','/api/health/topology',{status:200});
  assert.equal(health.body.status,'ok');assert.equal(health.body.lanExposed,false);
  assert.equal(health.body.connectionUrl,null);assert.equal(health.body.remediation,'LAN_DISABLED_LOOPBACK_ONLY');
@@ -69,4 +84,9 @@ try{
  await request('annex revoke',W+'/'+id+'/revoke',{method:'POST',headers:A,body:{ownerPin:pin},status:200});
  const after=await request('revocation persisted in registry',W+'/registry',{headers:A,status:200});assert(after.body.some(x=>x.workstationId===id&&x.revoked===true));
  await request('other tenant remains operational','/api/auth/me',{headers:B,status:200});
-}finally{fs.writeFileSync(process.env.DC_EVIDENCE+'/topology-api.json',JSON.stringify(evidence,null,2))}
+ fs.writeFileSync(statePath,JSON.stringify({A,B,id,H}),{mode:0o600,flag:'wx'});
+ }
+}finally{
+ if(phase==='verify')fs.rmSync(statePath,{force:true});
+ fs.writeFileSync(process.env.DC_EVIDENCE+'/topology-api'+(phase==='verify'?'-restart':'')+'.json',JSON.stringify(evidence,null,2));
+}

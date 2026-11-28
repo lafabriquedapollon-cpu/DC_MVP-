@@ -296,6 +296,31 @@ jobs:
             timeout --kill-after=10s 180s node frontend/scripts/ci-v15-lot01-topology-api.mjs
           fi
           echo LOT01_STOCK_R0_PASS
+          # Stop first process and restart with the exact same encrypted LAB DB and keys.
+          old_pid="$pid"
+          stop_lab_process BACKEND "$pid"
+          pid=
+          "$DC_PYTHON" "$DC_LAB_ROOT/uvicorn-diagnostic.py" > "$backend_log" 2>&1 &
+          pid=$!
+          test "$old_pid" != "$pid"
+          "$DC_PYTHON" - <<'PY'
+          import json, time, urllib.request
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          for attempt in range(60):
+              try:
+                  with opener.open('http://127.0.0.1:8008/health', timeout=2) as r:
+                      payload=json.load(r)
+                      assert r.status==200 and payload['status']=='ok' and payload['db']=='ok'
+                  break
+              except (OSError, AssertionError, ValueError, KeyError):
+                  time.sleep(1)
+          else:
+              raise SystemExit('BACKEND_RESTART_HEALTH_BLOCKED')
+          print('BACKEND_RESTART_HEALTH_PASS')
+          PY
+          DC_RESTART_PHASE=verify timeout --kill-after=10s 180s node frontend/scripts/ci-v15-lot01-topology-api.mjs
+          test ! -e "$DC_LAB_ROOT/restart-state.json"
+          echo LOT01_RESTART_PASS
           LAB
       - name: Upload synthetic browser evidence
         if: always()
