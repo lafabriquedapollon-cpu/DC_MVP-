@@ -252,6 +252,14 @@ def run():
     request("desktop mutation boundary unchanged", "/api/superadmin/marketplace/suppliers/999999/governance",
             404, method="PATCH", token=desktop, cookie=cookie, data={"confirm": True, "isActive": False})
     request("UV mobile token refused on desktop clients", "/api/superadmin/clients", 401, token=uv)
+    # Parallel A: existing mobile facade must remain read-only before any new mutation design.
+    for resource in ("/clients", "/trial-codes", "/marketplace/overview"):
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            request("A baseline mobile facade refuses " + method + " " + resource,
+                    F + resource, 405, method=method, token=uv, approval=approval,
+                    data={} if method != "DELETE" else None)
+    request("A baseline read remains authorized after mutation denials", F + "/clients", 200,
+            token=uv, approval=approval)
     request("disable credential after UV", P, 200, method="DELETE", token=uv)
     request("disabled credential must invalidate old privileged token", S, (401,403,423), token=uv, approval=approval, soft=True)
     request("stale UV cannot enable another credential", P + "/enable", 423, method="POST",
