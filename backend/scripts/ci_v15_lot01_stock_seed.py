@@ -46,7 +46,14 @@ def main():
                 role=models.UserRole.DENTISTE, is_active=True, is_licensed=True,
                 nom_complet="CI Synthetic Other",
             )
-            db.add_all([owner, other])
+            assert settings.SUPERADMIN_EMAIL == "ci-platform-admin@example.com"
+            UserOut(id=1, email=settings.SUPERADMIN_EMAIL, role="ADMIN")
+            platform = models.User(
+                email=settings.SUPERADMIN_EMAIL, hashed_password=password_hash,
+                role=models.UserRole.ADMIN, is_active=True, is_licensed=True,
+                nom_complet="CI Synthetic Platform Admin",
+            )
+            db.add_all([owner, other, platform])
             db.flush()
             restricted = models.User(
                 email="ci-restricted@example.com", hashed_password=password_hash,
@@ -73,7 +80,7 @@ def main():
                     nom_praticien="CI SYNTHETIC OWNER",
                 ))
             db.commit()
-            print("SYNTHETIC_FIXTURE_PASS users=5 patients=0", flush=True)
+            print("SYNTHETIC_FIXTURE_PASS users=6 patients=0", flush=True)
         elif sys.argv[1:] == ["verify"]:
             owner = db.scalar(select(models.User).where(models.User.email == "ci-owner@example.com"))
             rows = db.scalars(select(models.Patient)).all()

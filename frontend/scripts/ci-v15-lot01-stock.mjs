@@ -121,5 +121,24 @@ try{
  const finalTeam=await request('owner team remains accessible',T+'/',{headers:A,status:200});assert(finalTeam.body.some(x=>x.id===reader.id));assert(!finalTeam.body.some(x=>x.id===writer.id&&!x.is_archived));
  await request('other cabinet unaffected',D,{headers:B,status:200});
  console.log('LOT01_SESSION_TEAM_CONTRACT_PASS '+evidence.length);
+ // Platform identity is a synthetic LAB-only configuration, never the real operator.
+ const platform=await login('ci-platform-admin@example.com'), P=await register(platform.access_token);
+ const identity=await request('configured platform identity','/api/auth/me',{headers:P,status:200});
+ assert.equal(identity.body.is_superadmin,true);assert.equal(identity.body.role,'ADMIN');
+ const clients=await request('real platform client directory',S,{headers:P,status:200});
+ assert(clients.body.some(x=>x.id===own.body.id)&&clients.body.some(x=>x.id===oth.body.id));
+ assert(!clients.body.some(x=>x.id===reader.id||x.id===writer.id));
+ assert(clients.body.every(x=>x.stats?.total_patients===0));
+ await request('platform trial codes read','/api/superadmin/trial-codes',{headers:P,status:200});
+ const overview='/api/superadmin/marketplace/overview';
+ await request('platform marketplace read',overview,{headers:P,status:200});
+ await request('owner marketplace read denied',overview,{headers:A,status:403});
+ await request('ordinary paired staff marketplace denied',overview,{headers:O,status:403});
+ await request('anonymous platform directory denied',S,{status:401});
+ // No license activation, supplier mutation, real OTP, Firebase or email calls.
+ await request('platform logout','/api/auth/logout',{method:'POST',headers:P,body:{refresh_token:platform.refresh_token},status:204});
+ await request('revoked platform directory access denied',S,{headers:P,status:401});
+ await request('revoked platform refresh denied','/api/auth/refresh',{method:'POST',body:{refresh_token:platform.refresh_token},status:401});
+ console.log('LOT01_PLATFORM_DESKTOP_CONTRACT_PASS '+evidence.length);
 
 }finally{fs.writeFileSync(process.env.DC_EVIDENCE+'/stock-r0-status.json',JSON.stringify(evidence,null,2))}

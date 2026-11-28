@@ -70,6 +70,7 @@ jobs:
           export XDG_CONFIG_HOME="$HOME/config" XDG_RUNTIME_DIR="$HOME/runtime" XDG_DATA_HOME="$HOME/data"
           mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME" "$DC_LAB_ROOT/rehearsal-media"
           export ENVIRONMENT=e2e_install_rehearsal
+          export SUPERADMIN_EMAIL=ci-platform-admin@example.com
           export ALLOWED_ORIGINS=http://127.0.0.1:5173
           export DC_SYNTH_PASSWORD="$("$DC_PYTHON" -c 'import secrets; print(secrets.token_urlsafe(24))')"
           export VITE_API_URL=http://127.0.0.1:8008 VITE_ENABLE_HTTPS=false
