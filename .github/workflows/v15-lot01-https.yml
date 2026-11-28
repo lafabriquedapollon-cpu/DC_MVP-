@@ -1,7 +1,7 @@
 name: V1.5 LOT01 R5 - HTTPS end-to-end
 on:
   push:
-    branches: [ci/v15-lot01-stock-r0-20261128]
+    branches: [ci/v15-lot01-stock-r0-20261128, ci/v15-lot01-https-only-20261128]
     paths: ['frontend/src/**', '.github/workflows/v15-lot01-https.yml', 'frontend/scripts/ci-v15-lot01-https.mjs']
 permissions:
   contents: read
@@ -67,6 +67,12 @@ jobs:
           trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf -- "$lab" "$RUNNER_TEMP/dc-ui-tools"' EXIT
           sudo ip netns add "$ns"
           sudo ip netns exec "$ns" ip link set lo up
+          # Both veth endpoints are created INSIDE this namespace. Neither can
+          # reach the host or external network. Native link state is available.
+          sudo ip netns exec "$ns" ip link add dc-lab0 type veth peer name dc-lab1
+          sudo ip netns exec "$ns" ip addr add 192.0.2.1/32 dev dc-lab0
+          sudo ip netns exec "$ns" ip link set dc-lab0 up
+          sudo ip netns exec "$ns" ip link set dc-lab1 up
           export DC_LAB_ROOT="$lab"
           export DC_PYTHON="$(command -v python)"
           export DC_CHECKOUT="$GITHUB_WORKSPACE"
@@ -94,9 +100,15 @@ jobs:
           export GOOGLE_CLIENT_ID='' GOOGLE_CLIENT_SECRET='' SMTP_HOST='' PATIENT_COMPANION_RELAY_URL='' PATIENT_COMPANION_RELAY_BOOTSTRAP_SECRET=''
           export DIGITALCROWN_ISOLATION_DB_FINGERPRINT="$("$DC_PYTHON" -c 'import os; from backend.core.runtime_safety import database_target_fingerprint; print(database_target_fingerprint(os.environ["DATABASE_URL"]))')"
           test ! -e "$DC_LAB_ROOT/fresh-rehearsal.db"
-          test "$(ip -o link show | wc -l)" -eq 1
+          test "$(ip -o link show | wc -l)" -eq 3
+          ip link show dc-lab0 >/dev/null
+          ip link show dc-lab1 >/dev/null
+          test -z "$(ip -4 route show default)"
+          test -z "$(ip -6 route show default)"
+          if ip -4 route get 1.1.1.1 >/dev/null 2>&1; then echo LAB_EXTERNAL_ROUTE_BLOCKED; exit 1; fi
+          echo LAB_ISOLATED_VETH_NO_EXTERNAL_ROUTE
           printf '%s\n' "$(git rev-parse HEAD)" > "$DC_EVIDENCE/head.txt"
-          echo LAB_LOOPBACK_ONLY
+          echo LAB_TLS_BACKEND_LOOPBACK_ONLY
           "$DC_PYTHON" -m backend.scripts.ci_fresh_backend_rehearsal
           "$DC_PYTHON" -m backend.scripts.ci_v15_lot01_stock_seed seed
           # Deterministic regression of the receive/deadline contract in the LAB.

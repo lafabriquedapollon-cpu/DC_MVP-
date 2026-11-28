@@ -94,21 +94,19 @@ try{
   await p.getByText('Activé',{exact:true}).first().waitFor({timeout:15000});
   mark('real browser virtual authenticator PRF enrollment and server enable');
   stage='pocket-before-approval';
-  // The namespace has only loopback, so Chromium's OS link-state hint may say
-  // offline despite a functioning local TLS service. Record the native hint,
-  // then use CDP's network-state override (not JS, response, or authority mocks).
+  // Native link state from an entirely contained veth pair, not a JS or CDP
+  // online-state override. Both endpoints live in the isolated namespace.
   await p.goto(origin+'/mobile/superadmin');
   const initial=await p.locator('[data-r5-pocket-platform]').getAttribute('data-r5-platform-state');
   const native=await p.evaluate(()=>({online:navigator.onLine,hidden:document.hidden,secure:window.isSecureContext}));
   console.log('LOT01_HTTPS_POCKET_INITIAL '+JSON.stringify({initial,...native}));
   const onlineNetwork=async()=>{
-    await cdp.send('Network.enable');
-    await cdp.send('Network.overrideNetworkState',{offline:false,latency:0,downloadThroughput:-1,uploadThroughput:-1,connectionType:'ethernet'});
-    assert(await p.evaluate(()=>navigator.onLine===true),'Chromium network state');
+    await p.waitForFunction(()=>navigator.onLine===true,null,{timeout:10000});
     const health=await p.evaluate(async()=>{const r=await fetch('/api/health',{cache:'no-store'});return r.status});
     assert.equal(health,200,'actual local TLS health');
   };
-  if(!native.online){stage='loopback-network-hint';await onlineNetwork();await p.reload();}
+  stage='native-isolated-link';await onlineNetwork();
+  if(!native.online)await p.reload();
   stage='pocket-locked-before-approval';await waitState('locked');await noData();
   stage='pocket-uv-before-approval';
   await p.getByRole('button',{name:'Vérifier ma biométrie'}).click();await waitState('ticket');await noData();
@@ -145,8 +143,7 @@ try{
     await shot(p,'https-pocket-'+endpoint.replace('/','-')+'-1280');
   }
   stage='offline-lock';
-  await cdp.send('Network.overrideNetworkState',{offline:true,latency:0,downloadThroughput:0,uploadThroughput:0,connectionType:'none'});
-  await pocket.setOffline(true);await waitState('offline');await noData();mark('offline immediately clears platform data');
+  await pocket.setOffline(true);await p.waitForFunction(()=>navigator.onLine===false,null,{timeout:10000});await waitState('offline');await noData();mark('offline immediately clears platform data');
   await pocket.setOffline(false);await onlineNetwork();await p.getByRole('button',{name:'Réessayer'}).click();await waitState('ready');
   await p.getByRole('button',{name:'Verrouiller'}).click();await waitState('locked');await noData();mark('explicit lock clears platform data');
   await p.getByRole('button',{name:'Vérifier ma biométrie'}).click();await waitState('ready');mark('fresh real UV reopens encrypted approval');
