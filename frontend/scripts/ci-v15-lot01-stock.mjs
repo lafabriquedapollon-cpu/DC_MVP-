@@ -80,4 +80,46 @@ try{
  await request('writer desktop cleanup',D+'/'+id,{method:'DELETE',headers:writer.headers,status:204});
  const empty=await request('stock empty after cleanup',D,{headers:A,status:200});assert.equal(empty.body.length,0);
  console.log('LOT01_STOCK_CONTRACT_PASS '+evidence.length);
+ // Additional R2 scope: actual desktop session lifecycle and team authority.
+ const T='/api/team', S='/api/superadmin/clients';
+ const team=await request('owner may read own team',T+'/',{headers:A,status:200});
+ assert(team.body.some(x=>x.id===reader.id)&&team.body.some(x=>x.id===writer.id));
+ const otherTeam=await request('other owner team isolated',T+'/',{headers:B,status:200});
+ assert(!otherTeam.body.some(x=>x.id===reader.id||x.id===writer.id));
+ await request('anonymous team access denied',T+'/',{status:401});
+ await request('staff team access denied',T+'/',{headers:reader.headers,status:403});
+ await request('staff self escalation denied',T+'/'+reader.id,{method:'PUT',headers:reader.headers,body:{permissions:{patients:true,stock_write:true,admin:true}},status:403});
+ await request('other owner cannot change staff rights',T+'/'+reader.id,{method:'PUT',headers:B,body:{permissions:{patients:true,stock_write:true}},status:404});
+ await request('other owner cannot archive staff',T+'/'+reader.id,{method:'DELETE',headers:B,status:404});
+ await request('owner cannot inject privileged role',T+'/'+reader.id,{method:'PUT',headers:A,body:{role:'ADMIN',is_superadmin:true},status:422});
+ const unchangedReader=await request('reader privileges unchanged','/api/auth/me',{headers:reader.headers,status:200});
+ assert.equal(unchangedReader.body.role,'SECRETAIRE');assert.equal(unchangedReader.body.is_superadmin,false);assert.equal(unchangedReader.body.permissions.stock_write,false);
+ await request('ordinary owner not SuperAdmin',S,{headers:A,status:403});
+ await request('staff not SuperAdmin',S,{headers:reader.headers,status:403});
+ await request('Pocket JWT not Desktop SuperAdmin',S,{headers:W,status:401});
+ await request('refresh JWT not desktop access','/api/auth/me',{headers:bearer(reader.token.refresh_token),status:401});
+ await request('access JWT not refresh','/api/auth/refresh',{method:'POST',body:{refresh_token:reader.token.access_token},status:401});
+ const rotated=await request('desktop refresh rotation','/api/auth/refresh',{method:'POST',body:{refresh_token:reader.token.refresh_token},status:200});
+ assert(rotated.body.access_token!==reader.token.access_token&&rotated.body.refresh_token!==reader.token.refresh_token);
+ const rotatedHeaders={...bearer(rotated.body.access_token),Cookie:A.Cookie};
+ const rotatedIdentity=await request('rotated session same staff','/api/auth/me',{headers:rotatedHeaders,status:200});assert.equal(rotatedIdentity.body.id,reader.id);
+ await request('used refresh replay refused','/api/auth/refresh',{method:'POST',body:{refresh_token:reader.token.refresh_token},status:401});
+ await request('desktop explicit logout','/api/auth/logout',{method:'POST',headers:rotatedHeaders,body:{refresh_token:rotated.body.refresh_token},status:204});
+ await request('logged out access token revoked','/api/auth/me',{headers:rotatedHeaders,status:401});
+ await request('logged out refresh token revoked','/api/auth/refresh',{method:'POST',body:{refresh_token:rotated.body.refresh_token},status:401});
+ // Authorization is re-evaluated server-side for existing, not reissued, tokens.
+ const lowered=await request('owner removes Stock mutation grant',T+'/'+writer.id,{method:'PUT',headers:A,body:{permissions:{agenda:true,patients:true,stock_write:false}},status:200});assert.equal(lowered.body.permissions.stock_write,false);
+ await request('existing Desktop session loses write',D,{method:'POST',headers:writer.headers,body:item,status:403});
+ const loweredMobile=await request('existing Pocket capability changes','/api/mobile/stock/access',{headers:W,status:200});assert.equal(loweredMobile.body.can_write,false);
+ await request('existing Pocket session loses write',M,{method:'POST',headers:W,body:item,status:403});
+ const stillEmpty=await request('denied writes left inventory empty',D,{headers:A,status:200});assert.equal(stillEmpty.body.length,0);
+ await request('owner archives synthetic staff',T+'/'+writer.id,{method:'DELETE',headers:A,status:204});
+ await request('archived Desktop access refused','/api/auth/me',{headers:writer.headers,status:401});
+ await request('archived Desktop refresh refused','/api/auth/refresh',{method:'POST',body:{refresh_token:writer.token.refresh_token},status:401});
+ await request('archived Pocket access refused',M,{headers:W,status:401});
+ await request('archived Pocket refresh refused','/api/mobile/refresh-token',{method:'POST',body:{refresh_token:writerPocket.refresh_token},status:401});
+ const finalTeam=await request('owner team remains accessible',T+'/',{headers:A,status:200});assert(finalTeam.body.some(x=>x.id===reader.id));assert(!finalTeam.body.some(x=>x.id===writer.id&&!x.is_archived));
+ await request('other cabinet unaffected',D,{headers:B,status:200});
+ console.log('LOT01_SESSION_TEAM_CONTRACT_PASS '+evidence.length);
+
 }finally{fs.writeFileSync(process.env.DC_EVIDENCE+'/stock-r0-status.json',JSON.stringify(evidence,null,2))}
