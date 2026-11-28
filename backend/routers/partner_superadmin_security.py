@@ -33,7 +33,7 @@ def _explicit_bearer_claims(request: Request) -> dict:
         return {}
 
 
-def _enforce_marketplace_control_plane_request(request: Request) -> None:
+def _enforce_marketplace_control_plane_request(request: Request, *, require_cookie_origin: bool = False) -> None:
     """Fail closed for P10 while allowing only WebAuthn-UV mobile sessions.
 
     Identity and SuperAdmin authority are validated by ``require_superadmin``.
@@ -54,7 +54,7 @@ def _enforce_marketplace_control_plane_request(request: Request) -> None:
         return
 
     authorization = str(request.headers.get("authorization") or "").strip()
-    if authorization.lower().startswith("bearer "):
+    if authorization.lower().startswith("bearer ") and not (require_cookie_origin and request.cookies.get("access_token")):
         return
 
     origin = str(request.headers.get("origin") or "").strip().rstrip("/").lower()
@@ -81,6 +81,24 @@ def _enforce_marketplace_control_plane_request(request: Request) -> None:
         )
 
 
+def require_pocket_platform_reader(request: Request, db=Depends(database.get_db)) -> models.User:
+    from backend.routers import mobile_legacy
+    from backend.services.mobile_biometric import require_platform_approval
+
+    authorization = str(request.headers.get("authorization") or "").strip()
+    user, tenant_id, claims = mobile_legacy._decode_mobile_identity(authorization, db)
+    if not is_superadmin_user(user):
+        raise _deny("MARKETPLACE_SUPERADMIN_REQUIRED", "Accès SuperAdmin requis.")
+    if claims.get("biometric_uv") is not True:
+        raise _deny("MARKETPLACE_SUPERADMIN_BIOMETRIC_REQUIRED", "Vérification biométrique récente requise.")
+    require_platform_approval(db, user_id=user.id, employer_id=int(tenant_id),
+                              device_id=claims["device_id"],
+                              proof=request.headers.get("x-platform-approval", ""))
+    if request.method.upper() not in {"GET", "HEAD"}:
+        raise _deny("MARKETPLACE_SUPERADMIN_MOBILE_READ_ONLY", "Mutations SuperAdmin mobile non autorisées.")
+    return user
+
+
 async def require_marketplace_superadmin(
     request: Request,
     db = Depends(database.get_db),
@@ -96,24 +114,11 @@ async def require_marketplace_superadmin(
     claims = _explicit_bearer_claims(request)
 
     if claims.get("type") == "mobile":
-        from backend.routers import mobile_legacy
-
-        user, _tenant_id, verified_claims = mobile_legacy._decode_mobile_identity(authorization, db)
-        if not is_superadmin_user(user):
-            raise _deny("MARKETPLACE_SUPERADMIN_REQUIRED", "Accès SuperAdmin requis.")
-        if verified_claims.get("biometric_uv") is not True:
-            raise _deny(
-                "MARKETPLACE_SUPERADMIN_BIOMETRIC_REQUIRED",
-                "Le control-plane Marketplace requiert une vérification biométrique récente sur mobile.",
-            )
-        from backend.services.mobile_biometric import require_platform_approval
-        require_platform_approval(db, user_id=user.id, employer_id=int(_tenant_id),
-                                  device_id=verified_claims["device_id"],
-                                  proof=request.headers.get("x-platform-approval", ""))
-        # R5-A is read-only. Do not allow the existing mobile UV exception
-        # to authorize any Marketplace mutation before R5-B is qualified.
-        if request.method.upper() not in {"GET", "HEAD"}:
-            raise _deny("MARKETPLACE_SUPERADMIN_MOBILE_READ_ONLY", "Mutations SuperAdmin mobile non autorisées.")
+        user = require_pocket_platform_reader(request, db)
+        # Legacy mobile access is confined to the previously qualified summary.
+        # Detailed desktop payloads are not part of the minimized Pocket API.
+        if request.url.path != "/api/superadmin/marketplace/overview":
+            raise _deny("MARKETPLACE_SUPERADMIN_MOBILE_SCOPE", "Utilisez la façade Pocket dédiée.")
         return user
 
     token_header = None

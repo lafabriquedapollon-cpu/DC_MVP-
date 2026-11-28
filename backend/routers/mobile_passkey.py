@@ -117,7 +117,7 @@ def approve_platform_passkey(
     # Desktop identity/Station is resolved by the canonical desktop dependency.
     # Cookie-based mutations must also satisfy the existing control-plane policy.
     from backend.routers.partner_superadmin_security import _enforce_marketplace_control_plane_request
-    _enforce_marketplace_control_plane_request(request)
+    _enforce_marketplace_control_plane_request(request, require_cookie_origin=True)
     check_rate_limit(request, scope="platform-passkey-approval")
     if body.confirm is not True:
         raise HTTPException(status_code=409, detail="Confirmation explicite requise.")

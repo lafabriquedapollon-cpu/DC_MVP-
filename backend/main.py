@@ -671,7 +671,7 @@ app.add_middleware(
     allow_origin_regex=_DEV_LAN_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Platform-Approval"],
     expose_headers=["X-Total-Count", "X-Cephalo-Analysis-Id", "X-Cephalo-Revision", "X-Cephalo-Archive-Replayed", "Content-Disposition"],
 )
 from backend.routers import (

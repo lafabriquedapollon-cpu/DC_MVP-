@@ -28,6 +28,7 @@ RP = "digitalcrown.local"
 M = "/api/mobile"
 P = M + "/passkey"
 S = "/api/superadmin/marketplace/overview"
+F = M + "/superadmin"
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 rows = []
 
@@ -169,11 +170,42 @@ def run():
             token=desktop, cookie=cookie, data={**approve_body, "password": "wrong-synthetic-password"})
     request("explicit approval confirmation required", approve_path, 409, method="POST",
             token=desktop, cookie=cookie, data={**approve_body, "confirm": False})
+    request("mixed cookie bearer approval requires trusted browser origin", approve_path, 403,
+            method="POST", token=desktop, cookie=cookie + "; access_token=" + desktop,
+            data=approve_body, origin="https://invalid.example")
     granted, _ = request("independent Desktop approval", approve_path, 200, method="POST",
                          token=desktop, cookie=cookie, data=approve_body)
     approval = granted["approval"]
     assert granted["expires_in"] == 30 * 86400
     request("active verified platform read", S, 200, token=uv, approval=approval)
+    request("facade anonymous denied", F + "/clients", 401)
+    request("facade desktop bearer denied", F + "/clients", 401, token=desktop)
+    request("facade durable platform bearer denied", F + "/clients", 423, token=token)
+    request("facade UV without independent approval denied", F + "/clients", 403, token=uv)
+    request("facade ordinary bearer denied", F + "/trial-codes", 403, token=other)
+    clients, _ = request("facade actual client directory", F + "/clients", 200, token=uv, approval=approval)
+    assert len(clients) == 3 and {c["email"] for c in clients} == {
+        "ci-platform-admin@example.com", "ci-owner@example.com", "ci-other@example.com"}
+    expected_client_keys = {"id", "email", "nom_complet", "role", "is_active", "is_licensed",
+                            "license_expires_at", "is_archived", "is_suspended", "subscription_plan"}
+    assert all(set(c) == expected_client_keys for c in clients)
+    page, _ = request("facade bounded pagination", F + "/clients?limit=1&offset=1", 200, token=uv, approval=approval)
+    assert len(page) == 1 and page[0]["id"] == clients[1]["id"]
+    request("facade excessive limit refused", F + "/clients?limit=101", 422, token=uv, approval=approval)
+    # Create only an inert, isolated synthetic trial via the real Desktop API; no email or activation.
+    trial, _ = request("Desktop synthetic trial fixture", "/api/superadmin/trial-codes", 200, method="POST",
+                       token=desktop, cookie=cookie, data={"email":"ci-trial@example.com","trial_days":14,
+                       "cabinet_name":"CI SYNTHETIC","notes":"CI PRIVATE MARKER"})
+    trials, _ = request("facade actual trial metadata", F + "/trial-codes", 200, token=uv, approval=approval)
+    assert len(trials) == 1 and trials[0]["id"] == trial["id"] and trials[0]["trial_days"] == 14
+    assert set(trials[0]) == {"id","email","cabinet_name","trial_days","expires_at","consumed_at","revoked_at","created_at"}
+    assert trial["code"] not in json.dumps(trials) and "CI PRIVATE MARKER" not in json.dumps(trials)
+    overview, _ = request("facade Marketplace summary", F + "/marketplace/overview", 200, token=uv, approval=approval)
+    desktop_overview, _ = request("Desktop Marketplace summary for comparison", S, 200, token=desktop, cookie=cookie)
+    assert overview == desktop_overview
+    request("facade read-only clients POST refused", F + "/clients", 405, method="POST", token=uv, approval=approval, data={})
+    request("facade read-only trials POST refused", F + "/trial-codes", 405, method="POST", token=uv, approval=approval, data={})
+    request("legacy detailed Marketplace mobile route denied", "/api/superadmin/marketplace/orders", 403, token=uv, approval=approval)
     request("approval alone is not Desktop session", "/api/superadmin/clients", 401, token=approval)
     request("approval alone is not mobile UV session", S, 401, token=approval)
     request("tampered approval refused", S, 403, token=uv, approval=approval[:-5]+"xxxxx")
@@ -196,6 +228,7 @@ def run():
     request("enable re-enrolled credential", P + "/enable", 200, method="POST", token=uv2, data={"credential_id": b64(cid)})
     request("old UV remains denied after same credential re-enrollment", S, 423, token=uv)
     request("old approval cannot authorize re-enrollment", S, 403, token=uv2, approval=approval)
+    request("facade old approval cannot authorize re-enrollment", F + "/clients", 403, token=uv2, approval=approval)
     request("fresh UV without new Desktop approval denied", S, 403, token=uv2)
     granted2, _ = request("Desktop approves replacement credential", approve_path, 200, method="POST",
                           token=desktop, cookie=cookie, data=approve_body)
@@ -219,6 +252,7 @@ def run():
     request("ordinary credential enabled", P + "/enable", 200, method="POST", token=ordinary_uv,
             data={"credential_id": b64(ordinary_cid)})
     request("ordinary active UV never gains platform authority", S, 403, token=ordinary_uv, approval=approval)
+    request("facade ordinary active UV denied with approval", F + "/clients", 403, token=ordinary_uv, approval=approval)
 
     # Real HTTP races; no test-generated JWT, clock override or mocked verifier.
     superseded = options(token)
@@ -250,6 +284,7 @@ def run():
     time.sleep(winner["expires_in"] + 2)
     assert time.monotonic() - start >= winner["expires_in"]
     request("expired UV token refused on platform API", S, 401, token=uv3, approval=approval)
+    request("facade expired UV denied", F + "/clients", 401, token=uv3, approval=approval)
     request("expired UV token refused on passkey API", P + "/status", 401, token=uv3)
     request("expired challenge refused", P + "/authentication/verify", 410, method="POST",
             token=token, origin=ORIGIN, data=verify_body(expiring_challenge, assertion(expiring_challenge, key, cid, 5)))
@@ -266,6 +301,7 @@ def run():
     request("desktop revokes paired platform device", "/api/admin/mobile-devices/" + mobile["device_id"] + "/revoke",
             200, method="POST", token=desktop, cookie=cookie)
     request("revoked device current UV refused", S, 401, token=uv3, approval=approval)
+    request("facade revoked device denied", F + "/trial-codes", 401, token=uv3, approval=approval)
     request("revoked device durable refresh refused", M + "/refresh-token", 401, method="POST",
             data={"refresh_token": mobile["refresh_token"]})
     request("other device remains alive", P + "/status", 200, token=other)

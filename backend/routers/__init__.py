@@ -204,6 +204,8 @@ mobile.get_lan_base_url = mobile_legacy.get_lan_base_url
 mobile.get_lan_frontend_url = mobile_legacy.get_lan_frontend_url
 install_mobile_biometric_identity_gate(mobile_legacy)
 mobile.router.include_router(mobile_passkey.router)
+from . import mobile_platform_read as mobile_platform_read
+mobile.router.include_router(mobile_platform_read.router)
 
 # Marketplace P6 replaces the legacy manual DRAFT->SENT PATCH by a dispatch-proof gate,
 # registers transport/procurement/receipt tables before create_all(), then mounts all
