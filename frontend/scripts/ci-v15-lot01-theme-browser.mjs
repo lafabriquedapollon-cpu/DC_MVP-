@@ -17,8 +17,13 @@ try{
  browser=await chromium.launch({executablePath:process.env.DC_CHROME,headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
  const context=await browser.newContext();
  const page=await context.newPage();
- await page.goto('http://127.0.0.1:'+server.address().port);
- await page.waitForFunction(()=>!!window.DCTheme);
+ const pageErrors=[];
+ page.on('pageerror',err=>{pageErrors.push(err.name+': '+err.message.slice(0,250));});
+ const response=await page.goto('http://127.0.0.1:'+server.address().port,{waitUntil:'load'});
+ assert.equal(response.status(),200);
+ const ready=await page.evaluate(()=>typeof window.DCTheme==='object'&&typeof window.DCTheme.applyRuntimeTheme==='function');
+ console.log('LOT01_D_BOOT '+JSON.stringify({ready,pageErrors}));
+ assert(ready&&pageErrors.length===0,'theme bundle did not initialize');
  const result=await page.evaluate(()=>{
   const a=window.DCTheme;const out=[];
   const run=(label,fn)=>{try{if(!fn())throw Error('assertion');out.push({label,pass:true})}catch(e){out.push({label,pass:false,error:e.name})}};

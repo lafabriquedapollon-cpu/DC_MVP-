@@ -30,7 +30,7 @@ jobs:
           mkdir -p "$evidence" "$lab/home"
           git rev-parse HEAD > "$evidence/head.txt"
           trap 'sudo ip netns del "$ns" 2>/dev/null || true; rm -rf "$lab" "$RUNNER_TEMP/dc-theme-tools"' EXIT
-          frontend/node_modules/.bin/esbuild frontend/scripts/ci-v15-lot01-theme-entry.ts --bundle --platform=browser --format=iife --global-name=DCTheme --outfile="$lab/bundle.js"
+          frontend/node_modules/.bin/esbuild frontend/scripts/ci-v15-lot01-theme-entry.ts --bundle --platform=browser --format=iife --global-name=DCTheme --define:import.meta.env='{"VITE_MOBILE_API_PORT":"8005","VITE_API_URL":"http://127.0.0.1:8005"}' --outfile="$lab/bundle.js"
           sudo ip netns add "$ns"
           sudo ip netns exec "$ns" ip link set lo up
           chrome=$(command -v google-chrome || command -v chromium)
