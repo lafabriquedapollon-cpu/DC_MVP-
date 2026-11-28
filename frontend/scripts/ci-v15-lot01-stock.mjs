@@ -94,6 +94,10 @@ try{
  await request('other owner cannot change staff rights',T+'/'+reader.id,{method:'PUT',headers:B,body:{permissions:{patients:true,stock_write:true}},status:404});
  await request('other owner cannot archive staff',T+'/'+reader.id,{method:'DELETE',headers:B,status:404});
  await request('owner cannot inject privileged role',T+'/'+reader.id,{method:'PUT',headers:A,body:{role:'ADMIN',is_superadmin:true},status:422});
+ // Parallel B: unknown identity labels cannot be introduced as clinical staff roles.
+ for(const role of ['TECHNIQUE','LABO','PROTHESISTE','PATIENT','SUPERADMIN']){
+   await request('B owner cannot inject role '+role,T+'/'+reader.id,{method:'PUT',headers:A,body:{role},status:422});
+ }
  const unchangedReader=await request('reader privileges unchanged','/api/auth/me',{headers:reader.headers,status:200});
  assert.equal(unchangedReader.body.role,'SECRETAIRE');assert.equal(unchangedReader.body.is_superadmin,false);assert.equal(unchangedReader.body.permissions.stock_write,false);
  await request('ordinary owner not SuperAdmin',S,{headers:A,status:403});
@@ -123,7 +127,7 @@ try{
  const finalTeam=await request('owner team remains accessible',T+'/',{headers:A,status:200});assert(finalTeam.body.some(x=>x.id===reader.id));assert(!finalTeam.body.some(x=>x.id===writer.id&&!x.is_archived));
  await request('other cabinet unaffected',D,{headers:B,status:200});
  console.log('LOT01_SESSION_TEAM_CONTRACT_PASS '+evidence.length);
- assert.equal(evidence.length,76);
+ assert.equal(evidence.length,81);
  }else{
  // Fresh independent runner, database, rate-limit store and credentials.
  const owner=await login('ci-owner@example.com'), other=await login('ci-other@example.com');
