@@ -125,6 +125,8 @@ def stage_revoke_enrollment(db, *, actor_id,cabinet_id,lab_id,password,confirm):
     result=db.execute(update(e).where(e.c.nonce==row["nonce"],e.c.cancelled_at.is_(None)).values(cancelled_at=now))
     if result.rowcount!=1:
         _deny()
+    # Read lifecycle state after the guarded write, not from the stale pre-write snapshot.
+    row=db.execute(select(e).where(e.c.nonce==row["nonce"])).mappings().one()
     if row["used_at"] is not None:
         p=row["principal_id"]
         for table,condition in ((principals,principals.c.id==p),
