@@ -4,6 +4,7 @@ import { api } from '../../services/api';
 import { Shield, CalendarRange, UserPlus, Zap, CheckCircle2, XCircle, Mail, Archive, AlertTriangle, MessageSquare, History, Ban, Search, Filter, Store } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { DigitalCrownLoader } from '../../components/DigitalCrownLoader';
+import { PocketRevocationInbox } from './PocketRevocationInbox';
 import { PocketPlatformAuthorization } from './PocketPlatformAuthorization';
 
 interface ClientStats {
@@ -271,6 +272,7 @@ export const SuperAdminDashboard: React.FC = () => {
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 mt-8 space-y-6">
         <PocketPlatformAuthorization />
+        <PocketRevocationInbox />
         <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
           <div className="rounded-[2rem] border border-border-main bg-card p-6 shadow-sm">
             <div className="mb-5">

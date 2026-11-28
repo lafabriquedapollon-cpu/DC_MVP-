@@ -13,7 +13,7 @@ const req=createRequire(path.join(process.env.DC_BROWSER_TOOLS,'package.json'));
 assert.equal(req('playwright-core/package.json').version,'1.61.0');
 const {chromium}=req('playwright-core');
 const origin='https://digitalcrown.local:8005',api='http://127.0.0.1:8008';
-const rows=[];let stage='startup',browser,desktop,pocket,d,p,cdp;
+const rows=[];let stage='startup',browser,approvalBrowser,desktop,pocket,d,p,cdp;
 const mark=label=>{rows.push({label,pass:true});console.log('LOT01_HTTPS_CASE '+JSON.stringify(rows.at(-1)))};
 const allowedPaths=new Set(['/api/auth/login','/api/auth/me','/api/mobile/bridge-pairing','/api/mobile/claim-token','/api/mobile/passkey/status','/api/mobile/passkey/registration/options','/api/mobile/passkey/registration/verify','/api/mobile/passkey/authentication/options','/api/mobile/passkey/authentication/verify','/api/mobile/passkey/enable','/api/mobile/passkey/platform-devices','/api/mobile/passkey/platform-approval','/api/mobile/passkey/platform-approval/claim','/api/mobile/passkey/platform-eligibility','/api/mobile/superadmin/clients','/api/mobile/superadmin/trial-codes','/api/mobile/superadmin/marketplace/overview']);
 const observed=[];
@@ -44,7 +44,7 @@ try{
     '--disable-background-networking','--disable-sync','--disable-quic','--no-proxy-server',
     '--host-resolver-rules=MAP digitalcrown.local 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
     '--ignore-certificate-errors-spki-list='+process.env.DC_TLS_SPKI]});
-  const context=async()=>{const c=await browser.newContext({viewport:{width:1280,height:900},serviceWorkers:'block'});
+  const context=async(instance=browser)=>{const c=await instance.newContext({viewport:{width:1280,height:900},serviceWorkers:'block'});
     await c.route('**/*',r=>new URL(r.request().url()).origin===origin?r.continue():r.abort());return c};
   desktop=await context();d=await desktop.newPage();stage='desktop-login';
   await d.goto(origin+'/login');assert(await d.evaluate(()=>window.isSecureContext&&location.origin==='https://digitalcrown.local:8005'));
@@ -240,6 +240,58 @@ try{
   stage='multi-tab-reauth';
   await p.getByRole('button',{name:'Vérifier ma biométrie'}).click();await waitState('ready');
   mark('second tab requires UV and peer tab clears data and in-memory authority');
+  stage='mutation-independent-desktop';
+  approvalBrowser=await chromium.launch({headless:true,executablePath:process.env.DC_CHROME,args:[
+    '--disable-background-networking','--disable-sync','--disable-quic','--no-proxy-server',
+    '--host-resolver-rules=MAP digitalcrown.local 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
+    '--ignore-certificate-errors-spki-list='+process.env.DC_TLS_SPKI]});
+  const mutationDesktop=await context(approvalBrowser),md=await mutationDesktop.newPage();
+  await md.goto(origin+'/login');
+  await md.locator('input[type=email]').fill('ci-platform-admin@example.com');
+  await md.locator('input[type=password]').fill(process.env.DC_SYNTH_PASSWORD);
+  await response(md,'/api/auth/login','POST',200,()=>md.locator('button[type=submit]').first().click());
+  await md.waitForURL(u=>u.pathname==='/dashboard',{timeout:60000});
+  await md.waitForFunction(()=>JSON.parse(localStorage.getItem('auth-storage')||'null')?.state?.user?.is_superadmin===true,null,{timeout:45000});
+  await md.goto(origin+'/super-admin');
+  const inbox=md.locator('[data-lot01-revocation-inbox]');await inbox.waitFor({timeout:30000});
+  await p.bringToFront();assert(await p.evaluate(()=>!document.hidden));assert(await md.evaluate(()=>!document.hidden));
+  await response(p,'/api/mobile/superadmin/trial-codes','GET',200,()=>p.getByRole('button',{name:'Essais',exact:true}).click());
+  await waitState('ready');await p.setViewportSize({width:390,height:900});
+  const trialCard=p.locator('article').filter({hasText:'ci-trial@example.com'});
+  await trialCard.getByRole('button',{name:'Demander la révocation'}).waitFor();
+  const pendingResponse=p.waitForResponse(r=>/\/api\/mobile\/superadmin\/trial-codes\/\d+\/revocation-request$/.test(new URL(r.url()).pathname)&&r.request().method()==='POST');
+  await trialCard.getByRole('button',{name:'Demander la révocation'}).click();
+  const pendingResult=await pendingResponse;assert.equal(pendingResult.status(),200);assert(pendingResult.headers()['cache-control'].includes('no-store'));
+  await trialCard.getByText('En attente de confirmation Desktop',{exact:false}).waitFor();
+  assert.equal(await trialCard.getByRole('button',{name:'Confirmer la révocation définitive'}).count(),0);
+  await shot(p,'https-pocket-revocation-pending-390');
+  await response(md,'/api/mobile/superadmin/revocation-requests','GET',200,()=>inbox.getByRole('button',{name:'Actualiser les demandes'}).click());
+  await inbox.getByText('ci-trial@example.com',{exact:true}).waitFor();
+  await inbox.getByRole('button',{name:'Examiner cette demande'}).click();
+  const confirmButton=inbox.getByRole('button',{name:'Approuver la révocation ciblée'});
+  assert(await confirmButton.isDisabled());
+  await shot(md,'https-desktop-revocation-review-1280');
+  await inbox.getByLabel('Mot de passe de confirmation').fill(process.env.DC_SYNTH_PASSWORD);
+  await inbox.locator('input[type=checkbox]').check();
+  const approvalResponse=md.waitForResponse(r=>/\/api\/mobile\/superadmin\/revocation-requests\/[0-9a-f-]+\/approve$/.test(new URL(r.url()).pathname)&&r.request().method()==='POST');
+  await confirmButton.click();const approvalResult=await approvalResponse;assert.equal(approvalResult.status(),200);
+  await inbox.getByText('Accord donné.',{exact:false}).waitFor();
+  assert.equal(await inbox.locator('input[type=password]').count(),0);
+  assert(await p.evaluate(()=>!document.hidden));
+  mark('independent real Desktop confirms exact request with explicit password and checkbox');
+  const statusResponse=p.waitForResponse(r=>/\/api\/mobile\/superadmin\/trial-codes\/\d+\/revocation-status$/.test(new URL(r.url()).pathname)&&r.request().method()==='POST');
+  await trialCard.getByRole('button',{name:'Vérifier l’accord Desktop'}).click();
+  assert.equal((await statusResponse).status(),200);
+  await trialCard.getByRole('button',{name:'Confirmer la révocation définitive'}).waitFor();
+  await shot(p,'https-pocket-revocation-approved-390');
+  const executionResponse=p.waitForResponse(r=>/\/api\/mobile\/superadmin\/trial-codes\/\d+\/revoke$/.test(new URL(r.url()).pathname)&&r.request().method()==='POST');
+  await trialCard.getByRole('button',{name:'Confirmer la révocation définitive'}).click();
+  const mutationResult=await executionResponse;assert.equal(mutationResult.status(),200);assert(mutationResult.headers()['cache-control'].includes('no-store'));
+  await waitState('ready');await trialCard.getByText('Révoqué · 14 jours',{exact:true}).waitFor();
+  assert.equal(await trialCard.getByRole('button',{name:'Demander la révocation'}).count(),0);
+  await shot(p,'https-pocket-revocation-complete-390');
+  mark('actual HTTPS UI mutation refreshed persisted revoked status; no automatic replay');
+  await mutationDesktop.close();await approvalBrowser.close();approvalBrowser=null;
   stage='revoke-device';
   const device=await p.evaluate(async()=>{const {MobileStorage}=await import('/src/services/zka/MobileStorage.ts');return (await MobileStorage.capturePlatformVaultContext()).deviceId});
   assert(typeof device==='string'&&device.length===36);
@@ -267,9 +319,10 @@ try{
   throw Error('HTTPS_E2E_FAILED_'+stage);
 }
 finally{
+  if(approvalBrowser)await approvalBrowser.close();
   if(browser)await browser.close();
   proxy.closeAllConnections();await new Promise(resolve=>proxy.close(resolve));
   fs.writeFileSync(path.join(evidence,'https-status.json'),JSON.stringify(rows));
 }
-assert.equal(rows.length,26);
+assert.equal(rows.length,32);
 assert(rows.every(r=>r.pass===true),'accessibility gate failed; see explicit focus and reflow diagnostics');

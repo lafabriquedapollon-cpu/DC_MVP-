@@ -1,12 +1,12 @@
-name: V1.5 LOT01 R5 - HTTPS end-to-end
+name: V1.5 LOT01 A - HTTPS Desktop Pocket revocation UI
 on:
   push:
-    branches: [ci/v15-lot01-stock-r0-20261128, ci/v15-lot01-https-only-20261128, ci/v15-lot01-parallel-convergence-20261128]
+    branches: [ci/v15-lot01-convergence-a-race-20261128]
     paths: ['frontend/src/**', '.github/workflows/v15-lot01-https.yml', 'frontend/scripts/ci-v15-lot01-https.mjs']
 permissions:
   contents: read
 concurrency:
-  group: v15-lot01-r5-https-convergence
+  group: v15-lot01-a-revocation-ui
   cancel-in-progress: true
 jobs:
   desktop-integration:
@@ -313,7 +313,7 @@ jobs:
           export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=digitalcrown.local
           (cd frontend && exec node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5173) > "$DC_LAB_ROOT/vite.log" 2>&1 &
           vite_pid=$!
-          timeout --kill-after=10s 360s node frontend/scripts/ci-v15-lot01-https.mjs
+          timeout --kill-after=10s 480s node frontend/scripts/ci-v15-lot01-https.mjs
           "$DC_PYTHON" - <<'PY'
           import json, os
           from pathlib import Path
@@ -332,6 +332,13 @@ jobs:
                       models.AuditLog.severity == "CRITICAL").all()
                   assert len(matches) == 1
                   rows.append({"label": action + " persisted with exact actor and device", "pass": True})
+              trial = db.query(models.TrialActivationCode).filter_by(email="ci-trial@example.com").one()
+              assert trial.revoked_at is not None and trial.consumed_at is None
+              rows.append({"label":"UI target revocation persisted in independent DB session","pass":True})
+              for action in ("PLATFORM_TRIAL_REVOCATION_APPROVED","PLATFORM_TRIAL_REVOKED"):
+                  matches=db.query(models.AuditLog).filter_by(user_id=admin.id,employer_id=admin.get_employer_id(),action=action,resource_type="TrialActivationCode",resource_id=str(trial.id),severity="CRITICAL").all()
+                  assert len(matches)==1
+                  rows.append({"label":action+" persisted once for UI target","pass":True})
               Path(os.environ["DC_EVIDENCE"], "https-db-status.json").write_text(json.dumps(rows))
               for row in rows:
                   print("LOT01_HTTPS_DB_CASE " + json.dumps(row))
