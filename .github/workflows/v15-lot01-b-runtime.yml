@@ -222,7 +222,10 @@ jobs:
                   from backend import database
                   assert_lab()
                   metadata.create_all(database.engine)
+                  before=len(app.router.routes)
                   app.include_router(create_router(), prefix=PREFIX)
+                  added=app.router.routes[before:]
+                  app.router.routes[:]=added+app.router.routes[:before]
                   root=os.environ["DC_LAB_ROOT"]
                   config = uvicorn.Config(app, host="127.0.0.1", port=8443, ssl_keyfile=root+"/lab-key.pem", ssl_certfile=root+"/lab-cert.pem", proxy_headers=False)
                   config.load()
