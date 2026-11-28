@@ -12,6 +12,7 @@ from backend.services.pocket_external_store_candidate import metadata,principals
 from backend.services.pocket_external_device_candidate import devices,now_utc,stage_challenge,message
 from backend.services.pocket_external_lab_projection_candidate import lab_bindings,stage_lab_projection,ProjectionRefused
 from backend.services.pocket_external_lab_authority_candidate import stage_grant
+from backend.services.pocket_external_lab_session_candidate import issuance,stage_session_challenge,stage_issue_session,SessionRefused
 from backend.services.pocket_external_lab_enrollment_candidate import enrollments,stage_prepare,stage_complete,stage_revoke_enrollment,fingerprint,AuthorityRefused
 lab=Path(os.environ["DC_LAB_ROOT"]).resolve(strict=True)
 dbpath=lab/"fresh-rehearsal.db"
@@ -28,7 +29,7 @@ def call(fn,**args):
     try:
         with database.SessionLocal() as db:
             with db.begin(): return True,fn(db,**args)
-    except AuthorityRefused: return False,None
+    except (AuthorityRefused,SessionRefused): return False,None
 def count(table):
     with database.SessionLocal() as db:
         return db.execute(select(func.count()).select_from(table)).scalar_one()
@@ -82,8 +83,36 @@ try:
         p=db.execute(select(principals)).mappings().one()
         check("exact cabinet lab and principal binding",b["cabinet_id"]==ca and b["lab_id"]==la and b["organization_id"]==p["organization_id"] and d["principal_id"]==p["id"]==row["principal_id"])
         check("public key only",d["public_key_hex"]==public(key))
-    # Explicit grant and synthetic session only; no production session issuer.
-    raw=secrets.token_hex(32); now=now_utc()
+    # Actual candidate issuance, using ephemeral LAB keys only.
+    def challenge(**kw):
+        return call(stage_session_challenge,**{**dict(device_id=row["device_id"],cabinet_id=ca),**kw})
+    def mint(proof,signer=key,**kw):
+        return call(stage_issue_session,**{**dict(nonce=proof["nonce"],signature_hex=sign(signer,proof)),**kw})
+    check("unknown device session refused",not challenge(device_id="missing")[0])
+    check("cross cabinet session refused",not challenge(cabinet_id=cb)[0])
+    ok,proof=challenge();check("active enrolled device receives session challenge",ok)
+    check("challenge alone creates no session",count(sessions)==0)
+    check("wrong session signer refused",not mint(proof,other)[0])
+    check("malformed session signature refused",not mint(proof,signature_hex="bad")[0])
+    check("unknown session nonce refused",not mint(proof,nonce="0"*64)[0])
+    check("failed issuance creates no session",count(sessions)==0)
+    with database.SessionLocal() as db:
+        tx=db.begin()
+        stage_issue_session(db,nonce=proof["nonce"],signature_hex=sign(key,proof))
+        tx.rollback()
+    check("issuance rollback leaves no session",count(sessions)==0)
+    ok,token=mint(proof);check("correct device proof issues token",ok and len(token["token"])==64)
+    raw=token["token"]
+    check("session proof replay refused",not mint(proof)[0])
+    with database.SessionLocal() as db:
+        stored=db.execute(select(sessions)).mappings().one()
+        check("only domain-separated token digest persisted",stored["token_digest"]==digest_token(raw) and stored["token_digest"]!=raw)
+        check("token scope and ten minute lifetime",stored["principal_id"]==row["principal_id"] and stored["device_id"]==row["device_id"] and stored["expires_at"]-stored["issued_at"]==timedelta(minutes=10))
+    ok,expired_session=challenge();assert ok
+    with database.SessionLocal() as db:
+        with db.begin():db.execute(update(issuance).where(issuance.c.nonce==expired_session["nonce"]).values(expires_at=now_utc()-timedelta(seconds=1)))
+    check("expired session challenge refused",not mint(expired_session)[0])
+    now=now_utc()
     with database.SessionLocal() as db:
         with db.begin():
             patient=models.Patient(nom="SYNTH_ENROLL_PATIENT",prenom="SYNTH",date_naissance=now,sexe="M",employer_id=ca)
@@ -92,7 +121,6 @@ try:
             db.add(act);db.flush()
             job=models.LabJob(patient_id=patient.id,act_id=act.id,lab_id=la,material="SYNTH",type="SYNTH",notes="SYNTH_PRIVATE",deadline=now+timedelta(days=1),status=models.LabJobStatus.SENT)
             db.add(job);db.flush();order=job.id
-            db.execute(insert(sessions).values(token_digest=digest_token(raw),principal_id=row["principal_id"],device_id=row["device_id"],issued_at=now,expires_at=now+timedelta(minutes=10)))
             stage_grant(db,actor_id=ca,cabinet_id=ca,principal_id=row["principal_id"],order_id=order,password=password,confirm=True)
     def issue():
         with database.SessionLocal() as db:
@@ -107,17 +135,33 @@ try:
         except ProjectionRefused:return None
     proof=issue()
     check("enrolled key can read explicitly granted minimal order",bool(proof) and read(proof)=={"order_id":order,"status":"SENT","deadline":(now+timedelta(days=1)).isoformat()})
+    old_raw=raw
+    old_proof=issue()
+    ok,renew=challenge();assert ok
+    ok,renewed=mint(renew);check("fresh proof rotates session",ok and renewed["token"]!=old_raw)
+    with database.SessionLocal() as db:
+        old=db.execute(select(sessions.c.revoked_at).where(sessions.c.token_digest==digest_token(old_raw))).scalar_one()
+        check("previous session revoked on rotation",old is not None)
+    check("rotated token cannot request proof",issue() is None)
+    check("prior signed read proof refused after rotation",read(old_proof) is None)
+    raw=renewed["token"]
+    next_proof=issue();check("new session signed read works",bool(next_proof) and read(next_proof) is not None)
     pending=issue();check("pre-revocation challenge exists",bool(pending))
+    ok,pending_session=challenge();assert ok
     check("foreign owner cannot revoke",not revoke(actor_id=cb)[0])
     check("owner revokes",revoke()[0])
     check("issued proof refused after enrollment revoke",read(pending) is None)
     check("new challenge refused after enrollment revoke",issue() is None)
+    check("pending session issuance refused after revoke",not mint(pending_session)[0])
+    check("new session challenge refused after revoke",not challenge()[0])
     check("repeat revocation denied",not revoke()[0])
     check("revoked cannot reenroll",not prepare()[0] and not complete(row)[0])
     database.engine.dispose()
     with database.SessionLocal() as db:
-        check("revocation persists across connection",all(db.execute(select(t.c.revoked_at)).scalar_one() is not None for t in (principals,devices,lab_bindings,sessions,assignments)))
+        check("revocation persists across connection",all(all(v is not None for v in db.execute(select(t.c.revoked_at)).scalars().all()) for t in (principals,devices,lab_bindings,sessions,assignments)))
         check("exact audit lifecycle",all(db.query(models.AuditLog).filter_by(action=a,user_id=ca,employer_id=ca,resource_type="Lab",resource_id=str(la),severity="CRITICAL").count()==1 for a in ("EXTERNAL_LAB_ENROLLMENT_PREPARED","EXTERNAL_LAB_ENROLLMENT_COMPLETED","EXTERNAL_LAB_ENROLLMENT_REVOKED")))
+    with database.SessionLocal() as db:
+        check("two committed issuances audited without token",db.query(models.AuditLog).filter_by(action="EXTERNAL_LAB_SESSION_ISSUED",resource_type="Lab",resource_id=str(la),severity="CRITICAL").count()==2)
     ok,expired=prepare(lab_id=lc,public_key_hex=public(other),verified_fingerprint=fingerprint(public(other)));assert ok
     with database.SessionLocal() as db:
         with db.begin():db.execute(update(enrollments).where(enrollments.c.nonce==expired["nonce"]).values(expires_at=now_utc()-timedelta(seconds=1)))
@@ -154,16 +198,38 @@ EXPECTED_LABELS = [
     "no automatic order grant or session",
     "exact cabinet lab and principal binding",
     "public key only",
+    "unknown device session refused",
+    "cross cabinet session refused",
+    "active enrolled device receives session challenge",
+    "challenge alone creates no session",
+    "wrong session signer refused",
+    "malformed session signature refused",
+    "unknown session nonce refused",
+    "failed issuance creates no session",
+    "issuance rollback leaves no session",
+    "correct device proof issues token",
+    "session proof replay refused",
+    "only domain-separated token digest persisted",
+    "token scope and ten minute lifetime",
+    "expired session challenge refused",
     "enrolled key can read explicitly granted minimal order",
+    "fresh proof rotates session",
+    "previous session revoked on rotation",
+    "rotated token cannot request proof",
+    "prior signed read proof refused after rotation",
+    "new session signed read works",
     "pre-revocation challenge exists",
     "foreign owner cannot revoke",
     "owner revokes",
     "issued proof refused after enrollment revoke",
     "new challenge refused after enrollment revoke",
+    "pending session issuance refused after revoke",
+    "new session challenge refused after revoke",
     "repeat revocation denied",
     "revoked cannot reenroll",
     "revocation persists across connection",
     "exact audit lifecycle",
+    "two committed issuances audited without token",
     "expired challenge denied",
     "pending revocation accepted",
     "cancelled challenge denied",
