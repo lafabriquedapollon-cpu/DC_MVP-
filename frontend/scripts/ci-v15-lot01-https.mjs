@@ -184,15 +184,24 @@ try{
   }finally{await p.evaluate(()=>{document.documentElement.style.fontSize=''})}
   if(focusOK&&reflowOK)mark('keyboard focus visible and 200 percent root text reflow at 390');
   else rows.push({label:'keyboard focus visible and 200 percent root text reflow at 390',pass:false});
-  stage='multi-tab';
+  stage='multi-tab-open';
   const second=await pocket.newPage();
   await second.bringToFront();await second.goto(origin+'/mobile/superadmin');
   await second.locator('[data-r5-platform-state="locked"]').waitFor({timeout:30000});
   assert.equal(await second.getByRole('region',{name:'Consultation plateforme'}).count(),0);
+  stage='multi-tab-peer-lock';
   await waitState('locked');await noData();
+  const retired=await p.evaluate(async()=>{
+    const {MobileStorage}=await import('/src/services/zka/MobileStorage.ts');
+    let ctxDenied=false;try{await MobileStorage.capturePlatformVaultContext()}catch{ctxDenied=true}
+    return {ctxDenied,unlocked:await MobileStorage.isBiometricVaultUnlocked(),tokenPresent:!!MobileStorage.getBiometricAccessToken(),hidden:document.hidden};
+  });
+  console.log('LOT01_HTTPS_PEER_LOCK '+JSON.stringify(retired));
+  assert(retired.ctxDenied&&!retired.unlocked&&!retired.tokenPresent,'peer must retire in-memory authority');
   await second.close();await p.bringToFront();
+  stage='multi-tab-reauth';
   await p.getByRole('button',{name:'Vérifier ma biométrie'}).click();await waitState('ready');
-  mark('second tab requires UV and background tab clears platform data');
+  mark('second tab requires UV and peer tab clears data and in-memory authority');
   stage='revoke-device';
   const device=await p.evaluate(async()=>{const {MobileStorage}=await import('/src/services/zka/MobileStorage.ts');return (await MobileStorage.capturePlatformVaultContext()).deviceId});
   assert(typeof device==='string'&&device.length===36);

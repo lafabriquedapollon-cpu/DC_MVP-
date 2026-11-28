@@ -28,6 +28,7 @@ export function PocketPlatformPage() {
   const active=useRef<AbortController|null>(null);
   const generation=useRef(0);
   const current=useRef<PlatformVaultContext|null>(null);
+  const peerChannel=useRef<BroadcastChannel|null>(null);
   const clear=useCallback((next:State='locked')=>{
     generation.current++; active.current?.abort(); active.current=null; current.current=null;
     if(ticket.current)ticket.current.value='';
@@ -50,7 +51,18 @@ export function PocketPlatformPage() {
     try{
       if(!isStablePasskeyOrigin()) {if(seq===generation.current)setState('origin');return;}
       if(!navigator.onLine) {if(seq===generation.current)setState('offline');return;}
-      if(mode==='unlock') await unlockMobilePasskey();
+      // A peer coordination channel carries only a lock notification, never
+      // identity, proof, ticket, or platform data. If unavailable, fail closed.
+      if(!peerChannel.current){if(seq===generation.current)setState('error');return;}
+      if(mode==='unlock'){
+        peerChannel.current.postMessage('lock-platform');
+        await unlockMobilePasskey();
+        // A late authenticator result must not undo a peer/visibility lock.
+        if(seq!==generation.current||controller.signal.aborted||document.hidden||!navigator.onLine){
+          MobileStorage.lockBiometricVault();
+          return;
+        }
+      }
       if(seq!==generation.current||controller.signal.aborted||document.hidden)return;
       let ctx:PlatformVaultContext;
       try{ctx=await MobileStorage.capturePlatformVaultContext()}catch{if(seq===generation.current)setState('locked');return;}
@@ -81,11 +93,29 @@ export function PocketPlatformPage() {
     const hide=()=>{if(document.hidden){MobileStorage.lockBiometricVault();clear();}};
     const lock=()=>clear();
     const offline=()=>clear('offline');
+    let peers:BroadcastChannel|null=null;
+    if(isStablePasskeyOrigin()){
+      try{
+        peers=new BroadcastChannel('digitalcrown-pocket-platform-lock-v1');
+        peers.onmessage=(event)=>{
+          if(event.data!=='lock-platform')return;
+          MobileStorage.lockBiometricVault();clear();
+        };
+        peerChannel.current=peers;
+        // Opening a second platform page always retires the first tab's
+        // in-memory authority, even if both pages report visible.
+        peers.postMessage('lock-platform');
+      }catch{
+        peers?.close();peers=null;peerChannel.current=null;
+      }
+    }
     document.addEventListener('visibilitychange',hide);window.addEventListener('offline',offline);
     window.addEventListener('digitalcrown:mobile-biometric-locked',lock);
     void run('read','clients',0);
     return ()=>{
       generation.current++;active.current?.abort();current.current=null;
+      if(peerChannel.current===peers)peerChannel.current=null;
+      peers?.close();
       document.removeEventListener('visibilitychange',hide);window.removeEventListener('offline',offline);window.removeEventListener('digitalcrown:mobile-biometric-locked',lock);
     };
   },[clear,run]);
